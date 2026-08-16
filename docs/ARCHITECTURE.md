@@ -190,15 +190,22 @@ then `[A-Za-z0-9._-]`.
 The synthetic userid format is `{user_prefix}-{role}-{random}@{realm}`,
 where `{random}` is an 8-character base32 suffix (~40 bits entropy,
 collision probability negligible at typical issuance rates; implementation
-may tune). Reject `user_prefix` or role name values that: (a) contain
-whitespace, `:`, or `/`, or (b) would cause the assembled userid to
-exceed a self-imposed 64-character ceiling (conservative bound; **TODO**:
-confirm exact PVE userid length limit against live PVE 9.2.10 source
-before release — the API schema does not publish a hard numeric length
-limit). Budget: `len(user_prefix) + len(role) + len(suffix) + len(realm)
-+ separators` must fit within 64 chars. Invalid values are rejected at
-config/role-write time with a clear error rather than failing at
-credential-issuance time.
+may tune). **Confirmed on PVE 9.2.10**: the full userid (including
+`@<realm>`) must be ≤ 64 characters. `POST /access/users` returns HTTP 400
+with format error "user name '<name>@<realm>' is too long (N > 64)"
+otherwise. The length budget is:
+```
+len(user_prefix) + 1 + len(role) + 1 + len(random_suffix) + 1 + len(realm) ≤ 64
+```
+(the three `1`s are the `-`, `-`, and `@` separators). With an 8-character
+random suffix and realm `pve` (3 chars), fixed overhead = 8 + 3 (two `-`
+and one `@`) + 3 (realm) = 14, leaving 50 characters to share between
+`user_prefix` and `role`. The exact budget scales with realm length (a
+longer realm leaves fewer chars). Reject `user_prefix` or role name values
+that: (a) contain whitespace, `:`, or `/`, or (b) would cause the
+assembled userid to exceed the 64-character limit. Invalid values are
+rejected at config/role-write time with a clear error rather than failing
+at credential-issuance time.
 
 
 `realm` specifies the authentication realm for synthetic users (default:
