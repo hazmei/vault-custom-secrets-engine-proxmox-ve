@@ -1,0 +1,1167 @@
+# Implementation Plan — Vault Secrets Engine for Proxmox VE
+
+## Overview
+
+This is a greenfield Go implementation of the Proxmox VE dynamic-secrets engine specified in `docs/ARCHITECTURE.md`. The plugin issues throwaway Proxmox API tokens by creating synthetic per-lease PVE users, adding them to operator-pre-created PVE groups (which cluster admins have already bound to desired ACL roles), and minting API tokens on those users. Revocation deletes the user, which cascades to remove tokens, group memberships, and ACL entries in one call. The plugin targets Proxmox VE 9.2.10 and is built on `hashicorp/vault/sdk`.
+
+## Locked Decisions
+
+These design choices are baked into the implementation and are **not open for revision** during initial implementation:
+
+- **Go module path**: `github.com/hazmei/vault-plugin-secrets-proxmox`
+- **DELETE `<mount>/config` guard**: ALWAYS requires `force=true` query parameter. The engine does NOT track active leases (no reliable SDK lease-count API; a counter would drift on crash/failover). Outstanding leases become non-revocable on config delete; operators must revoke leases first, then delete config.
+- **userid-collision retry bound**: 5 attempts maximum, then surface as internal error.
+- **Random suffix format**: 8-character lowercase base32 (Crockford-style alphabet without padding), generated from `crypto/rand` (~40 bits entropy).
+- **WAL kind name**: `"pve_user"`; `WALRollbackMinAge`: 5 minutes.
+- **Token `tokenid`**: Fixed as `vault` (every issued token has `tokenid=vault`; uniqueness comes from the per-lease unique userid).
+- **No active_lease_count counter**: The engine does NOT track a counter of active leases anywhere in storage (neither in config nor separate keys). Lease tracking is left to Vault core.
+- **TTL computation uses `framework.CalculateTTL`** (`vault/sdk/framework/lease.go`), not a hand-rolled `min()` helper. It already implements role-value → config-default → `sysView.DefaultLeaseTTL()` fallback, caps at `min(backendMaxTTL, sysView.MaxLeaseTTL())`, and caps renewals from `startTime` (the lease `IssueTime`). There is no `ttl.go`.
+- **No issuance-time requested TTL**: `<mount>/creds/:role` declares NO `ttl` field, matching the database and terraform secrets engines. The effective TTL comes from role values with config defaults as fallback; `increment` is passed to `CalculateTTL` only on renewal (from `req.Secret.Increment`).
+- **`expire=0` (unlimited TTL) policy**: The engine REFUSES issuance when the effective TTL resolves to 0 (unlimited). Sending PVE `expire=0` creates a never-expiring user, disabling the `expire` backstop — the sole defense-in-depth if Vault revocation is delayed or fails. `creds/:role` returns a clear error: `"role %q resolves to an unlimited TTL; set a non-zero ttl/max_ttl on the role or config default_ttl/default_max_ttl (the PVE expire backstop requires a finite lease)"`. (Alternative considered and rejected as more complex: floor the PVE `expire` at `now + effMaxTTL + grace` when a finite max exists but ttl is 0.) This makes the backstop non-optional.
+
+## Repository Layout
+
+```
+vault-plugin-secrets-proxmox/
+├── cmd/
+│   └── vault-plugin-secrets-proxmox/
+│       └── main.go              # plugin entry: BackendFactory + plugin.Serve
+├── internal/
+│   └── pveapi/                  # package pveapi — NOT "proxmox" (the root package is
+│       │                        # package proxmox; two packages named proxmox in one
+│       │                        # build is legal but confusing)
+│       ├── client.go            # real PVE API client (Client interface + impl)
+│       ├── types.go             # request/response structs, PermissionTree
+│       ├── errors.go            # typed errors (NotFound/Conflict/Forbidden)
+│       ├── mock.go              # mock client for unit tests
+│       └── permission_tree_test.go  # lives here — PermissionTree is in this package
+├── backend.go                   # framework.Backend factory, path list, Secret + WAL registration, client cache/invalidate
+├── path_config.go               # config POST/GET/DELETE
+├── path_roles.go                # roles POST/GET/LIST/DELETE
+├── path_creds.go                # creds GET (mutating ReadOperation)
+├── secret_token.go              # Secret schema + Revoke/Renew callbacks
+├── wal.go                       # WAL entry struct + walRollback
+├── userid.go                    # userid assembly, charset + length validation, suffix gen
+├── *_test.go                    # unit tests (mock client)
+├── acceptance_test.go           # TestAcc* (VAULT_ACC gated)
+├── go.mod / go.sum
+├── .gitignore
+├── Makefile
+├── .golangci.yml
+├── docs/
+│   ├── ARCHITECTURE.md
+│   ├── IMPLEMENTATION_PLAN.md
+│   └── PVE_PROBES.md
+├── README.md
+├── AGENTS.md
+└── LICENSE
+```
+
+## Bootstrap Files
+
+### `go.mod`
+
+```go
+module github.com/hazmei/vault-plugin-secrets-proxmox
+
+go 1.23
+
+require (
+	github.com/hashicorp/vault/sdk v0.13.0
+	github.com/hashicorp/go-hclog v1.6.2
+)
+```
+
+Pin `vault/sdk` to the latest stable version at time of creation (adjust as needed). Use Go 1.23 or later for modern toolchain.
+
+### `.gitignore`
+
+Standard Go ignores plus Vault plugin artifacts:
+
+```
+# Binaries
+/bin/
+/dist/
+/vault/plugins/
+*.test
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Go build
+vendor/
+*.out
+
+# Environment
+.env
+.env.*
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+```
+
+Add a Go `.gitignore` **before** creating any build artifacts.
+
+### `Makefile`
+
+```makefile
+PLUGIN_NAME := vault-plugin-secrets-proxmox
+PLUGIN_DIR := vault/plugins
+GO_FILES := $(shell find . -name '*.go' -not -path './vendor/*')
+
+.PHONY: build
+build:
+	@mkdir -p $(PLUGIN_DIR)
+	go build -o $(PLUGIN_DIR)/$(PLUGIN_NAME) ./cmd/vault-plugin-secrets-proxmox
+
+.PHONY: test
+test:
+	go test -v ./...
+
+.PHONY: testacc
+testacc:
+	VAULT_ACC=1 go test -v ./... -run TestAcc
+
+.PHONY: fmt
+fmt:
+	gofmt -s -w $(GO_FILES)
+
+.PHONY: lint
+lint:
+	golangci-lint run
+
+.PHONY: tidy
+tidy:
+	go mod tidy
+
+.PHONY: clean
+clean:
+	rm -rf $(PLUGIN_DIR) bin/ dist/
+```
+
+Targets: `build` → compile to `vault/plugins/`; `test` → unit tests; `testacc` → acceptance tests (gated by `VAULT_ACC=1`); `fmt` → `gofmt`; `lint` → `golangci-lint run`; `tidy` → `go mod tidy`.
+
+### `.golangci.yml`
+
+Minimal linter config:
+
+golangci-lint **v2** schema (v2 dropped `govet.check-shadowing` in favour of
+`govet.enable: [shadow]`, and moved `gofmt` from `linters` to `formatters`; a v1-style
+config errors out on v2):
+
+```yaml
+version: 2
+
+linters:
+  enable:
+    - govet
+    - staticcheck
+    - errcheck
+    - ineffassign
+  settings:
+    govet:
+      enable:
+        - shadow
+    errcheck:
+      check-blank: true
+
+formatters:
+  enable:
+    - gofmt
+
+run:
+  timeout: 5m
+```
+
+If CI pins golangci-lint v1 instead, use the v1 schema (`linters-settings:`,
+`govet.check-shadowing: true`, `gofmt` under `linters`) and pin the version explicitly in the
+CI workflow — do not mix the two.
+
+## Package & File Responsibilities
+
+### `cmd/vault-plugin-secrets-proxmox/main.go`
+
+Plugin entry point. Calls `plugin.ServeMultiplex` (or `plugin.Serve` if multiplexing not needed) with `BackendFactoryFunc: proxmox.Factory`.
+
+**Key functions**:
+- `main()` — sets up logging, calls plugin serve.
+
+### `backend.go`
+
+Backend factory and root struct.
+
+**Key types**:
+```go
+type backend struct {
+    *framework.Backend
+    client   pveapi.Client  // cached PVE API client
+    clientMu sync.RWMutex   // guards client cache
+}
+```
+
+**Key functions**:
+- `Factory(ctx, *logical.BackendConfig) (logical.Backend, error)` — public factory function called by plugin serve.
+- `newBackend(ctx, *logical.BackendConfig) (*backend, error)` — constructs the backend struct, sets:
+  - `Help` — help text
+  - `BackendType: logical.TypeLogical`
+  - `PathsSpecial: &logical.Paths{SealWrapStorage: []string{"config"}}` — seal-wrap `token_secret`
+  - `Paths: []*framework.Path{pathConfig(b), pathRoles(b), pathCreds(b)}`
+  - `Secrets: []*framework.Secret{secretToken(b)}`
+  - `WALRollback: b.walRollback`
+  - `WALRollbackMinAge: 5 * time.Minute`
+  - `InvalidateFunc: b.invalidate` — clears cached client on config change
+- `getClient(ctx, storage) (pveapi.Client, error)` — lazy-builds and caches the PVE API client from stored config; called by path handlers.
+- `invalidate(ctx, key)` — clears `b.client` cache when the `config` key changes.
+
+**References**: `docs/ARCHITECTURE.md` — Storage Schema, Configuration, HTTP Client and Connection Pooling sections.
+
+### `path_config.go`
+
+Config path: `<mount>/config` (POST/GET/DELETE).
+
+**Key types**:
+```go
+type proxmoxConfig struct {
+    Address        string `json:"address"`
+    TokenID        string `json:"token_id"`
+    TokenSecret    string `json:"token_secret"` // never returned on GET
+    TLSSkipVerify  bool   `json:"tls_skip_verify"`
+    CACert         string `json:"ca_cert"`
+    DefaultTTL     int    `json:"default_ttl"`
+    DefaultMaxTTL  int    `json:"default_max_ttl"`
+}
+```
+
+**Key functions**:
+- `pathConfig(b) *framework.Path` — path definition (POST/GET/DELETE operations).
+- **Write handler**:
+  1. Validate `default_ttl <= default_max_ttl` (when both set).
+  2. Build a `pveapi.Client` with provided credentials.
+  3. Call `client.GetVersion()` (reachability/TLS check).
+  4. Call `client.GetPermissions()` — returns `PermissionTree`.
+  5. Parse tree, walk ancestor paths, confirm `User.Modify` and `Sys.Audit` at `/access/groups` (see ancestor-walk note below).
+  6. Store config to storage key `config` (encrypted/seal-wrapped). Use this exact literal everywhere — it must match `PathsSpecial.SealWrapStorage: []string{"config"}` and the `invalidate(ctx, key)` comparison.
+  7. Invalidate cached client in backend (triggers rebuild on next use).
+  8. **Overwrite warning**: if a config already existed and `address` or `token_id`/`token_secret` changed, add a response warning: `"config address/token changed; outstanding leases were issued against the previous admin token and may become non-revocable if the old token can no longer delete their users — revoke outstanding leases before changing connection credentials"`. (The engine does not track leases, so this is advisory, not a hard block — parallels the DELETE force=true guard's rationale.)
+- **Read handler**: Return all fields EXCEPT `token_secret`. Include `token_id` (identity, not credential).
+- **Delete handler**: Require `force=true`. If missing, return error `"DELETE <mount>/config requires force=true"`. If present, delete the `config` entry and invalidate cached client. Declare `force` as a `framework.TypeBool` field on the path and read it with `d.Get("force")`; it arrives as a query parameter (`vault delete proxmox/config force=true` requires Vault CLI ≥ 1.11, which sends K=V pairs on DELETE as query params — otherwise `curl -X DELETE ".../config?force=true"`). Confirm in the smoke test.
+
+**Ancestor-path walk validation** (see `docs/ARCHITECTURE.md` Configuration section, Implementation note on permission-tree ancestor walk): `GetPermissions()` returns a `PermissionTree` (map keyed by ACL paths that have explicit entries). A propagating grant at `/access` will NOT appear as a literal key at `/access/groups`. Therefore, to check if `User.Modify` is held at `/access/groups`, test: exact path `/access/groups` OR any ancestor (`/access`, `/`) where the privilege is propagating. Implement a helper `PermissionTree.HasPrivilege(path, priv string) bool` that walks up the path (`/access/groups` → `/access` → `/`) and checks each.
+
+**Mock seam for config-write validation** (unit-test injection point): The write handler builds a `pveapi.Client` from INCOMING credentials BEFORE storing config, so unit tests cannot use a pre-seeded `b.client` cache (the cache is populated after storage; validation happens first). To make `path_config_test.go` injectable, expose a `newClient func(cfg *proxmoxConfig) (pveapi.Client, error)` field on the backend struct, defaulting to the real constructor. The config-write handler calls `b.newClient(cfg)` instead of the constructor directly; tests replace `b.newClient` with a factory that returns a mock.
+
+**References**: `docs/ARCHITECTURE.md` — Configuration section, Required privilege scoping, DELETE config behavior, ancestor-path walk (Implementation note on permission-tree ancestor walk).
+
+### `path_roles.go`
+
+Roles path: `<mount>/roles/:name` (POST/GET/LIST/DELETE).
+
+**Key types**:
+```go
+type proxmoxRole struct {
+    Group      string `json:"group"`
+    UserPrefix string `json:"user_prefix"`
+    Realm      string `json:"realm"`
+    TTL        int    `json:"ttl"`
+    MaxTTL     int    `json:"max_ttl"`
+}
+```
+
+**Key functions**:
+- `pathRoles(b) *framework.Path` — path definition (POST/GET/LIST/DELETE operations).
+- **Write handler**:
+  1. Validate `ttl <= max_ttl` (when both set).
+  2. **Default `realm` to `"pve"` when empty** (per `docs/ARCHITECTURE.md` realm default, ~line 223). Then **validate `realm` charset against the PVE realm regex `^[A-Za-z][A-Za-z0-9.\-_]+$`** (must start with a letter). Reject with a clear error BEFORE the length-budget check (an invalid realm otherwise produces a confusing length error or an issue-time 400).
+  3. Validate `user_prefix` and role `:name` charset (see `userid.go`).
+  4. Validate userid length budget: `len(user_prefix) + 1 + len(role) + 1 + 8 (random suffix) + 1 + len(realm) <= 64` (see `docs/ARCHITECTURE.md` Roles section — synthetic userid format and length budget). This runs AFTER realm defaulting so the budget uses the effective realm.
+  5. Load config, build client (via `getClient`).
+  6. Call `client.GetGroup(role.Group)` — confirm group exists (GetGroup returns ErrNotFound when PVE responds HTTP 500 + body "does not exist" — NOT 404). Surface ErrNotFound as `"group <name> does not exist on Proxmox cluster"`.
+  7. Call `client.GetPermissions()`, parse tree, confirm `Realm.AllocateUser` at `/access/realm/<role.realm>` via ancestor-path walk.
+   7b. Per-group-path check (propagate-0 detection, see PVE_PROBES.md Probe 9): confirm User.Modify is EFFECTIVE at the exact
+      per-group path /access/groups/<role.Group> using HasPrivilege. This catches a --propagate 0
+      grant at /access/groups (the propagate flag IS visible :0 vs :1, Probe 9; creation checks the
+      PER-GROUP path while a propagate=0 parent grant does not propagate down). If not effective,
+      reject with "admin token lacks User.Modify at /access/groups/<group> (check --propagate 1)".
+  8. Store role to `roles/<name>`.
+- **Read handler**: Load and return role from `roles/<name>`.
+- **List handler**: List keys under `roles/`.
+- **Delete handler**: Delete `roles/<name>`. Does NOT revoke outstanding leases (see `docs/ARCHITECTURE.md` Roles section, "Deleting a role does not revoke its outstanding leases").
+
+**References**: `docs/ARCHITECTURE.md` — Roles section, role-write validation, userid character set and length budget.
+
+### `path_creds.go`
+
+Creds path: `<mount>/creds/:role` (GET — mutating ReadOperation).
+
+**Key functions**:
+- `pathCreds(b) *framework.Path` — path definition (ReadOperation).
+- `handleCredsRead(ctx, req, data) (*logical.Response, error)` — full credential issuance (see Credential Lifecycle below).
+
+**References**: `docs/ARCHITECTURE.md` — Credentials section, Implementation Notes — Service API Calls and Issuance ordering detail, WAL-Based Orphan Recovery section.
+
+### `secret_token.go`
+
+Secret type definition and lifecycle callbacks.
+
+**Key functions**:
+- `secretToken(b) *framework.Secret` — defines the `pve_token` secret type:
+  - `Type: "pve_token"`
+  - `Fields: schema for pve_userid, token_id, token_secret` (data returned to user)
+  - `Renew: b.secretTokenRenew`
+  - `Revoke: b.secretTokenRevoke`
+  InternalData additionally carries `group` (not a user-facing Field) — the Renew callback reads it to re-send `groups=` on the full-replace PUT. Ensure the issuance path writes `group` into InternalData.
+- `secretTokenRenew(ctx, req, data) (*logical.Response, error)` — renewal callback (see Renewal below).
+- `secretTokenRevoke(ctx, req, data) (*logical.Response, error)` — revocation callback (see Revocation below).
+
+**References**: `docs/ARCHITECTURE.md` — Credentials section response schema, Lease Renewal section, Revocation section.
+
+### `internal/pveapi/client.go`
+
+PVE API client interface and real implementation.
+
+**Client interface**:
+```go
+type Client interface {
+    GetVersion(ctx) (string, error)
+    GetPermissions(ctx) (PermissionTree, error)
+    GetGroup(ctx, group string) error  // ErrNotFound mapped from 500 + body "does not exist"
+    CreateUser(ctx, req CreateUserRequest) error  // ErrConflict from 500 + body "already exists"
+    GetUser(ctx, userid string) (UserInfo, error)  // NEW: read-back; ErrNotFound from 500 + body "no such user"
+    CreateToken(ctx, userid, tokenid string, privsep bool) (string, error)  // returns token secret; ErrConflict from 400 + body "Token already exists"
+    UpdateUser(ctx, req UpdateUserRequest) error  // RENAMED; full-replace, re-sends groups
+    DeleteUser(ctx, userid string) error  // ErrNotFound from 500 + body "no such user" (idempotent)
+}
+
+type CreateUserRequest struct {
+    UserID string
+    Groups string  // pve-groupid-list: ONE comma-separated field, NEVER array-repeated
+    Expire int64
+    Enable bool
+}
+
+// NEW: renewal must re-send expire+groups+enable+append because PUT is full-replace.
+type UpdateUserRequest struct {
+    UserID string
+    Expire int64
+    Groups string  // MUST be re-sent on renewal or membership is wiped (Probe 7 / GROUPADD)
+    Enable bool    // send enable=1
+    Append bool    // send append=1
+}
+
+// NEW: read-back shape for GetUser (assert Groups after create/renew).
+type UserInfo struct {
+    Groups []string
+    Enable bool
+    Expire int64
+}
+```
+
+**Real client implementation**:
+- HTTP client configured with `tls_skip_verify` or `ca_cert`.
+- Auth header: `Authorization: PVEAPIToken=<token_id>=<token_secret>` (where `token_id` is already in `<user>@<realm>!<tokenid>` format from config).
+- Base URL: append `/api2/json` to the configured address as given (do not prepend a scheme; the configured `address` already includes the scheme, e.g. `https://pve.example.com:8006`).
+- **Error mapping is BODY-STRING based, not status-code based** (confirmed PVE 9.2.10, PVE_PROBES.md Probes 2–6b). PVE returns HTTP 500 (and 400 for token conflict) with an error body for conditions REST would code 404/409. **The match must run against the RAW FULL BODY, not just the `message` field**: the duplicate-tokenid string `"Token already exists"` lives in `errors.tokenid`, NOT in `message` (Probe 6b: `{"message":"Parameter verification failed.\n","data":null,"errors":{"tokenid":"Token already exists."}}`). A helper `classifyPVEError(status int, body []byte) error` searches the entire decoded body — the top-level `message` string AND every value under the `errors` object — for the following substrings (case-insensitive, tolerant of trailing `\n` and embedded quoted ids). Implementation: decode into `struct{ Message string; Errors map[string]string }`, then concatenate `Message` + all `Errors` values into one haystack (or simply substring-scan the raw `[]byte`), and match:
+  - body contains `"already exists"` (user create, HTTP 500) → `ErrConflict`
+  - body contains `"Token already exists"` (token create, HTTP 400) → `ErrConflict`
+  - body contains `"no such user"` (GET/DELETE user, HTTP 500) → `ErrNotFound`
+  - body contains `"does not exist"` (GET group, HTTP 500) → `ErrNotFound`
+  - body contains `"no such group"` (create user with nonexistent group, HTTP 500) → `ErrNotFound`
+  - HTTP 403 (any) → `ErrForbidden` (403 IS a real status)
+  - everything else → wrapped error carrying status + endpoint (redact body for token endpoints).
+  Do NOT branch on 404/409 — PVE never returns them for these conditions. Vault core already retries revoke/renew on any returned error, so no separate retryable type is needed (see `errors.go`).
+
+**Form-encoding rules (both are silent-failure traps)**:
+- `privsep` MUST be serialized as the literal `0` on `POST /access/users/{userid}/token/{tokenid}` — never omitted. A Go `bool` written with a "skip zero value" encoder drops the field, and PVE then defaults to `privsep=1`, yielding a token with an empty ACL and zero effective permissions. Build the form with explicit `url.Values{"privsep": {"0"}}`-style writes, not struct-tag omitempty encoding.
+- `enable` likewise serializes as the literal `1` on `POST /access/users`.
+- `groups` MUST be serialized as ONE comma-separated field (`groups=a,b,c`), NEVER as repeated keys. PVE's `pve-groupid-list` parser mishandles array-repeated keys. For the single-group case send `groups=<role.Group>` verbatim.
+- `append` MUST be serialized as the literal `1` on renewal PUTs (`UpdateUser`). Omitting it defaults to replace (`append=0`).
+
+**Secret hygiene**: `token_secret` (the admin one from config, and the issued one in the `POST .../token/...` response body) must never appear in an error string or log line. When wrapping a non-2xx response, include status and endpoint; include the body only for non-token endpoints, or redact it.
+
+**References**: `docs/ARCHITECTURE.md` — Service API Summary, Configuration (token auth header), Implementation Notes — Service API Calls and Delete operation, Proxmox Cluster Considerations section.
+
+### `internal/pveapi/types.go`
+
+Request/response structs and permission tree.
+
+**Key types**:
+```go
+// path → privilege → propagate flag (1 = propagates to child paths, 0 = this path only).
+// The int is NOT a bitmask and NOT mere presence.
+type PermissionTree map[string]map[string]int
+
+// HasPrivilege reports whether priv is effective at path.
+//   - exact-path entry  → satisfied regardless of the propagate flag
+//   - ancestor entry    → satisfied ONLY if the propagate flag is non-zero
+// Walks path → parent → ... → "/".
+func (t PermissionTree) HasPrivilege(path, priv string) bool
+```
+
+The exact/ancestor distinction is what makes the `--propagate 0` misconfiguration described
+in `AGENTS.md` detectable at config-write time instead of at first issuance. **Confirmed on
+PVE 9.2.10 (PVE_PROBES.md Probe 1):** `GET /access/permissions` returns the propagate flag
+as the inner value (1 = propagating, 0 = non-propagating). The `HasPrivilege` ancestor-walk
+design correctly distinguishes the two cases; no plan revision needed.
+
+**References**: `docs/ARCHITECTURE.md` — Configuration section, Implementation note on permission-tree ancestor walk.
+
+### `internal/pveapi/errors.go`
+
+Typed errors for mapping PVE HTTP responses.
+
+**Key errors**:
+```go
+// Mapped by BODY STRING, not status code (PVE 9.2.10 returns 500/400 with a message body
+// for these conditions — see client.go classifyPVEError and PVE_PROBES.md Probes 2–6b).
+var ErrNotFound  = errors.New("pveapi: not found")   // body "no such user" / "does not exist" (HTTP 500)
+var ErrConflict  = errors.New("pveapi: conflict")    // body "already exists" (HTTP 500) / "Token already exists" (HTTP 400)
+var ErrForbidden = errors.New("pveapi: forbidden")   // HTTP 403 (genuine status)
+```
+
+No `RetryableError` type: nothing consumes it. Issuance errors go straight back to the
+caller; renew and revoke errors are returned to Vault core, whose built-in retry/backoff
+handles quorum loss and cluster-lock contention (`docs/ARCHITECTURE.md` Proxmox Cluster Considerations section). Add
+the type only if a call site actually branches on it.
+
+**References**: `docs/ARCHITECTURE.md` — Error Handling section, Proxmox Cluster Considerations section.
+
+### `internal/pveapi/mock.go`
+
+In-memory mock implementing `Client` interface for unit tests. Programmable behavior (inject errors, track calls, pre-seed group/user state).
+
+### `wal.go`
+
+WAL entry and rollback logic.
+
+**Key types**:
+```go
+const walTypeUser = "pve_user"
+
+type walUser struct {
+    UserID string `json:"userid"`
+}
+```
+
+**Key functions**:
+- `walRollback(ctx, req, kind, data) error` — registered via `backend.WALRollback` (type `framework.WALRollbackFunc`):
+  1. Reject unknown `kind`.
+  2. Decode `data` into `walUser`. **`data` arrives as `interface{}` holding a `map[string]interface{}`** (the WAL entry is JSON round-tripped through storage), NOT a `walUser` — decode with `mapstructure.Decode` or a `json.Marshal`/`Unmarshal` round-trip. A direct type assertion to `walUser` panics/fails.
+  3. Load config, build client.
+  4. Call `client.DeleteUser(userid)`.
+   5. Treat ErrNotFound (body "no such user", HTTP 500) as success (idempotent).
+  6. Return `nil` on success (WAL entry deleted); return error to retry later.
+
+**Accepted risk (document in the file header)**: on a userid collision (ErrConflict) the userid belongs to
+someone else — normally the handler deletes its own WAL entry and retries with a new suffix.
+If the process dies between `PutWAL` and receiving the ErrConflict, the surviving WAL entry names a
+user this engine did NOT create, and rollback will delete it — potentially another live
+lease's user. Requires a suffix collision (~2⁻⁴⁰) AND a crash inside that window. Documented,
+not mitigated.
+
+A second path to the same outcome: the ErrConflict branch in the issuance loop calls
+`framework.DeleteWAL` but discards any error from that call. A failed `DeleteWAL` on the
+abandoned attempt leaves a WAL entry naming a user this engine did NOT create — same
+consequence as above, same probability class (requires both a suffix collision and a
+transient storage failure). Same bucket; just document it.
+
+**References**: `docs/ARCHITECTURE.md` — WAL-Based Orphan Recovery section, walRollback pseudocode.
+
+### TTL computation (no `ttl.go`)
+
+Use `framework.CalculateTTL` from `vault/sdk/framework/lease.go`:
+
+```go
+func CalculateTTL(sysView logical.SystemView, increment, backendTTL, period,
+    backendMaxTTL, explicitMaxTTL time.Duration, startTime time.Time) (time.Duration, []string, error)
+```
+
+It already implements the whole precedence table — `increment` → `backendTTL` →
+`sysView.DefaultLeaseTTL()`, capped at `min(backendMaxTTL, sysView.MaxLeaseTTL())`, and capped
+again at `startTime + maxTTL` so a renewal cannot outrun the original issue time. It also
+treats `0` as *unset* rather than *zero seconds*, which a hand-rolled `min()` gets wrong (an
+unset `role.max_ttl` would collapse the effective TTL to 0).
+
+The only helper worth writing is the role-value-or-config-default fallback:
+
+```go
+func (r *proxmoxRole) ttls(cfg *proxmoxConfig) (ttl, maxTTL time.Duration) {
+    ttl, maxTTL = time.Duration(r.TTL)*time.Second, time.Duration(r.MaxTTL)*time.Second
+    if ttl == 0 { ttl = time.Duration(cfg.DefaultTTL) * time.Second }
+    if maxTTL == 0 { maxTTL = time.Duration(cfg.DefaultMaxTTL) * time.Second }
+    return
+}
+```
+
+`sysView` is `b.System()`. Call sites: issuance (`path_creds.go`) and renewal
+(`secret_token.go`) — see the pseudocode in Credential Lifecycle below.
+
+A second small helper computes the stored `effective_max_ttl`, replacing the inline
+`min()` (the Locked Decision forbids hand-rolled `min()`). **Home file: `path_roles.go`**
+(same as `ttls()`; both are role-level TTL helpers):
+
+```go
+// cappedMaxTTL returns the effective max TTL, treating 0 as "unset" (no cap from that
+// source) rather than "zero seconds". If both are unset (0), returns 0 (unlimited),
+// which the issuance expire=0 policy then rejects.
+func cappedMaxTTL(roleMax, sysMax time.Duration) time.Duration {
+    switch {
+    case roleMax == 0: return sysMax
+    case sysMax == 0:  return roleMax
+    default:           return min(roleMax, sysMax)   // Go 1.21+ builtin min on time.Duration
+    }
+}
+```
+Unit-test it beside `ttls()`: (roleMax=0,sysMax=X)→X; (X,0)→X; (0,0)→0; (A,B)→min(A,B).
+
+**References**: `docs/ARCHITECTURE.md` — TTL Precedence section.
+
+### `userid.go`
+
+Userid assembly, validation, and random suffix generation.
+
+**Key functions**:
+- `buildUserID(prefix, role, realm, suffix string) (string, error)` — assembles `{prefix}-{role}-{suffix}@{realm}`. The caller generates the suffix explicitly (via `randomSuffix()`) so the retry loop can control it and replace it on ErrConflict without calling the function twice.
+- `randomSuffix() (string, error)` — generates 8-character lowercase base32 string from `crypto/rand` (Crockford alphabet: `0123456789abcdefghjkmnpqrstvwxyz`, no padding).
+- `validateUserComponent(s string) error` — rejects if `s` is EMPTY, or contains whitespace, `:`, `/`, `@`, or `!`. The `@` and `!` characters break userid/token-header parsing (`<user>@<realm>!<tokenid>` and the `Authorization: PVEAPIToken=<user>@<realm>!<tokenid>=<secret>` header), so they must be rejected in `user_prefix` and role name even though the PVE username regex `[^\s:/]+` alone would permit them. Empty is rejected so `user_prefix` cannot be blank.
+- `validateLengthBudget(prefix, role, realm string) error` — checks `len(prefix) + 1 + len(role) + 1 + 8 + 1 + len(realm) <= 64`.
+
+**References**: `docs/ARCHITECTURE.md` — Roles section, synthetic userid format and character set.
+
+### `*_test.go`
+
+Unit test files (one per source file: `path_config_test.go`, `path_roles_test.go`, `path_creds_test.go`, `secret_token_test.go`, `wal_test.go`, `userid_test.go`, plus `internal/pveapi/permission_tree_test.go`). Use the mock client, `logical.TestBackendConfig`, and in-memory storage.
+
+### `acceptance_test.go`
+
+Acceptance tests gated by `VAULT_ACC=1`. Environment variables: `PVE_ADDR`, `PVE_TOKEN_ID`, `PVE_TOKEN_SECRET`, `PVE_TEST_GROUP` (operator must pre-create this group on the test PVE cluster).
+
+**Key tests** (see Testing Plan below).
+
+**References**: `docs/ARCHITECTURE.md` — Testing Strategy section.
+
+## Data Model & Storage
+
+### Config Storage Schema
+
+Stored at storage key `config` (seal-wrapped, encrypted; same literal as `SealWrapStorage`):
+
+```go
+type proxmoxConfig struct {
+    Address       string `json:"address"`
+    TokenID       string `json:"token_id"`        // returned on GET (identity)
+    TokenSecret   string `json:"token_secret"`    // NEVER returned on GET
+    TLSSkipVerify bool   `json:"tls_skip_verify"`
+    CACert        string `json:"ca_cert"`
+    DefaultTTL    int    `json:"default_ttl"`
+    DefaultMaxTTL int    `json:"default_max_ttl"`
+    // NO active_lease_count — engine does not track leases
+}
+```
+
+### Role Storage Schema
+
+Stored at `roles/<name>`:
+
+```go
+type proxmoxRole struct {
+    Group      string `json:"group"`
+    UserPrefix string `json:"user_prefix"`
+    Realm      string `json:"realm"`
+    TTL        int    `json:"ttl"`
+    MaxTTL     int    `json:"max_ttl"`
+}
+```
+
+### Lease InternalData Schema
+
+Stored in `Secret.InternalData` for each issued credential:
+
+```go
+{
+    "pve_userid":        "vault-myrole-a1b2c3d4@pve",  // fixed at issue
+    "group":             "vault-vm-admins",            // NEW: target PVE group, fixed at issue; re-sent on renewal (PUT is full-replace); NOT re-derived from role
+    "expire":            1672531200,                   // Unix epoch, mutable on renewal
+    "role_name":         "myrole",                     // fixed at issue
+    "effective_max_ttl": 86400                         // seconds, fixed at issue
+}
+```
+
+`effective_max_ttl` is what renewal feeds to `CalculateTTL` as `backendMaxTTL` — it must NOT
+be recomputed from the role, which may have changed since issuance. The lease's own
+`req.Secret.IssueTime` supplies `startTime`; `expire` is written for operator/audit
+correlation and is not read by renew/revoke. `role_name` IS read by the renew path (to load
+the current role for its `ttl` as `backendTTL` only) — if the role has since been deleted,
+renewal falls back to `req.Secret.TTL` as the backendTTL and continues (the max is always the
+stored `effective_max_ttl`, never the role). `group` is read by the renew path and re-sent on
+every `UpdateUser` PUT because PVE `PUT /access/users` is full-replace (Probe 7); it must NOT
+be re-derived from the role, which may have been deleted or re-bound.
+
+### WAL Entry Schema
+
+WAL entry at `wal/<uuid>` (kind `"pve_user"`):
+
+```go
+type walUser struct {
+    UserID string `json:"userid"`
+}
+```
+
+**References**: `docs/ARCHITECTURE.md` — Storage Schema section, lease internalData, WAL-Based Orphan Recovery section.
+
+## Credential Lifecycle
+
+### Issuance (handleCredsRead)
+
+ALL work happens BEFORE returning the Secret to the caller (no post-lease-write hook exists).
+
+**Pseudocode**:
+
+**SDK signatures** (`vault/sdk/framework/wal.go`) — `PutWAL` returns the WAL **ID string**, and
+`DeleteWAL` takes that id, NOT the kind + payload:
+
+```go
+func PutWAL(ctx context.Context, s logical.Storage, kind string, data interface{}) (string, error)
+func DeleteWAL(ctx context.Context, s logical.Storage, id string) error
+```
+
+Every attempt therefore has to keep its own `walID`.
+
+```
+1. Load role from storage (roles/<role>), nil entry → "role not found"
+2. Load config from storage (config), nil entry → "config not set"
+3. Build client (cached via getClient)
+4. roleTTL, roleMaxTTL := role.ttls(cfg)
+   effTTL, warnings, err := framework.CalculateTTL(
+       b.System(), 0, roleTTL, 0, roleMaxTTL, 0, time.Time{})
+   - err → return error
+   - (warnings are surfaced on the response at step 10 via resp.AddWarning(warnings...))
+   -      effMaxTTL := cappedMaxTTL(roleMaxTTL, b.System().MaxLeaseTTL())   // named helper, treats 0 as unset
+     (this is the value stored as effective_max_ttl and fed back on renewal)
+5. If effTTL == 0: return error "role %q resolves to an unlimited TTL; the PVE expire
+   backstop requires a finite lease — set a non-zero ttl/max_ttl" (Locked Decision:
+   expire=0 policy). Issuance MUST NOT proceed with an unlimited TTL.
+   Note: because `framework.CalculateTTL` falls back to `sysView.DefaultLeaseTTL()` (which is
+   non-zero on any real Vault server), `effTTL == 0` is effectively unreachable in production.
+   The guard is correct and cheap — keep it as belt-and-braces defense-in-depth, not a live
+   branch; testing it requires a mock `SystemView` returning zero defaults.
+   Otherwise:
+   - leaseExpiry := time.Now().Add(effTTL + expireGrace).Unix()   // expireGrace = 60s
+   Rationale: the PVE `expire` is a BACKSTOP, so it must land AFTER the Vault lease ends —
+   a PVE node clock running ahead of the Vault host would otherwise 401 a live credential.
+   We never send expire=0, because a never-expiring user disables the backstop entirely.
+6. Retry loop (bound = 5 attempts):
+   a. suffix, err := randomSuffix()
+      - If err: return error
+   b. userid, err := buildUserID(role.UserPrefix, roleName, role.Realm, suffix)
+      - If err: return error (length budget exceeded — should have been caught at role write time)
+   c. walID, err := framework.PutWAL(ctx, req.Storage, walTypeUser, walUser{UserID: userid})
+      - If err: return error (nothing created yet; nothing to clean up)
+   d. CreateUser({UserID: userid, Groups: role.Group, Expire: leaseExpiry, Enable: true})  // single CSV groups field
+   e. If ErrConflict (mapped from HTTP 500 + body "already exists" — NOT a 409):
+      - framework.DeleteWAL(ctx, req.Storage, walID)
+      - continue loop (try new suffix)
+   f. If other error (non-Conflict):
+       // PVE may have committed the user before the response failed (timeout/5xx).
+       // Best-effort delete, then conditionally drop the WAL — same discipline as
+       // the CreateToken error path (steps 8–9). Do NOT change the ErrConflict
+       // collision-retry path above (step 6e), which correctly DeleteWALs and loops.
+       - delErr := DeleteUser(userid) [best-effort]
+       - if delErr == nil OR errors.Is(delErr, pveapi.ErrNotFound):
+             // User is gone (or was never committed) — safe to release the WAL entry.
+             framework.DeleteWAL(ctx, req.Storage, walID) [best-effort]
+       - else:
+             // DeleteUser failed transiently — LEAVE the WAL entry so walRollback
+             // retries the cleanup. Do NOT DeleteWAL here (would orphan the user).
+       - return error (wrap delErr if non-nil/non-NotFound so the operator sees the cleanup failure)
+   g. If success:
+        h. READ-BACK ASSERT (PVE silently drops unresolvable group ids with HTTP 200 on modify/append; on create, PVE instead REJECTS with HTTP 500 "no such group" — the read-back assertion covers both paths):
+           - info, err := GetUser(userid)
+           - if err or role.Group NOT in info.Groups:
+               - delErr := DeleteUser(userid)
+               - if delErr == nil OR errors.Is(delErr, pveapi.ErrNotFound):
+                     // user is gone (or never persisted) → safe to drop the WAL entry
+                     framework.DeleteWAL(ctx, req.Storage, walID) [best-effort]
+               - else:
+                     // DeleteUser failed transiently — LEAVE the WAL entry so walRollback
+                     // retries the cleanup. Do NOT DeleteWAL here (would orphan the user).
+                     // (walID still points at this userid.)
+               - return error "group membership not reflected after create (group %q may be unresolvable on cluster)"
+                 (wrap delErr if non-nil/non-NotFound so the operator sees the cleanup failure)
+      - break loop (keep walID for steps 8–9)
+7. If loop exhausted (5 attempts all ErrConflict): return internal error "userid collision after 5 retries"
+8. tokenSecret, err := CreateToken(userid, "vault", privsep=false)  // wire form value "0"
+   - If ErrConflict (mapped from HTTP 400 + body "Token already exists" — NOT a 409):
+       // Not expected: each lease has a unique fresh userid, and token ids are scoped
+       // per-user. A conflict here is on OUR OWN freshly-created user — it does NOT
+       // belong to a different active lease. Treat it like any other CreateToken error.
+       - delErr := DeleteUser(userid) [best-effort cleanup of the user we just created]
+       - if delErr == nil OR errors.Is(delErr, pveapi.ErrNotFound):
+             framework.DeleteWAL(ctx, req.Storage, walID) [best-effort]
+       - else:
+             // DeleteUser failed transiently — LEAVE the WAL entry for walRollback to retry.
+             // Do NOT DeleteWAL.
+       - return internal error "token conflict on freshly-created userid (unexpected)" (wrap delErr if non-nil/non-NotFound)
+   - Else if err (any other error):
+       - delErr := DeleteUser(userid) [best-effort cleanup of the user we just created]
+       - if delErr == nil OR errors.Is(delErr, pveapi.ErrNotFound):
+             framework.DeleteWAL(ctx, req.Storage, walID) [best-effort]
+       - else:
+             // DeleteUser failed transiently — LEAVE the WAL entry for walRollback to retry.
+             // Do NOT DeleteWAL.
+       - return error (wrap delErr if it was non-nil/non-NotFound)
+9. err := framework.DeleteWAL(ctx, req.Storage, walID)
+   - If DeleteWAL fails:
+     - DeleteUser(userid) [best-effort cleanup]
+     - return error (NO Secret returned; caller retries from scratch)
+     // Note: here the WAL entry is (by definition) still present because DeleteWAL
+     // failed, so best-effort DeleteUser + error is correct: if DeleteUser also fails,
+     // walRollback still owns this userid and will retry. No conditional needed — we
+     // are NOT attempting a second DeleteWAL.
+10. resp := b.Secret(secretTypeToken).Response(
+        map[string]interface{}{  // Data
+            "pve_userid": userid, "token_id": userid+"!vault", "token_secret": tokenSecret},
+        map[string]interface{}{  // InternalData
+            "pve_userid": userid, "group": role.Group, "expire": leaseExpiry, "role_name": roleName,
+            "effective_max_ttl": int64(effMaxTTL.Seconds())})
+    resp.Secret.TTL = effTTL
+    resp.Secret.MaxTTL = effMaxTTL
+    for _, w := range warnings { resp.AddWarning(w) }   // surface CalculateTTL warnings
+11. Return response
+```
+
+**Key points**:
+- Each retry writes a NEW WAL entry (new id) for the NEW userid, and deletes the abandoned attempt's entry by ITS id on ErrConflict (per-attempt WAL ordering).
+- Token creation ErrConflict is NOT expected (each lease has a unique userid; token ids are scoped per-user). If it occurs, treat it like any other CreateToken error: best-effort DeleteUser, then DeleteWAL ONLY if DeleteUser returned nil or ErrNotFound.
+- If `DeleteWAL` fails (step 9), the issuance MUST fail and clean up the user — no Secret is returned, preventing WALRollback from racing a live credential.
+- `framework.Secret.Response` sets `Renewable = (s.Renew != nil)`, so the secret is renewable purely because `secretToken(b)` registers a `Renew` callback — nothing to set by hand.
+- After CreateUser, the handler MUST read the user back (`GetUser`) and assert the target group appears in `.Groups`; PVE returns HTTP 200 even when it silently drops an unresolvable group id (observed on modify/append; on create, PVE instead REJECTS with HTTP 500 `"no such group"` — the read-back assertion covers both paths). Verifiable equivalently via `GET /access/groups/{id}.members`.
+
+**References**: `docs/ARCHITECTURE.md` — Implementation Notes — Service API Calls (Create ordering), Issuance ordering detail, userid collision retry, token creation conflict, privsep=0, WAL-Based Orphan Recovery section.
+
+### Renewal (secretTokenRenew)
+
+**Pseudocode**:
+
+```
+1. Read pve_userid, group, role_name, effective_max_ttl from req.Secret.InternalData (group is REQUIRED — renewal re-sends it; do NOT re-derive from the role, which may be gone/re-bound. role_name is used only to load the role for its ttl.)
+2. storedMaxTTL := time.Duration(effective_max_ttl) * time.Second
+   // DECODE DISCIPLINE: InternalData values (effective_max_ttl, expire) round-trip through
+   // JSON storage and come back as float64, NOT int/int64 — a direct `.(int64)` type
+   // assertion PANICS/fails (same trap documented for WAL decode, wal.go step 2 / line 450).
+   // Read them as float64 then convert: e.g.
+   //   emtRaw, _ := req.Secret.InternalData["effective_max_ttl"].(float64)
+   //   storedMaxTTL := time.Duration(int64(emtRaw)) * time.Second
+   // Likewise pve_userid/group/role_name assert to string.
+3. Load config from storage (config). If missing, return error.
+   Build client (via getClient).
+4. Load role by role_name for its ttl → roleTTL := role.ttls(cfg) ttl-component. If the role is GONE, fall back to roleTTL := req.Secret.TTL. Used ONLY as backendTTL, never as the max.
+5. newTTL, warnings, err := framework.CalculateTTL(
+       b.System(), req.Secret.Increment, roleTTL, 0, storedMaxTTL, 0, req.Secret.IssueTime)
+   - err → return error (includes "past the max TTL, cannot renew")
+   - (warnings surfaced at step 9 via resp.AddWarning(warnings...))
+6. If newTTL == 0: return error "renewal resolves to an unlimited TTL; refusing (expire
+   backstop requires a finite lease)" — mirrors the issuance expire=0 policy. This should
+   not occur for a lease that issued with a finite TTL, but guard it.
+   Otherwise:
+   - newExpiry := time.Now().Add(newTTL + expireGrace).Unix()   // finite; never 0
+7. UpdateUser({UserID: pve_userid, Expire: newExpiry, Groups: group, Enable: true, Append: true})
+   // PVE PUT /access/users is FULL-REPLACE (Probe 7): expire-only PUT WIPES groups.
+   // MUST re-send expire+groups+enable(+append=1) together or membership is lost.
+   // NOTE: enable=1 on renewal will RE-ENABLE a PVE user an operator manually disabled
+   // out-of-band. Disabling the PVE user is therefore NOT a sticky kill-switch across
+   // renewal — to kill a lease, REVOKE it in Vault (which deletes the user). Revocation
+   // is the only supported kill path; out-of-band PVE user disable is not sticky.
+   - If ErrNotFound (body "no such user"): return error "user no longer exists" (renewal fails; lease expires)
+   - If other error: return error (Vault retries renewal)
+7b. READ-BACK ASSERT: info, err := GetUser(pve_userid);
+    if err or group NOT in info.Groups: return error "group membership not preserved across renewal"
+8. req.Secret.InternalData["expire"] = newExpiry
+9. resp := &logical.Response{Secret: req.Secret}
+   resp.Secret.TTL = newTTL
+   resp.Secret.MaxTTL = storedMaxTTL
+   for _, w := range warnings { resp.AddWarning(w) }   // surface CalculateTTL warnings
+10. Return resp
+```
+
+**Key points**:
+- **`max_ttl` runs from `IssueTime`, not from now.** Capping the renewal at `min(requested, effective_max_ttl)` measured from the current time lets a lease live roughly 2× its `max_ttl`. `framework.CalculateTTL` handles this correctly given `startTime = req.Secret.IssueTime` (populated by core on renew — see the `IssueTime` comment in `sdk/logical/lease.go`).
+- Use stored `effective_max_ttl` from issuance time as `backendMaxTTL`; do NOT recompute the max from the role (role may have changed). Only `backendTTL` may come from the current role.
+- Return `&logical.Response{Secret: req.Secret}` — the mutated `InternalData["expire"]` persists only because core stores the returned Secret back onto the lease entry.
+- `UpdateUser` re-sends `expire`+`groups`+`enable`+`append=1` on every renewal PUT. **PVE `PUT /access/users` is FULL-REPLACE** (confirmed PVE 9.2.10, PVE_PROBES.md Probe 7): an expire-only PUT WIPES the groups array, stripping the credential's effective privileges. The target group is read from lease InternalData (`group`), not the role. A read-back (`GetUser`) MUST confirm membership survived.
+
+**References**: `docs/ARCHITECTURE.md` — Lease Renewal section, TTL Precedence section (renewal note).
+
+### Revocation (secretTokenRevoke)
+
+**Pseudocode**:
+
+```
+1. Read pve_userid from req.Secret.InternalData
+2. Load config, build client
+3. DeleteUser(pve_userid)
+   - If ErrNotFound (body "no such user", HTTP 500): return nil (idempotent success)
+   - If other error: return error (Vault retries revocation)
+4. Return nil
+```
+
+**Key points**:
+- ErrNotFound (body "no such user", HTTP 500) is success (idempotent).
+- Vault's revocation retry handles transient failures.
+- Single delete cascades to tokens, group memberships, ACL entries.
+
+**References**: `docs/ARCHITECTURE.md` — Revocation section, idempotency (body "no such user" on HTTP 500 treated as success).
+
+## WAL Rollback
+
+Registered via `backend.WALRollback` and `backend.WALRollbackMinAge = 5 * time.Minute`.
+
+**Pseudocode (`walRollback`)**:
+
+```
+1. If kind != walTypeUser: return fmt.Errorf("unknown WAL kind: %s", kind)
+2. Decode data (map[string]interface{}) into walUser via mapstructure/JSON round-trip
+3. Load config, build client (if config missing, return error → retry later)
+4. DeleteUser(walUser.UserID)
+   - If ErrNotFound (body "no such user", HTTP 500): return nil (WAL entry deleted; user already cleaned up or never existed)
+   - If other error: return error (WAL entry retained; rollback retries later)
+5. Return nil
+```
+
+**Division of responsibility**:
+- **WALRollback**: Cleans up users orphaned by crash/failover BETWEEN `PutWAL` and `DeleteWAL` (i.e., WAL entry exists but issuance never completed, no Secret returned, no lease registered). It ALSO catches users left behind when an in-line cleanup `DeleteUser` fails transiently: the issuance path deletes its WAL entry ONLY when `DeleteUser` returns nil or `ErrNotFound`; if `DeleteUser` fails otherwise, the WAL entry is deliberately RETAINED and the error is returned so walRollback retries the delete. This guarantees no code path can orphan a PVE user with no surviving WAL entry.
+- **Vault revocation retry**: Handles failed revocations on existing leases.
+- **PVE `expire` backstop**: Caps any leaked user that slips through both.
+
+**References**: `docs/ARCHITECTURE.md` — WAL-Based Orphan Recovery section, division of responsibility.
+
+## TTL Precedence
+
+Delegated to `framework.CalculateTTL` (`vault/sdk/framework/lease.go`). The engine only
+supplies the role-or-config-default fallback (`role.ttls(cfg)`); everything else — system
+default, system max ceiling, unset-vs-zero, and the from-`IssueTime` renewal cap — is already
+implemented there and must not be re-derived:
+
+```go
+// Issuance
+ttl, warns, err := framework.CalculateTTL(b.System(), 0, roleTTL, 0, roleMaxTTL, 0, time.Time{})
+
+// Renewal
+ttl, warns, err := framework.CalculateTTL(b.System(), req.Secret.Increment, roleTTL, 0,
+                                          storedMaxTTL, 0, req.Secret.IssueTime)
+```
+
+**Capture at issuance**: Store `effective_max_ttl` in `Secret.InternalData["effective_max_ttl"]` (as seconds, int64). All renewals pass this stored value as `backendMaxTTL`, NOT recomputed from the role.
+
+**Key points**:
+- Config `default_ttl` and `default_max_ttl` are fallbacks when role values unset.
+- `0` means *unset*, not *zero seconds*. A hand-rolled `min()` gets this wrong: an unset `role.max_ttl` collapses the effective TTL to 0. `CalculateTTL` falls back to `sysView.DefaultLeaseTTL()` / `MaxLeaseTTL()`.
+- Vault mount/system max is the absolute ceiling.
+- There is no issuance-time requested TTL (`creds/:role` declares no `ttl` field), so `increment` is 0 at issuance and `req.Secret.Increment` on renewal.
+- Renewal caps against `IssueTime + effective_max_ttl`, not `now + effective_max_ttl`.
+
+**References**: `docs/ARCHITECTURE.md` — TTL Precedence section.
+
+## Testing Plan
+
+### Unit Tests (with Mock Client)
+
+| File | Coverage |
+|------|----------|
+| `path_config_test.go` | Config write (validation, client build, GetVersion, GetPermissions ancestor-walk — injected via `b.newClient` func field, see mock-seam note in `path_config.go` section); config read (excludes token_secret); config delete (requires force=true, rejects without it) |
+| `path_roles_test.go` | Role write (ttl validation, userid budget, GetGroup ErrNotFound via 500+body "does not exist", GetPermissions realm check, per-group-path User.Modify check at /access/groups/<group> (propagate=0 → reject)); role read/list/delete |
+| `path_creds_test.go` | Full issuance flow (WAL ordering, CreateUser ErrConflict via 500+body "already exists" drives retry, group read-back-failure injection (GetUser returns groups:[] → issuance errors, user+WAL cleaned up, no Secret); token ErrConflict via 400+body "Token already exists" → best-effort DeleteUser + conditional DeleteWAL (same as any other CreateToken error); collision exhaustion after 5 attempts); **DeleteWAL-failure injection** (see below); `expire` = lease end + grace; issuance is REFUSED when the effective TTL resolves to 0 (unlimited) — `expire=0` can never reach the wire (the guard fires first; `framework.CalculateTTL` falls back to `sysView.DefaultLeaseTTL()` so `effTTL == 0` is effectively unreachable in practice — the guard is belt-and-braces, correct and cheap, but testing it requires a mock `SystemView` returning zero defaults) |
+| `secret_token_test.go` | Renewal (`CalculateTTL` capped from `IssueTime` — a renew requested near `max_ttl` on an old lease gets the remainder, not a full increment; UpdateUser re-sends expire+groups+enable+append; read-back asserts group preserved; group read from InternalData not role; ErrNotFound(500+body) → fail); revocation (DeleteUser, ErrNotFound(500+body) → success) |
+| `wal_test.go` | walRollback (decodes `map[string]interface{}` payload; DeleteUser success, ErrNotFound (500+body "no such user") → success, error → retry, unknown kind → error) |
+| `userid_test.go` | buildUserID format; randomSuffix entropy/charset; validateUserComponent (rejects empty, `:`, `/`, whitespace, `@`, `!`); validateLengthBudget (rejects >64) |
+| `internal/pveapi/permission_tree_test.go` | `HasPrivilege` ancestor-walk: exact path with propagate=0 → true; ancestor with propagate=1 → true; **ancestor with propagate=0 → false**; root grant; missing path |
+| `internal/pveapi/errors_test.go` (NEW) | `classifyPVEError` fed the ACTUAL probed bodies (PVE_PROBES.md Probes 2–6b): 500 `{"data":null,"message":"create user failed: user 'x@pve' already exists\n"}`→ErrConflict; **400 `{"message":"Parameter verification failed.\n","data":null,"errors":{"tokenid":"Token already exists."}}`→ErrConflict (asserts the match reads `errors.tokenid`, NOT `message`)**; 500 `{"data":null,"message":"no such user ('x@pve')\n"}`→ErrNotFound; 500 `{"data":null,"message":"group 'g' does not exist\n"}`→ErrNotFound; 500 `{"data":null,"message":"create user failed: no such group 'vault-test-grp'\n"}`→ErrNotFound; 403 (any body)→ErrForbidden; trailing-`\n` / embedded-quoted-id tolerance |
+| `internal/pveapi/client_test.go` (NEW) | `httptest`-based: assert the **real** HTTP client serializes `privsep=0` as the literal string `"0"` (not `"false"` or omitted) on `POST .../token/{tokenid}`; `enable=1` as `"1"` on `POST /access/users`; `append=1` as `"1"` on `PUT /access/users/{userid}`; `groups` as ONE comma-separated form field (never array-repeated) on user create/update. Also assert `classifyPVEError` body-string mapping via the same probed bodies used in `errors_test.go`. Assert that `token_secret` never appears in any error string returned by the client. |
+
+Use `logical.TestBackendConfig` and in-memory storage (`framework.Storage` from `vault/sdk`). Mock client is programmable (inject ErrConflict on attempt N, ErrNotFound on GetGroup, etc.).
+
+**DeleteWAL-failure injection** belongs here, not in the acceptance suite: `framework.DeleteWAL`
+is a package function with no injection seam, but it takes a `logical.Storage`. Wrap the
+in-memory storage in a decorator that returns an error from `Delete` for keys under the `wal/`
+prefix, then assert (a) issuance returns an error with no Secret, and (b) the mock client
+recorded a `DeleteUser` for the just-created userid. No live PVE needed.
+
+**Group read-back-failure injection** also belongs here (no live PVE needed): program the mock `GetUser` to return `Groups: []` (simulating PVE's silent group-drop behaviour, confirmed via PVE_PROBES.md GROUPADD) after a successful `CreateUser`. Assert (a) issuance returns an error naming the group, (b) no Secret is returned, and (c) the mock recorded a `DeleteUser` for the userid and a `DeleteWAL` for its WAL id.
+
+### Acceptance Tests (VAULT_ACC=1)
+
+**Environment variables**:
+- `PVE_ADDR` — Proxmox API endpoint (e.g., `https://pve.example.com:8006`)
+- `PVE_TOKEN_ID` — admin token ID (e.g., `vault-admin@pve!root-token`)
+- `PVE_TOKEN_SECRET` — admin token secret
+- `PVE_TEST_GROUP` — operator-pre-created PVE group bound to a test role (operator must create this out-of-band before running tests)
+
+**Gating**: Tests prefixed `TestAcc*` run ONLY when `VAULT_ACC=1` (HashiCorp convention).
+
+**Harness (concrete)**:
+- **Vault instantiation**: acceptance tests DO NOT spin up a real Vault server. They construct the backend directly with `logical.TestBackendConfig()` + in-memory `logical.Storage`, call `Factory(ctx, config)`, and drive it through `logical.Request`s (same pattern as unit tests). The difference from unit tests is that the *pveapi.Client is the REAL client pointed at a live PVE cluster (not the mock). A full `vault server -dev` end-to-end run is the manual smoke test (Build & Run section), not an automated `TestAcc`.
+- **PVE cluster source**: OPERATOR-PROVIDED and MANUAL. There is no official Proxmox VE container image suitable for CI, so the target 9.2.10 cluster is stood up out-of-band by the operator (or a nightly self-hosted runner) and supplied via `PVE_ADDR`/`PVE_TOKEN_ID`/`PVE_TOKEN_SECRET`/`PVE_TEST_GROUP`. Tests skip (not fail) when `VAULT_ACC` is unset OR the env vars are absent.
+
+**Test scenarios**:
+
+| Test | Assertions |
+|------|-----------|
+| `TestAccLifecycle` | Write config → write role → read creds → use issued token to call PVE API (verify it works) → renew → verify renewed → revoke → verify user deleted by asserting `GET /access/users/{userid}` returns the PVE body "no such user" (HTTP 500, NOT 404). Do NOT assert status 404. |
+| `TestAccAuthorizationContractCanary` | **Four critical assertions** (see `docs/ARCHITECTURE.md` Acceptance Tests section — Authorization contract canary):<br/>a. Admin token attempts `PUT /access/acl` to grant an unheld role → 403<br/>b. Create user with `groups=<group>` (single CSV field); assert membership via read-back (`GET /access/users/{id}.groups` contains the group OR `GET /access/groups/{id}.members` contains the user). **PRIMARY privilege check = BEHAVIORAL**: use the issued privsep=0 token to call a group-role-gated endpoint (e.g. `GET /cluster/resources?type=vm`, gated by PVEVMAdmin) and assert HTTP 200 — this is the only oracle that cannot be confounded (Probe GROUPADD / Probe 6-fix-E). **The `GET /access/permissions?userid=<userid>&path=/` server-side dump is OPTIONAL and requires a documented TEMPORARY cluster-wide `Sys.Audit` grant on the admin token** — under the least-privilege admin it returns `403 Permission check failed (/access, Sys.Audit)` (Probe 6-fix-C/D, Probe CLEAN 5-B). If the harness wants the dump, apply and TEAR DOWN the grant: `pveum acl modify / --user <admin> --role <auditrole> --propagate 1` then teardown with the BARE `--delete` flag: `pveum acl modify / --user <admin> --role <auditrole> --delete` (NOT `--delete 1`, which fails "400 Unable to parse option" — Probe CLEAN Step 8-B / Probe GROUPADD). Do NOT rely on the token's BARE `/access/permissions` (reflects principal only, Probe 6).<br/>c. Create user with `expire` in the past, verify token authentication returns 401<br/>d. Create user, renew with `PUT /access/users/{userid}` re-sending `expire`+`groups`+`enable`+`append=1` (full-replace — expire-only WIPES groups, Probe 7). Assert via read-back that `groups` still contains the group after renewal. Add a CONTROL: an expire-only PUT on a throwaway user leaves `groups:[]`. |
+| `TestAccFailureInjection` | (a) Simulate network error after CreateUser but before CreateToken (kill connection) → verify user cleaned up (best-effort delete ran);<br/>(b) Issue credential, delete user out-of-band, revoke → verify PVE body "no such user" (HTTP 500) treated as success;<br/>(c) Write config with insufficient-privilege token → assert 403 surfaced clearly.<br/>(DeleteWAL-failure injection moved to `path_creds_test.go` — no PVE required) |
+| `TestAccWALRollback` | Write config+role → manually `framework.PutWAL(ctx, storage, walTypeUser, walUser{UserID: userid})` → manually `client.CreateUser(userid)` → **invoke `b.walRollback(ctx, req, walTypeUser, walEntryData)` DIRECTLY** (there is NO `PeriodicFunc` on this backend — rollback is registered via `backend.WALRollback`, and in a live Vault it fires on the rollback manager's schedule; the test calls the func directly rather than waiting) → verify `DeleteUser` ran and the user is gone on PVE (assert `GET` returns body "no such user"). Because `walRollback` receives `data interface{}` holding a `map[string]interface{}`, construct the call arg the same JSON-round-tripped way core would (see wal.go decode note). |
+| `TestAccConcurrentIssuance` | Spawn 10 goroutines, each calls `creds/:role` concurrently → verify all succeed (no collision errors, ErrConflict retry works). Expect PVE cluster-lock contention here; if it proves flaky, assert "no orphaned users left behind" rather than "zero transient errors" |
+| `TestAccDeleteConfigGuard` | Write config → DELETE without `force=true` → assert refused with clear error;<br/>DELETE with `force=true` → assert succeeds and config gone. Also confirms `force` actually reaches the handler as a query param through whatever client the test uses |
+
+**References**: `docs/ARCHITECTURE.md` — Testing Strategy section, Acceptance Tests — authorization contract canary, failure injection, DELETE config guard.
+
+## Build & Run
+
+### Build the Plugin
+
+```bash
+make build
+```
+
+Outputs to `vault/plugins/vault-plugin-secrets-proxmox`.
+
+### Dev Vault Server with Plugin
+
+```bash
+# Terminal 1: Start dev Vault with plugin dir
+vault server -dev -dev-root-token-id=root -dev-plugin-dir=./vault/plugins
+
+# Terminal 2: Set env
+export VAULT_ADDR='http://127.0.0.1:8200'
+export VAULT_TOKEN='root'
+
+# NOTE: -dev-plugin-dir auto-registers every binary in that directory into the plugin
+# catalog at startup, so no `vault plugin register -sha256=...` step is needed here.
+# For a NON-dev server, register explicitly instead:
+#   SHA256=$(shasum -a 256 vault/plugins/vault-plugin-secrets-proxmox | cut -d' ' -f1)
+#   vault plugin register -sha256="$SHA256" secret vault-plugin-secrets-proxmox
+
+# Enable at mount path
+vault secrets enable -path=proxmox vault-plugin-secrets-proxmox
+
+# Write config
+vault write proxmox/config \
+    address="https://pve.example.com:8006" \
+    token_id="vault-admin@pve!root-token" \
+    token_secret="<secret>" \
+    ca_cert=@/path/to/ca.pem \
+    default_ttl=3600 \
+    default_max_ttl=86400
+
+# Write role
+vault write proxmox/roles/vm-admin \
+    group="vault-vm-admins" \
+    user_prefix="vault" \
+    realm="pve" \
+    ttl=3600 \
+    max_ttl=7200
+
+# Read credentials
+vault read proxmox/creds/vm-admin
+
+# Renew lease
+vault lease renew <lease_id>
+
+# Revoke lease
+vault lease revoke <lease_id>
+
+# Delete config (requires force=true; K=V on `vault delete` needs CLI >= 1.11 and is
+# transmitted as a query parameter)
+vault delete proxmox/config force=true
+
+# Fallback for older CLIs:
+curl -sS -X DELETE -H "X-Vault-Token: $VAULT_TOKEN" \
+  "$VAULT_ADDR/v1/proxmox/config?force=true"
+```
+
+### Smoke Test
+
+After building and registering:
+
+1. Enable mount
+2. Write config (should succeed if admin token has privileges)
+3. Write role (should succeed if group exists)
+4. Read creds (should return `pve_userid`, `token_id`, `token_secret`)
+5. Use issued token to call PVE API (verify it works)
+6. Renew lease
+7. Revoke lease (verify user deleted on PVE)
+8. Delete config with `force=true` (should succeed)
+
+**References**: `docs/ARCHITECTURE.md` — Root Rotation section (manual operation).
+
+## Phased Task List
+
+### Phase 0 — Spike / Ground-Truth Probes (COMPLETE)
+
+**Status**: ✅ DONE. See `docs/PVE_PROBES.md` for the full evidence.
+
+Phase 0 captured live PVE 9.2.10 HTTP behavior that the rest of the plan branches on
+(error contract is body-string not status-code; single-call `groups=<CSV>` create lands
+membership with mandatory read-back; `PUT /access/users` is full-replace; permissions tree
+inner value is the propagate flag; expired-user token → 401; propagate=0 detectable at the
+exact path). These findings are load-bearing and supersede any conflicting "confirmed"
+annotations elsewhere. No code deliverable — this phase gated the design.
+
+---
+
+### Phase 1 — Bootstrap + Proxmox Client + Config Path
+
+**Tasks**:
+- [ ] Create `go.mod` (module path `github.com/hazmei/vault-plugin-secrets-proxmox`, go 1.23, require `vault/sdk` + `go-hclog`)
+- [ ] Create `.gitignore` (Go + Vault plugin artifacts)
+- [ ] Create `Makefile` (build/test/testacc/fmt/lint/tidy targets)
+- [ ] Create `.golangci.yml` (v2 schema — see Bootstrap Files)
+- [ ] Create `cmd/vault-plugin-secrets-proxmox/main.go` (~15 lines; moved up from Phase 6 so the plugin is buildable and registerable from the first phase)
+- [ ] Implement `internal/pveapi/errors.go` (ErrNotFound/ErrConflict/ErrForbidden — no RetryableError)
+- [ ] Implement `internal/pveapi/types.go` (PermissionTree with HasPrivilege ancestor-walk, propagate-flag aware)
+- [ ] Implement `internal/pveapi/client.go` (Client interface + real impl: GetVersion, GetPermissions, GetGroup, CreateUser, GetUser, CreateToken, UpdateUser, DeleteUser; auth header; TLS config; classifyPVEError body-string mapping; explicit `privsep=0`/`enable=1` form values; no secrets in error strings)
+- [ ] Implement `internal/pveapi/mock.go` (programmable mock client for tests)
+- [ ] Implement `backend.go` (Factory, newBackend, getClient cached, invalidate)
+- [ ] Implement `path_config.go` (POST: validate default_ttl<=default_max_ttl, GetVersion, GetPermissions + ancestor-walk for User.Modify+Sys.Audit @ /access/groups, store seal-wrapped at key `config`; GET: return all except token_secret; DELETE: require `force=true` via a declared TypeBool field)
+- [ ] Unit tests: `path_config_test.go` (write validation + permission checks, read excludes secret, delete guard)
+- [ ] Unit tests: `internal/pveapi/permission_tree_test.go` (ancestor-walk cases incl. ancestor with propagate=0 → false)
+- [ ] Unit tests: `internal/pveapi/errors_test.go` (classifyPVEError body-string mapping fed ACTUAL probed bodies incl. 400 `errors.tokenid` "Token already exists" — see Testing Plan table; asserts match reads full body not just `message`)
+- [ ] Unit tests: `internal/pveapi/client_test.go` (httptest-based wire-encoding: assert real client sends `privsep=0` as literal `"0"`, `enable=1` as `"1"`, `append=1` as `"1"`, `groups` as ONE comma-separated form field never array-repeated; assert `token_secret` never appears in error strings)
+
+**Acceptance Criteria**:
+- `go build ./...` succeeds (no compile errors)
+- Config write/read/delete unit tests pass
+- Permission ancestor-walk unit tests pass (exact path, ancestor with propagate=1, ancestor with propagate=0 rejected, root grant)
+- classifyPVEError unit tests pass (incl. the `errors.tokenid` case matching on full body)
+- Client wire-encoding test (`client_test.go`) asserts `privsep=0`/`enable=1`/`append=1`/`groups`-CSV on the wire and confirms `token_secret` never appears in error strings
+
+**Architecture References**: `docs/ARCHITECTURE.md` Configuration section, Required privilege scoping, ancestor-path walk (Implementation note on permission-tree ancestor walk), DELETE config behavior.
+
+---
+
+### Phase 2 — Userid + TTL Helpers + Roles Path
+
+**Tasks**:
+- [ ] Implement `userid.go` (buildUserID, randomSuffix 8-char base32 from crypto/rand, validateUserComponent, validateLengthBudget)
+- [ ] Implement `(*proxmoxRole).ttls(cfg)` fallback helper on `path_roles.go` (role value or config default) — there is NO `ttl.go`; capping is `framework.CalculateTTL`'s job
+- [ ] Implement `cappedMaxTTL(roleMax, sysMax time.Duration) time.Duration` on `path_roles.go` alongside `ttls()` — 4-case: (roleMax=0)→sysMax; (sysMax=0)→roleMax; (0,0)→0; (A,B)→min(A,B)
+- [ ] Implement `path_roles.go` (POST: ttl validation, userid budget, GetGroup ErrNotFound check (body "does not exist", HTTP 500), per-group-path User.Modify check, GetPermissions realm check via ancestor-walk; GET/LIST/DELETE)
+- [ ] Unit tests: `userid_test.go` (buildUserID format, randomSuffix entropy, validateUserComponent rejects `:`, `/`, whitespace; validateLengthBudget >64 rejected)
+- [ ] Unit tests: `path_roles_test.go` (write validation, GetGroup ErrNotFound (body "does not exist", HTTP 500), per-group-path User.Modify check (propagate=0 → reject), realm check, read/list/delete, `ttls()` fallback incl. both-unset; `cappedMaxTTL` 4-case: roleMax=0→sysMax, sysMax=0→roleMax, 0,0→0, A,B→min(A,B))
+
+**Acceptance Criteria**:
+- Roles CRUD operations work (unit tests pass)
+- Userid validation (charset, length budget) works
+- `ttls()` returns config defaults when role values are unset, and leaves 0 as 0 for `CalculateTTL` to resolve
+
+**Architecture References**: `docs/ARCHITECTURE.md` Roles section, userid format and length budget, TTL Precedence section.
+
+---
+
+### Phase 3 — Creds + Secret Token + WAL (Issuance)
+
+**Tasks**:
+- [ ] Implement `wal.go` (walTypeUser constant, walUser struct, walRollback decoding `map[string]interface{}`, DeleteUser idempotency, accepted-risk header comment)
+- [ ] Implement `path_creds.go` (handleCredsRead full issuance: load role+config, `framework.CalculateTTL`, expire = lease end + 60s grace (refuse if unlimited per expire=0 policy), retry loop with per-attempt `walID, err := PutWAL(...)` → CreateUser → on ErrConflict (body "already exists") `DeleteWAL(ctx, storage, walID)` + retry, read-back assert group membership (ErrNotFound/groups-empty → cleanup + error), CreateToken privsep=false, on token-fail cleanup user+WAL, on DeleteWAL-fail cleanup user + return error, build Secret with internalData including group)
+- [ ] Implement `secret_token.go` (secretToken definition with Fields; **non-nil** stub Renew + Revoke callbacks — `Secret.Response` sets `Renewable = (Renew != nil)`, so a nil stub silently issues non-renewable leases; full impl in Phase 4)
+- [ ] Wire WAL into backend: set `backend.WALRollback = b.walRollback`, `backend.WALRollbackMinAge = 5 * time.Minute`
+- [ ] Unit tests: `path_creds_test.go` (full issuance flow with mock client: success, ErrConflict retry with per-attempt WAL id, group read-back-failure injection, token-fail cleanup, DeleteWAL-fail → error+cleanup via failing-storage wrapper, collision exhaustion, expire grace applied; issuance REFUSED when effective TTL resolves to 0 (unlimited) per Locked Decision #9)
+- [ ] Unit tests: `wal_test.go` (walRollback: map payload decode, DeleteUser success, ErrNotFound (body "no such user", HTTP 500) → success, error → retry, unknown kind → error)
+
+**Acceptance Criteria**:
+- Creds issuance unit tests pass (including ErrConflict retry, group read-back-failure injection, token-fail cleanup, DeleteWAL-fail path)
+- WAL rollback unit tests pass (idempotent delete, unknown kind rejected)
+- `DeleteWAL` is called with the id returned by `PutWAL` (compile-checked against the real signature)
+- `CreateToken` explicitly sets `privsep=0` on the wire
+- `CreateUser` sends `groups=<role.group>` and `expire=<leaseExpiry+grace>`
+- Issued lease is renewable (`resp.Secret.Renewable == true`)
+
+**Architecture References**: `docs/ARCHITECTURE.md` Implementation Notes — Service API Calls (Create ordering), Issuance ordering detail, userid collision retry and token creation conflict, privsep=0, WAL-Based Orphan Recovery section.
+
+---
+
+### Phase 4 — Renew/Revoke Callbacks
+
+**Tasks**:
+- [ ] Implement `secretTokenRenew` in `secret_token.go` (read pve_userid + group + effective_max_ttl from internalData; `framework.CalculateTTL(b.System(), req.Secret.Increment, roleTTL, 0, storedMaxTTL, 0, req.Secret.IssueTime)`; UpdateUser re-sending expire+groups(from InternalData)+enable+append=1; read-back assert group preserved; update internalData["expire"]; return `&logical.Response{Secret: req.Secret}` with TTL/MaxTTL set)
+- [ ] Implement `secretTokenRevoke` in `secret_token.go` (read pve_userid, DeleteUser, ErrNotFound (body "no such user", HTTP 500) → nil, error → return error for Vault retry)
+- [ ] Unit tests: `secret_token_test.go` (renewal: capped from IssueTime not from now — an old lease near its max gets only the remainder; UpdateUser re-sends expire+groups+enable+append; group read from InternalData not role; ErrNotFound(500+body) → fail; revocation: DeleteUser success, ErrNotFound(500+body) → success, error → retry)
+
+**Acceptance Criteria**:
+- Renew unit tests pass (total lease lifetime never exceeds `IssueTime + effective_max_ttl`, UpdateUser re-sends expire+groups+enable+append (full-replace); read-back confirms group preserved, ErrNotFound(500+body) fails renewal)
+- Revoke unit tests pass (idempotent ErrNotFound (body "no such user", HTTP 500) → success, error → retry)
+
+**Architecture References**: `docs/ARCHITECTURE.md` Lease Renewal section, Revocation section, idempotency (body "no such user" on HTTP 500 treated as success).
+
+---
+
+### Phase 5 — Full Unit Suite + Acceptance Tests
+
+**Tasks**:
+- [ ] Ensure all unit tests (`*_test.go`) pass: `make test` green
+- [ ] Implement `acceptance_test.go` with env gating (`VAULT_ACC=1`) and test scenarios:
+  - [ ] `TestAccLifecycle` (config→role→creds→use token→renew→revoke→verify deleted by asserting "no such user" body (HTTP 500), not a 404)
+  - [ ] `TestAccAuthorizationContractCanary` (4 assertions: PUT /access/acl unheld role→403, group-add confers role verified by read-back + ?userid= resolve, expired-user token→401, renewal re-sends groups (full-replace))
+  - [ ] `TestAccFailureInjection` (mid-provision cleanup, idempotent revoke (PVE body "no such user" HTTP 500 → success), insufficient-privilege token — DeleteWAL-fail lives in `path_creds_test.go`)
+  - [ ] `TestAccWALRollback` (manual WAL entry + rollback sweep)
+  - [ ] `TestAccConcurrentIssuance` (10 goroutines, verify collision retry works)
+  - [ ] `TestAccDeleteConfigGuard` (DELETE without force=true refused; with force=true succeeds)
+- [ ] Document required test env vars in `acceptance_test.go` comment header (PVE_ADDR, PVE_TOKEN_ID, PVE_TOKEN_SECRET, PVE_TEST_GROUP)
+- [ ] Run acceptance tests against containerized/dev PVE: `make testacc` green
+
+**Acceptance Criteria**:
+- `make test` passes (all unit tests green)
+- `make testacc` passes (all acceptance tests green against live PVE)
+- 4-assertion authorization contract canary passes (guards against PVE version changes)
+
+**Architecture References**: `docs/ARCHITECTURE.md` Testing Strategy section, Acceptance Tests — authorization contract canary.
+
+---
+
+### Phase 6 — Build/Register/Smoke + CI + Docs
+
+**Tasks**:
+- [ ] Build plugin: `make build` (output to `vault/plugins/`) — `main.go` already exists from Phase 1
+- [ ] Manual smoke test (dev Vault server with `-dev-plugin-dir` → no manual register, enable, write config, write role, read creds, use token, renew, revoke, delete config with `force=true`)
+- [ ] Update `README.md` with: overview, build/install instructions, configuration example, role example, usage example, development/testing notes
+- [ ] CI config (GitHub Actions or equivalent): on PR run `make fmt`, `make lint`, `make test`; nightly/manual job runs `make testacc` with PVE secrets from CI env
+- [ ] Verify `AGENTS.md` and `docs/ARCHITECTURE.md` are accurate and up-to-date
+
+**Acceptance Criteria**:
+- Clean build (`make build` succeeds)
+- Plugin registers, enables, and smoke test passes (issue→use→renew→revoke)
+- CI runs on PR: fmt/lint/test green
+- CI nightly/manual job: testacc green
+- `README.md` has build, config, and usage examples
+
+**Architecture References**: `docs/ARCHITECTURE.md` Root Rotation section (manual operation), Build & Run commands above.
+
+---
+
+## Open Assumptions
+
+Minor details for the implementer to confirm or decide:
+
+1. **`hashicorp/vault/sdk` version**: Do NOT hand-write a version into `go.mod` — run `go get -u github.com/hashicorp/vault/sdk github.com/hashicorp/go-hclog && go mod tidy` and take whatever is current. (The SDK signatures this plan depends on — `PutWAL`/`DeleteWAL`, `CalculateTTL`, `Secret.Response` — were verified against v0.9.1 and are long-stable, but re-check them against the resolved version before writing the issuance path.)
+2. **Plugin serve mode**: Use `plugin.ServeMultiplex` for multiplexed gRPC (recommended for newer Vault versions) or `plugin.Serve` for simpler single-protocol serve. With `ServeMultiplex`, do NOT set `TLSProviderFunc`. Confirm Vault version compatibility.
+3. **`golangci-lint` availability**: Assume `golangci-lint` is installed and available in PATH. Document installation in `README.md` if needed (e.g., `go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest`).
+4. **Crockford base32 alphabet**: Confirm charset `0123456789abcdefghjkmnpqrstvwxyz` (Crockford, lowercase, no padding) for random suffix. Implementation may use a library or manual mapping.
+5. **Acceptance test PVE cluster**: Operator must pre-create the test group (`PVE_TEST_GROUP`) and bind it to a test role (e.g., PVEVMAdmin at `/vms/test`) before running acceptance tests. Document this prerequisite in `acceptance_test.go` and `README.md`.
+6. **WALRollbackMinAge tuning**: 5 minutes is a safe default. May tune lower (e.g., 1 minute) if issuance latency is predictably low, or higher (e.g., 10 minutes) if cluster lock contention causes slower provisioning.
+7. **HTTP client timeout**: Choose a reasonable timeout for PVE API calls (e.g., 30 seconds). May make configurable in future.
+8. **`expire` grace**: 60 seconds past the lease end is the starting value for the clock-skew buffer between the Vault host and the PVE cluster. Tune if the two are known to be tightly NTP-synced (lower) or not synced at all (higher).
+9. **`vault delete ... force=true`**: confirm the installed Vault CLI forwards K=V pairs on DELETE as query parameters (≥ 1.11). Otherwise document the curl form as the supported path.
+
+These are low-risk decisions that don't alter the core design.
+
+---
+
+**End of Implementation Plan**

@@ -107,6 +107,8 @@ exact path AND every ANCESTOR path (walking up `/access/groups` →
 `/access` → `/`), treating a propagated privilege on an ancestor as
 satisfying the requirement.
 
+**Confirmed PVE 9.2.10 (PVE_PROBES.md Probes 1, 1b):** the inner value IS the propagate flag (0/1), and `?path=`/`?userid=` resolve effective privileges server-side. Config-time validation reads the admin token's OWN permissions (bare `GET /access/permissions`) — no extra grant needed. The client-side ancestor walk (`HasPrivilege`) remains the chosen approach; a server-side `?path=` query is a viable simplification ("Lazy Way", Probe 1b) but is optional.
+
 ```
 GET <mount>/config
 ```
@@ -123,10 +125,17 @@ Clears the stored admin credentials and connection configuration.
 **Behavior with outstanding leases**: Because revocation requires the
 admin token, deleting config while leases are outstanding strands them
 (their PVE users/tokens cannot be revoked by the engine). The
-implementation MUST either refuse DELETE while active leases exist, OR
-require an explicit `force=true` flag and clearly warn that outstanding
-leases become non-revocable and must be cleaned up out-of-band via
-Proxmox directly.
+implementation MUST require an explicit `force=true` parameter. Without
+`force=true`, the DELETE is refused with a clear error. **Rationale**:
+The engine does not (and cannot reliably) track outstanding leases — a
+Vault secrets-engine backend has no reliable lease-count API, and a
+counter would drift on crashes. Therefore the engine cannot conditionally
+refuse based on lease existence. Requiring `force=true` is an explicit
+acknowledgement by the operator. **WARNING**: Deleting the config removes
+the admin credentials, so any OUTSTANDING leases become NON-REVOCABLE by
+the engine — their PVE users/tokens will remain until they hit their
+`expire` backstop or are cleaned up out-of-band. Operators should revoke
+outstanding leases BEFORE deleting config.
 
 
 ## Roles
@@ -148,6 +157,7 @@ operators don't silently get a value different from what they specified (the
 TTL precedence math at issuance would otherwise cap it without complaint).
 
 `group` is validated against `GET /access/groups/{group}` at write time.
+A nonexistent group returns HTTP 500 + body `"does not exist"` (NOT 404, Probe 5); the precheck keys on that body.
 The group must already exist on the Proxmox cluster and have been
 pre-bound by an operator (typically via `root@pam` or a cluster admin) to
 the desired PVE role(s) at the desired ACL path(s). The engine does NOT
@@ -158,6 +168,8 @@ defining the corresponding Vault role.
 confirm the admin token holds `Realm.AllocateUser` at
 `/access/realm/<role.realm>` (since `realm` is a per-role field unknown
 at config time), using the same ancestor-path walk validation described above under Configuration validation.
+
+Role-write additionally verifies `User.Modify` is effective at the exact **per-group path** `/access/groups/<role.group>`. PVE's permissions tree exposes the propagate flag (`:0` vs `:1`, Probe 9), and user creation checks the per-group path — so a `--propagate 0` grant at `/access/groups` passes the parent check but fails creation. Checking the per-group path at role-write time catches this misconfiguration early.
 
 If the operator renames, deletes, or re-binds the group after the role
 is created, issuance for that role will fail (group not found) or
@@ -202,7 +214,8 @@ random suffix and realm `pve` (3 chars), fixed overhead = 8 + 3 (two `-`
 and one `@`) + 3 (realm) = 14, leaving 50 characters to share between
 `user_prefix` and `role`. The exact budget scales with realm length (a
 longer realm leaves fewer chars). Reject `user_prefix` or role name values
-that: (a) contain whitespace, `:`, or `/`, or (b) would cause the
+that: (a) are empty, or contain whitespace, `:`, `/`, `@`, or `!` (the `@` and `!` break
+the `<user>@<realm>!<tokenid>` userid/token-header grammar), or (b) would cause the
 assembled userid to exceed the 64-character limit. Invalid values are
 rejected at config/role-write time with a clear error rather than failing
 at credential-issuance time.
@@ -276,7 +289,14 @@ The `pve_userid` and `token_id` use the realm configured in the role
 
 Order matters: user must exist before token creation. The PVE API
 accepts `groups` at user creation time, so the synthetic user is created
-already in the group (no separate group-membership step needed). The
+already in the group (no separate group-membership step needed). `groups` is
+a `pve-groupid-list`: send it as ONE comma-separated field (never array-repeated).
+**Confirmed PVE 9.2.10 (PVE_PROBES.md GROUPADD): single-call create with `groups=<group>` lands membership**,
+verifiable via `GET /access/users/{id}.groups` OR `GET /access/groups/{id}.members`. Because
+PVE returns HTTP 200 even when it silently drops an unresolvable group id (observed on
+modify/append; on create, PVE instead REJECTS with HTTP 500 `"no such group"` — the
+read-back assertion covers both paths), the engine MUST
+read the user back after create and assert the group is present before minting the token. The
 plugin **MUST** explicitly set `privsep=0` on token creation. Proxmox
 defaults to `privsep=1` (privilege separation enabled), which requires the
 token principal to have its own separate ACL; omitting `privsep` or using
@@ -306,17 +326,23 @@ so revoke doesn't need to re-derive it.
 
 Vault-side lease renewal extends the lease TTL up to the effective
 `max_ttl` captured at issuance time (see TTL Precedence below). Renewal
-also issues `PUT /access/users/{userid}` with the new `expire` timestamp
-(and ONLY expire — no other fields) so the Proxmox-side backstop doesn't
-cut the credential off before the Vault lease does. **Confirmed on PVE
-9.2.10**: renewal with only `expire` PRESERVES existing group membership
-(the groups array and effective privileges remain intact after the PUT).
-Therefore renewal need not re-send the `groups` parameter. If a renewal
+also issues `PUT /access/users/{userid}` re-sending `expire`+`groups`+`enable`+`append=1` together. Note that `enable=1` re-enables a user an operator disabled out-of-band, so disabling the PVE user is NOT a sticky kill-switch across renewal — to terminate a lease, revoke it in Vault (which deletes the user). **Revocation is the only supported kill path; out-of-band PVE user disable is not sticky across renewal.**
+**Confirmed on PVE 9.2.10 (PVE_PROBES.md Probe 7): `PUT /access/users` is FULL-REPLACE.**
+An expire-only PUT WIPES the `groups` array (observed `groups:[]`), stripping the credential's
+effective privileges. Renewal therefore MUST re-send the target group. The full-replace wipe
+is confirmed; the preserve path (re-sending `groups` retains membership) is confirmed by
+Probe RENEWAL-PRESERVE (17 Aug 2026 — groups `["vault-test-grp"]` read back, expire advanced
+1786986804→1786990429). The runtime read-back assertion remains as defense-in-depth. The group is
+read from the lease's InternalData (`group` field), NOT from the role — the role may have
+been deleted or re-bound since issuance. After the PUT, the engine reads the user back
+(`GET /access/users/{userid}`) and asserts the group is still present (PVE silently drops
+unresolvable group ids with HTTP 200 on modify/append; on create, PVE instead REJECTS with
+HTTP 500 `"no such group"` — the read-back assertion covers both paths — PVE_PROBES.md GROUPADD). If a renewal
 request would exceed `max_ttl`, the new TTL is capped at `max_ttl`.
 
-If the `PUT /access/users/{userid}` call returns 404 (the synthetic user
+If the `PUT /access/users/{userid}` call returns the body `"no such user"` (the synthetic user
 was removed out of band), the renewal FAILS — the lease then runs out its
-current TTL and normal revocation cleans up (a 404 on the eventual revoke
+current TTL and normal revocation cleans up (a `"no such user"` body on the eventual revoke
 DELETE is already treated as success).
 
 ### TTL Precedence
@@ -328,26 +354,35 @@ role values with config defaults as fallbacks:
 role_ttl     = role.ttl     or config.default_ttl
 role_max_ttl = role.max_ttl or config.default_max_ttl
 eff_max_ttl  = min(role_max_ttl, Vault mount/system max TTL)
-eff_ttl      = min(requested TTL or role_ttl, eff_max_ttl)
+eff_ttl      = min(role_ttl, eff_max_ttl)          # no requested TTL at issuance
 ```
 
 Key points:
 - `config.default_ttl` and `config.default_max_ttl` are **fallback values**
   used only when the role does not define its own `ttl` or `max_ttl`.
-- The requested TTL (if provided at issue time) is capped by `eff_max_ttl`,
-  not by `role_ttl` — the TTL governs the default/initial lease duration,
-  while max_ttl is the hard ceiling.
+- **There is no issuance-time requested TTL**: `<mount>/creds/:role` declares no `ttl` field
+  (matching the database and terraform secrets engines). A requested `increment` applies only
+  on lease renewal (`req.Secret.Increment`), capped at `eff_max_ttl` measured from the
+  original issue time.
 - Vault's mount/system maximum TTL remains the absolute hard ceiling above
   all other limits.
+- **Unlimited TTL is refused at issuance**: if `eff_ttl` resolves to 0 (all sources unset),
+  issuance fails with a clear error rather than creating a never-expiring PVE user. The
+  `expire` backstop (see Additional Security Considerations) is defense-in-depth against
+  delayed/failed Vault revocation and must not be disabled; an `expire=0` user would have no
+  backstop. Operators must set a finite ttl/max_ttl on the role or a config default.
 - The computed `eff_max_ttl` is captured in the lease's internal data at
   issue time and governs all subsequent renewals for that lease.
 - On renewal, the lease TTL is extended up to this effective `max_ttl`, and
-  the Proxmox-side `expire` backstop is updated to match the new expiry.
+  the Proxmox-side `expire` backstop is updated to match the new expiry
+  via the full-replace `PUT /access/users` that also re-sends `groups`+`enable`+`append=1` (see Lease Renewal).
 
 ### Revocation
 
 Single `DELETE /access/users/{userid}` call, as above. The engine should
-treat a 404 on delete as success (already gone), making revocation idempotent.
+treat a **DELETE for a nonexistent user as success** (idempotent).
+**Confirmed PVE 9.2.10 (PVE_PROBES.md Probe 3): PVE returns HTTP 500 with body `"no such user (...)"`, NOT 404.**
+Idempotency therefore keys on the BODY STRING (`"no such user"`), never on a 404 status.
 
 If the delete call fails for other reasons (network blip, transient
 error), Vault's built-in revocation retry/backoff handles retry.
@@ -357,7 +392,7 @@ error), Vault's built-in revocation retry/backoff handles retry.
 The plugin persists three categories of data in Vault's encrypted storage
 barrier:
 
-**Config storage** (single entry at `config/`):
+**Config storage** (single entry at `config`):
 - `address`, `tls_skip_verify`, `ca_cert`, `default_ttl`, `default_max_ttl`
 - `token_id`, `token_secret` — both are stored encrypted; `token_id` is
   returned on GET (identity, not a credential), `token_secret` is never read
@@ -370,6 +405,7 @@ barrier:
 used at renew/revoke time):
 - `pve_userid` — the synthetic Proxmox user ID created for this lease
   (fixed at issue time)
+- `group` — the target PVE group the synthetic user was added to (fixed at issue time). Re-sent on every renewal PUT (PVE PUT is full-replace) so renewal does not depend on the role still existing.
 - `expire` — the Unix epoch timestamp set on the Proxmox-side user
   (mutable: rewritten on each successful renewal to match the new lease
   expiry)
@@ -421,22 +457,28 @@ and confirm the swap.
   internal error, no partial state left (if the token-creation step
   fails after user creation, best-effort delete the user before
   returning the error, so a failed issuance doesn't leak an orphaned
-  identity — also delete the WAL entry for the userid)
+      identity — then delete the WAL entry by the id returned from PutWAL
+      ONLY if the compensating DeleteUser returned nil or ErrNotFound;
+      if DeleteUser fails transiently, LEAVE the WAL entry for walRollback
+      to retry — never orphan a user with no surviving WAL entry)
 - **Userid collision** (random suffix conflict on `POST /access/users`
-  returns 409) → For each suffix attempt: call `framework.PutWAL` with
-  the userid → attempt `POST /access/users` → on 409, call
-  `framework.DeleteWAL` for that userid, generate a new random suffix,
-  and loop (bounded retry count). On success, proceed to token creation
-  (step 3 in the issuance ordering), then continue through step 5
-  (return the Secret). This per-attempt WAL ordering prevents orphaning
-  the userid from the WAL entry when retrying with a new suffix.
-- **Token creation conflict** (409 on `POST
-  /access/users/{userid}/token/{tokenid}`) — Since each lease uses a
-  unique freshly-created userid (step 2), and userid collisions already
-  retry with a new suffix, a 409 at the token-creation step is **not
-  expected** to occur. If it does, treat it as an internal error and
-  surface it. Do **NOT** auto-delete any user, as a colliding userid would
-  belong to a different active lease.
+  → **PVE returns HTTP 500 with body `"...already exists"`, NOT 409**
+  (confirmed PVE 9.2.10, Probe 2); the engine detects collision by BODY STRING.)
+  → For each suffix attempt: call `framework.PutWAL(ctx, storage, kind, walUser{UserID: userid})`
+  which RETURNS a WAL id string → attempt `POST /access/users` → on ErrConflict (body
+  "already exists"), call `framework.DeleteWAL(ctx, storage, walID)` with THAT id (NOT the
+  userid — the SDK keys WALs by the returned id), generate a new random suffix, and loop
+  (bounded retry count). On success, proceed to token creation (step 3 in the issuance
+  ordering), then continue through step 5 (return the Secret). Each attempt keeps its own
+  walID. This per-attempt WAL ordering prevents orphaning the userid from the WAL entry when
+  retrying with a new suffix.
+- **Token creation conflict** — **PVE returns HTTP 400 with body `"Token already exists"`, NOT 409**
+  (confirmed PVE 9.2.10, Probe 6b). Detected by body string. — Since each lease uses a
+  unique freshly-created userid (step 2), and token ids are scoped per-user, a token-creation
+  conflict at this step is **not expected** to occur. If it does, treat it like any other
+  `CreateToken` error: best-effort `DeleteUser`, then `DeleteWAL` ONLY if `DeleteUser`
+  returned `nil` or `ErrNotFound`; if `DeleteUser` fails transiently, LEAVE the WAL entry
+  for walRollback to retry. Surface as internal error.
 - `403` on config validation → surface clearly; required privileges
   should be checked at `POST <mount>/config` time via the
   privilege-bearing call (`GET /access/permissions` parsed as a tree for
@@ -451,27 +493,25 @@ To handle process death or Vault failover mid-provisioning, the engine uses
 Vault's Write-Ahead Log (WAL) pattern:
 
 **Issuance ordering** (ALL steps occur BEFORE returning the Secret to the caller):
-1. `framework.PutWAL` with the intended `userid` and a rollback-specific
-   entry type — written for EACH userid creation attempt (including
-   retries on 409 suffix collision)
+1. `framework.PutWAL(ctx, storage, kind, walUser{UserID: userid})` — RETURNS a WAL id
+   string — written for EACH userid creation attempt (including retries on ErrConflict
+   suffix collision). Keep the returned id for the matching DeleteWAL.
 2. `POST /access/users` — create the synthetic PVE user (with
    `groups=<role.group>`, `expire=<lease_expiry_unix>`)
 3. `POST /access/users/{userid}/token/{tokenid}` — mint the API token
    (`privsep=0`)
-4. `framework.DeleteWAL` for the userid — if this step FAILS, the handler
-   MUST NOT return the Secret; instead it MUST best-effort
-   `DELETE /access/users/{userid}` (cleanup the just-created user), then
-   return an error to the caller. The caller retries and receives a fresh
-   credential. Because no Secret/lease was returned, no live credential is
-   exposed to a later WALRollback.
+4. `framework.DeleteWAL(ctx, storage, walID)` using the id returned by PutWAL (NOT the
+   userid) — if this step FAILS, the handler MUST NOT return the Secret; instead it MUST
+   best-effort `DELETE /access/users/{userid}` (cleanup the just-created user), then return
+   an error to the caller. The caller retries and receives a fresh credential. Because no
+   Secret/lease was returned, no live credential is exposed to a later WALRollback.
 5. Return the `*logical.Response` with the Secret (Vault core then
    registers the lease)
 
-**On 409 collision retry**: call `framework.DeleteWAL` for the
-abandoned userid, generate a new random suffix, and `PutWAL` again
-with the new userid before retrying at step 2. This per-attempt WAL
-ordering prevents orphaning the userid from the WAL entry when retrying
-with a new suffix.
+**On ErrConflict collision retry**: call `framework.DeleteWAL(ctx, storage, walID)` for the
+abandoned attempt's id, generate a new random suffix, and `PutWAL` again for the new userid
+(capturing a NEW walID) before retrying at step 2. This per-attempt WAL ordering prevents
+orphaning the userid from the WAL entry when retrying with a new suffix.
 
 **Implement `WALRollback`** to handle orphaned WAL entries (those left
 behind if Vault crashes or fails over between user creation and lease
@@ -479,8 +519,7 @@ registration):
 
 1. For each WAL entry (representing a userid from a failed/incomplete
    issuance), issue `DELETE /access/users/{userid}`.
-2. Treat a 404 response on the `DELETE` as success (idempotent: the user
-   was already cleaned up or never existed).
+2. Treat a **nonexistent-user DELETE as success** (idempotent). PVE returns HTTP 500 + body `"no such user"` (NOT 404, Probe 3); the rollback keys on that body string.
 
 **Division of responsibility**:
 - **WALRollback**: Sweeps users left orphaned by a crash BETWEEN `PutWAL`
@@ -489,9 +528,9 @@ registration):
   so no lease was registered by Vault core. WALRollback runs on Vault
   startup/unseal and periodically thereafter.
 - **Vault's revocation retry**: Handles failed revocations. If a
-  `DELETE /access/users` call fails for reasons other than 404 (network
+  `DELETE /access/users` call fails for reasons other than ErrNotFound (body "no such user") (network
   blip, transient error), Vault's built-in revocation retry/backoff
-  re-runs the Revoke operation until it succeeds (404 treated as success).
+  re-runs the Revoke operation until it succeeds (ErrNotFound treated as success).
   This is NOT WALRollback — it is Vault core retrying a failed revoke on
   an existing lease.
 - **PVE `expire` backstop**: Caps any leaked user that slips through both
@@ -522,7 +561,7 @@ WALRollback never faces a live returned credential.
 - **TTL calculation** — verify precedence rules (see TTL Precedence
   section) are applied correctly at issuance and renewal
 - **Error handling** — test compensation paths (orphaned user cleanup on
-  mid-provisioning failure), idempotent deletion (404 treated as success)
+  mid-provisioning failure), idempotent deletion (ErrNotFound body "no such user" treated as success)
 - **Userid sanitization** — verify `user_prefix` and role name validation
   against Proxmox userid character set and length limits
 
@@ -533,37 +572,39 @@ WALRollback never faces a live returned credential.
   instance with a test admin token
 - **Full lifecycle coverage** — pre-create a PVE group bound to a test
   role; create credential → use the issued token to verify it can perform
-  its scoped actions and **cannot** exceed them (verify via
-  `GET /access/permissions`) → renew the lease → revoke and confirm the
-  user/token are deleted
+  its scoped actions and **cannot** exceed them. **The primary privilege oracle is BEHAVIORAL**: call a group-role-gated endpoint with the issued token (e.g. `GET /cluster/resources?type=vm`, expect 200) — this is the only confounder-free proof (Probe GROUPADD / 6-fix-E). The `GET /access/permissions?userid=<userid>&path=/` server-side dump is OPTIONAL and requires a TEMPORARY cluster-wide `Sys.Audit` grant on the admin token; under the least-privilege admin it returns `403 (/access, Sys.Audit)` (Probe 6-fix-C/D, Probe CLEAN 5-B). If used, tear the grant down with the BARE `--delete` flag (`pveum acl modify / --user X --role Y --delete`, NOT `--delete 1`). The token's BARE `/access/permissions` reflects only the authenticating principal and is NOT evidence of the synthetic user's group-derived privileges (Probe 6). → renew the lease → revoke and confirm the user/token are deleted by asserting the `"no such user"` body (HTTP 500), not a 404.
 - **Authorization contract canary** — assert the confirmed PVE 9.2.10
   behavior the design depends on: (a) direct `PUT /access/acl` of an
   unheld role by the admin token returns 403; (b) group-membership add
   succeeds and confers the group's role(s); (c) a token whose owning
   USER has an `expire` in the past is rejected at authentication (401);
-  (d) after a renewal (`PUT /access/users/{userid}` with `expire` only),
-  the issued token still holds the group's roles (effective privileges
-  unchanged — guards against a future PVE version changing the
-  absent-groups=preserve semantics). These four assertions guard against
+  (d) after a renewal (`PUT /access/users/{userid}` re-sending `expire`+`groups`+`enable`+`append=1`),
+  the issued token still holds the group's roles (read-back confirms `groups` preserved).
+  PVE PUT is full-replace (Probe 7): an expire-only PUT WIPES groups; the canary guards
+  against a regression to expire-only renewal. Add a control: expire-only PUT on a throwaway
+  user leaves `groups:[]`. These four assertions guard against
   a future PVE version silently changing the authorization or expiry
   enforcement model the engine relies on. The user-level `expire`
-  backstop behavior and the renewal-preserves-groups behavior are
-  confirmed on PVE 9.2.10.
+  backstop behavior and the full-replace wipe behavior are confirmed on PVE 9.2.10;
+  canary (d) serves as a regression guard in the acceptance suite (the decisive live evidence
+  for the preserve path is Probe RENEWAL-PRESERVE, 17 Aug 2026 — groups `["vault-test-grp"]`
+  read back, expire advanced 1786986804→1786990429). The control sub-assertion (expire-only PUT
+  leaves `groups:[]`) guards against a future regression to expire-only renewal.
 - **Failure injection** — simulate mid-provisioning failures (network
   error after user creation but before/during token creation) and
   verify best-effort cleanup; inject a `framework.DeleteWAL` failure at
   step 4 and assert (a) issuance returns an error (no Secret), and (b) the
   just-created PVE user is cleaned up (best-effort delete ran); test
-  idempotent revocation (404 on delete treated as success); test root token
+  idempotent revocation (PVE body `"no such user"` (HTTP 500) treated as success); test root token
   lacking required privileges
 - **Concurrent issuance** — test concurrent credential issuance to verify
   suffix-collision retry handling works correctly under load
 - **WAL rollback** — simulate process death mid-provision (e.g., after user
   creation but before lease write) and verify WAL rollback sweeps the
   orphaned user
-- **DELETE config guard** — assert that `DELETE <mount>/config` either
-  refuses (errors) when outstanding leases exist, OR requires an explicit
-  `force=true` flag (matching the documented MUST in the DELETE config
+- **DELETE config guard** — assert that `DELETE <mount>/config` without
+  `force=true` is refused with a clear error, and that DELETE with
+  `force=true` succeeds (matching the documented MUST in the DELETE config
   behavior section)
 - **Cluster failure modes** — test behavior under Proxmox quorum loss and
   ACL lock contention (should surface as retryable errors)

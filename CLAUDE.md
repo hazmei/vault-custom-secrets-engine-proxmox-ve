@@ -1,0 +1,66 @@
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+@AGENTS.md
+
+## Commands
+
+No build/test/lint config exists yet — the repo is docs-only. Once `go.mod` exists:
+
+```bash
+go build ./...
+go test ./...                              # unit tests (mocked Proxmox client)
+go test ./... -run TestXxx -v              # single test
+VAULT_ACC=1 go test ./... -run TestAcc -v  # acceptance tests (needs live/dev Proxmox)
+golangci-lint run
+```
+
+Add a Go `.gitignore` before creating any build artifacts.
+
+## Constraints beyond AGENTS.md
+
+These require reading `docs/ARCHITECTURE.md` end-to-end to discover:
+
+- **Userid length limit** (`docs/ARCHITECTURE.md`, Roles section — userid format) — the assembled
+  `{user_prefix}-{role}-{random}@{realm}` must be ≤ 64 chars *including* the realm.
+  PVE returns HTTP 400 `user name '<name>@<realm>' is too long (N > 64)`.
+  Budget: `len(prefix)+1+len(role)+1+8+1+len(realm) ≤ 64`. Random suffix is 8-char
+  base32 (~40 bits). Validate `user_prefix` and role name at **write time**, not issue time.
+
+- **WAL issuance ordering** (`docs/ARCHITECTURE.md`, WAL-Based Orphan Recovery section) —
+  `PutWAL(userid)` → `POST /access/users` → **`GET /access/users/{userid}` read-back assert
+  group membership** (PVE silently drops unresolvable group ids with HTTP 200; MUST verify
+  before minting token) → `POST .../token/{tokenid}` → `DeleteWAL` → *then* return the
+  Secret. Every step precedes returning the `*logical.Response`; Vault core registers the
+  lease after the backend returns and there is no post-lease hook. If `DeleteWAL` fails,
+  do **not** return the Secret — best-effort `DELETE` the user and error out. Implement
+  `WALRollback` to sweep orphans (body `"no such user"` on HTTP 500 = success — PVE never
+  returns 404 for a missing user, Probe 3). Note also: `PutWAL` returns a WAL id and
+  `DeleteWAL` takes that id, not the userid.
+
+- **Lease internalData fields** (`docs/ARCHITECTURE.md`, Storage Schema section) — `pve_userid` (fixed),
+  `group` (fixed at issue; the target PVE group, re-sent on every full-replace renewal PUT so
+  renewal does not depend on the role still existing), `expire` (rewritten on each renew),
+  `role_name` (fixed; read on renew only to load the role's ttl, with fallback to the lease
+  TTL if the role is gone), `effective_max_ttl` (fixed at issue, governs renewals). Note:
+  these round-trip through JSON as `float64`/`string` — convert, don't assert to `int64`.
+
+- **Single pooled HTTP client** (`docs/ARCHITECTURE.md`, HTTP Client and Connection Pooling section) — one shared client
+  built from the stored TLS settings at config-write time, rebuilt on config update.
+  Not one client per request.
+
+- **Cluster writes are quorum-gated** (`docs/ARCHITECTURE.md` Proxmox Cluster Considerations) —
+  `POST`/`DELETE` on `/access/users` take a cluster-wide lock. Just RETURN the error to Vault
+  core on renew/revoke — core's built-in retry/backoff handles quorum loss and lock
+  contention. There is NO custom `RetryableError` type (nothing branches on it); do not add
+  one unless a call site actually needs it (IMPLEMENTATION_PLAN.md errors.go note).
+
+- **`<mount>/config` DELETE guard** (`README.md`, Vault API Paths table) — ALWAYS requires
+  explicit `force=true`. The engine cannot reliably track outstanding leases (no SDK
+  lease-count API; a counter drifts on crash/failover), so a conditional "refuse while
+  leases exist" check is not feasible. `force=true` is the explicit operator acknowledgement
+  that outstanding leases will become non-revocable once the admin credential is removed.
+
+`docs/ARCHITECTURE.md` is authoritative for the storage schema, error/compensation
+tables, and threat model. Read it before implementing.
