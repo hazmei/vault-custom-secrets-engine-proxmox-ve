@@ -60,7 +60,7 @@ These require reading `docs/ARCHITECTURE.md` end-to-end to discover:
   explicit `force=true`. The engine cannot reliably track outstanding leases (no SDK
   lease-count API; a counter drifts on crash/failover), so a conditional "refuse while
   leases exist" check is not feasible. `force=true` is the explicit operator acknowledgement
-  that outstanding leases will become non-revocable once the admin credential is removed.
+  that outstanding leases will become non-revocable and non-renewable once the admin credential is removed (renewal also loads config to reach PVE, so it fails immediately too).
 
 `docs/ARCHITECTURE.md` is authoritative for the storage schema, error/compensation
 tables, and threat model. Read it before implementing.

@@ -9,7 +9,7 @@ This is a greenfield Go implementation of the Proxmox VE dynamic-secrets engine 
 These design choices are baked into the implementation and are **not open for revision** during initial implementation:
 
 - **Go module path**: `github.com/hazmei/vault-plugin-secrets-proxmox`
-- **DELETE `<mount>/config` guard**: ALWAYS requires `force=true` query parameter. The engine does NOT track active leases (no reliable SDK lease-count API; a counter would drift on crash/failover). Outstanding leases become non-revocable on config delete; operators must revoke leases first, then delete config.
+- **DELETE `<mount>/config` guard**: ALWAYS requires `force=true` query parameter. The engine does NOT track active leases (no reliable SDK lease-count API; a counter would drift on crash/failover). Outstanding leases become non-revocable and non-renewable on config delete — renewal also loads config to reach PVE, so it fails immediately too; operators must revoke leases first, then delete config.
 - **userid-collision retry bound**: 5 attempts maximum, then surface as internal error.
 - **Random suffix format**: 8-character lowercase base32 (Crockford-style alphabet without padding), generated from `crypto/rand` (~40 bits entropy).
 - **WAL kind name**: `"pve_user"`; `WALRollbackMinAge`: 5 minutes.
@@ -683,10 +683,14 @@ Every attempt therefore has to keep its own `walID`.
              // retries the cleanup. Do NOT DeleteWAL here (would orphan the user).
        - return error (wrap delErr if non-nil/non-NotFound so the operator sees the cleanup failure)
    g. If success:
-        h. READ-BACK ASSERT (PVE silently drops unresolvable group ids with HTTP 200 on modify/append; on create, PVE instead REJECTS with HTTP 500 "no such group" — the read-back assertion covers both paths):
-           - info, err := GetUser(userid)
-           - if err or role.Group NOT in info.Groups:
-               - delErr := DeleteUser(userid)
+       h. READ-BACK ASSERT (PVE silently drops unresolvable group ids with HTTP 200 on modify/append; on create, PVE instead REJECTS with HTTP 500 "no such group" — the read-back assertion covers both paths):
+            - info, err := GetUser(userid)
+            - if err or role.Group NOT in info.Groups:
+                // NOTE: this fails closed — a transient GetUser error is treated the same as a
+                // confirmed-absent group (both tear down the user). Acceptable for correctness;
+                // for future retry/metrics, distinguish "group confirmed absent in a successful
+                // GetUser" from "GetUser errored (couldn't confirm)" in the log/error message.
+                - delErr := DeleteUser(userid)
                - if delErr == nil OR errors.Is(delErr, pveapi.ErrNotFound):
                      // user is gone (or never persisted) → safe to drop the WAL entry
                      framework.DeleteWAL(ctx, req.Storage, walID) [best-effort]
@@ -837,7 +841,9 @@ Registered via `backend.WALRollback` and `backend.WALRollbackMinAge = 5 * time.M
 ```
 
 **Division of responsibility**:
-- **WALRollback**: Cleans up users orphaned by crash/failover BETWEEN `PutWAL` and `DeleteWAL` (i.e., WAL entry exists but issuance never completed, no Secret returned, no lease registered). It ALSO catches users left behind when an in-line cleanup `DeleteUser` fails transiently: the issuance path deletes its WAL entry ONLY when `DeleteUser` returns nil or `ErrNotFound`; if `DeleteUser` fails otherwise, the WAL entry is deliberately RETAINED and the error is returned so walRollback retries the delete. This guarantees no code path can orphan a PVE user with no surviving WAL entry.
+- **WALRollback**: Cleans up users orphaned by crash/failover BETWEEN `PutWAL` and `DeleteWAL` (i.e., WAL entry exists but issuance never completed, no Secret returned, no lease registered). It ALSO catches users left behind when an in-line cleanup `DeleteUser` fails transiently: the issuance path deletes its WAL entry ONLY when `DeleteUser` returns nil or `ErrNotFound`; if `DeleteUser` fails otherwise, the WAL entry is deliberately RETAINED and the error is returned so walRollback retries the delete. This guarantees no code path **chooses** to orphan a PVE user with no surviving WAL entry (every in-line cleanup that deletes the WAL first confirms the user is gone or ErrNotFound).
+
+  **Accepted risk — crash between `DeleteWAL` and lease persistence**: there is ONE window this does not cover: a crash between the successful `DeleteWAL` (issuance step 9) and Vault core persisting the returned Secret/lease. In that narrow window the WAL entry is already gone and no lease exists, so neither WALRollback nor Vault revocation fires. The PVE `expire` backstop (set to lease-end + grace at creation time) is the sole — and coarse — cleanup for this specific case, reaping the synthetic user at expiry rather than within WALRollbackMinAge. Requires a crash inside that narrow window. Documented, not mitigated.
 - **Vault revocation retry**: Handles failed revocations on existing leases.
 - **PVE `expire` backstop**: Caps any leaked user that slips through both.
 

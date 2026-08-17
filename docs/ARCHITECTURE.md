@@ -132,10 +132,11 @@ Vault secrets-engine backend has no reliable lease-count API, and a
 counter would drift on crashes. Therefore the engine cannot conditionally
 refuse based on lease existence. Requiring `force=true` is an explicit
 acknowledgement by the operator. **WARNING**: Deleting the config removes
-the admin credentials, so any OUTSTANDING leases become NON-REVOCABLE by
-the engine — their PVE users/tokens will remain until they hit their
-`expire` backstop or are cleaned up out-of-band. Operators should revoke
-outstanding leases BEFORE deleting config.
+the admin credentials, so any OUTSTANDING leases become NON-REVOCABLE and
+NON-RENEWABLE by the engine — renewal also loads config to reach PVE, so
+it fails immediately too. Their PVE users/tokens will remain until they hit
+their `expire` backstop or are cleaned up out-of-band. Operators should
+revoke outstanding leases BEFORE deleting config.
 
 
 ## Roles
@@ -180,7 +181,7 @@ OUTSTANDING credential immediately, not just future issuance.**
 Additionally, because `DELETE /access/users/{userid}` checks `User.Modify`
 at `/access/groups`, if the operator removes the group or the admin
 token's grant on `/access/groups`, outstanding leases become
-NON-REVOCABLE and their PVE users/tokens orphan on the cluster. These
+NON-REVOCABLE and NON-RENEWABLE and their PVE users/tokens orphan on the cluster. These
 are out-of-contract operator actions.
 
 **Guidance**: enforce a **1:1 mapping** between a Vault role and a PVE
@@ -548,6 +549,13 @@ completes) has no surviving WAL entry because step 5 is only reached after
 step 4 (`framework.DeleteWAL`) succeeds. If step 4 fails, issuance errors
 out and the just-created user is cleaned up (best-effort delete), so
 WALRollback never faces a live returned credential.
+
+**Accepted risk**: one narrow window is NOT covered — a crash between the
+successful `DeleteWAL` (step 4) and Vault core persisting the returned
+Secret/lease (step 5). In that window the WAL entry is already gone and no
+lease exists, so neither WALRollback nor Vault revocation fires. The PVE
+`expire` backstop is the sole cleanup for this specific case. See the
+WAL Rollback section of `docs/IMPLEMENTATION_PLAN.md` for full detail.
 
 ## Testing Strategy
 
