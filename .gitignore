@@ -1,0 +1,28 @@
+# Binaries
+/bin/
+/dist/
+/vault/plugins/
+*.test
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Go build
+vendor/
+*.out
+
+# Environment
+.env
+.env.*
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
