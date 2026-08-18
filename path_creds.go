@@ -5,8 +5,9 @@
 //   - Compute effective TTL via framework.CalculateTTL (with correct fallback chain).
 //   - Refuse issuance if effective TTL resolves to 0/unlimited (Locked Decision #9).
 //   - expire = lease-end-unix + 60s grace.
-//   - Bounded retry loop with per-attempt WAL:
-//     PutWAL → CreateUser → on ErrConflict → DeleteWAL(walID) + retry.
+//   - Bounded retry loop with per-attempt WAL + nonce:
+//     generate nonce → PutWAL{UserID,Nonce} → CreateUser{Comment=nonce} →
+//     on ErrConflict → DeleteWAL(walID) + retry.
 //   - Read-back GetUser: assert group membership.
 //   - CreateToken with privsep=0 (MANDATORY).
 //   - On success: DeleteWAL(walID) before returning Secret.
@@ -166,20 +167,33 @@ func (b *backend) handleCredsRead(ctx context.Context, req *logical.Request, d *
 
 		userid = buildUserID(role.UserPrefix, roleName, suffix, role.Realm)
 
+		// Generate a per-attempt nonce for ownership verification.
+		// The nonce is written to both the WAL entry and the PVE user's comment
+		// field. walRollbackUser compares the two at rollback time: a mismatch
+		// means the userid belongs to a foreign user (collision with a pre-existing
+		// account) and must not be deleted.
+		nonce, nonceErr := randomSuffix()
+		if nonceErr != nil {
+			return nil, fmt.Errorf("proxmox: creds/%s: generate nonce: %w", roleName, nonceErr)
+		}
+
 		// Step 4a: Write WAL before CreateUser. Capture the RETURNED id (random UUID).
 		// This id is used for DeleteWAL — it is NOT the userid.
 		var walErr error
-		walID, walErr = framework.PutWAL(ctx, req.Storage, walTypeUser, walUser{UserID: userid})
+		walID, walErr = framework.PutWAL(ctx, req.Storage, walTypeUser, walUser{UserID: userid, Nonce: nonce})
 		if walErr != nil {
 			return nil, fmt.Errorf("proxmox: creds/%s: PutWAL for %q: %w", roleName, userid, walErr)
 		}
 
-		// Step 4b: CreateUser with groups=<role.group> and expire.
+		// Step 4b: CreateUser with groups=<role.group>, expire, and Comment=nonce.
+		// The nonce in Comment enables walRollbackUser to verify ownership before
+		// deleting, closing the stale-WAL foreign-user-deletion class.
 		createErr := client.CreateUser(ctx, pveapi.CreateUserRequest{
-			UserID: userid,
-			Groups: role.Group, // single CSV field (only one group per role)
-			Expire: expireUnix,
-			Enable: true,
+			UserID:  userid,
+			Groups:  role.Group, // single CSV field (only one group per role)
+			Expire:  expireUnix,
+			Enable:  true,
+			Comment: nonce, // ownership marker for walRollbackUser
 		})
 
 		if createErr == nil {
@@ -196,10 +210,12 @@ func (b *backend) handleCredsRead(ctx context.Context, req *logical.Request, d *
 				// DeleteWAL failure on the collision path is a hard stop.
 				// The stale WAL entry names a userid we did NOT create (the
 				// conflicting user belongs to another lease or external entity).
-				// Continuing would risk walRollback deleting a foreign user after
-				// WALRollbackMinAge elapses. Surface the failure immediately so
-				// the operator can investigate; do NOT set walID="" and continue.
-				b.Logger().Error("creds: DeleteWAL after collision failed; aborting issuance to avoid stale WAL naming a foreign user",
+				// walRollbackUser's nonce/comment ownership check prevents it
+				// from deleting the foreign colliding user: the WAL entry's nonce
+				// will not match the foreign user's comment, so walRollback will
+				// drop the WAL entry without touching the user. However, we still
+				// surface the DeleteWAL failure so the operator is aware.
+				b.Logger().Error("creds: DeleteWAL after collision failed; aborting issuance",
 					"walID", walID, "userid", userid, "error", delErr)
 				return nil, fmt.Errorf("proxmox: creds/%s: DeleteWAL after collision for %q: %w", roleName, userid, delErr)
 			}
@@ -274,7 +290,8 @@ func (b *backend) handleCredsRead(ctx context.Context, req *logical.Request, d *
 
 	// Step 8: Build and return the Secret.
 	// resp.Data: token_id (full PVEAPIToken identifier), token_secret (one-time), user_id.
-	// InternalData: pve_userid, group, effective_max_ttl (nanoseconds as int64).
+	// InternalData: pve_userid, group, effective_max_ttl (nanoseconds as int64),
+	//               role_name (for TTL fallback on renewal), expire (Unix epoch, for tracking).
 	//
 	// The full PVEAPIToken identifier format is: <userid>!<tokenid>
 	// Used in the Authorization header as: PVEAPIToken=<token_id>=<token_secret>
@@ -293,6 +310,8 @@ func (b *backend) handleCredsRead(ctx context.Context, req *logical.Request, d *
 			"pve_userid":        userid,
 			"group":             role.Group,
 			"effective_max_ttl": int64(effectiveMaxTTL), // nanoseconds
+			"role_name":         roleName,               // for TTL fallback on renewal
+			"expire":            expireUnix,             // Unix epoch; rewritten on each renewal
 		},
 	)
 

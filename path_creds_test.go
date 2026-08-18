@@ -2,11 +2,12 @@
 //
 // Covers handleCredsRead issuance flow with a mocked PVE API client:
 //   - Happy path: success → resp.Secret non-nil, Renewable, resp.Data has
-//     token_id/token_secret/user_id, InternalData has pve_userid/group/effective_max_ttl.
+//     token_id/token_secret/user_id, InternalData has pve_userid/group/effective_max_ttl/role_name/expire.
 //   - CreateToken privsep=0: asserted via CallLog showing CreateToken was called
 //     (the Client interface mandates privsep=0 in the real client; the mock
 //     records the call for assertion).
-//   - CreateUser groups=<role.group> and expire=<leaseExpiry+60s grace> verified.
+//   - CreateUser groups=<role.group>, expire=<leaseExpiry+expireGraceSecs grace>,
+//     and Comment=nonce verified.
 //   - ErrConflict retry: first CreateUser returns ErrConflict, second succeeds →
 //     new suffix used AND DeleteWAL called with the FIRST attempt's WAL id.
 //   - Group read-back failure: GetUser returns groups NOT containing role.group →
@@ -17,7 +18,7 @@
 //     (no Secret returned).
 //   - Collision exhaustion: CreateUser returns ErrConflict every attempt →
 //     bounded retries then internal error.
-//   - Expire grace: +60s grace applied to expire sent to CreateUser.
+//   - Expire grace: +expireGraceSecs grace applied to expire sent to CreateUser.
 //   - Issuance REFUSED when effective TTL = 0 → error returned, NO PVE calls.
 package proxmox
 
@@ -204,6 +205,13 @@ func TestCredsRead_HappyPath(t *testing.T) {
 	if _, ok := intData["effective_max_ttl"]; !ok {
 		t.Error("InternalData effective_max_ttl missing")
 	}
+	// C2: role_name and expire must be present.
+	if rn, ok := intData["role_name"].(string); !ok || rn != "myrole" {
+		t.Errorf("InternalData role_name = %v; want %q", intData["role_name"], "myrole")
+	}
+	if _, ok := intData["expire"]; !ok {
+		t.Error("InternalData expire missing")
+	}
 
 	// Expire grace: check that CreateUser was called with expire ≥ leaseEnd + 60s.
 	// We get the MockClient from b.client (set after first call to getClient).
@@ -232,12 +240,16 @@ func TestCredsRead_HappyPath(t *testing.T) {
 	if createReq.Groups != "vault-vm-admins" {
 		t.Errorf("CreateUser Groups = %q; want vault-vm-admins", createReq.Groups)
 	}
-	// Expire grace: expire must be ≥ before+TTL+60s and ≤ after+TTL+61s (some slack for test timing).
-	minExpire := before.Add(3600*time.Second + 60*time.Second).Unix()
-	maxExpire := after.Add(3600*time.Second + 61*time.Second).Unix()
+	// Expire grace: expire must be ≥ before+TTL+expireGraceSecs and ≤ after+TTL+(expireGraceSecs+1)s.
+	minExpire := before.Add(3600*time.Second + expireGraceSecs*time.Second).Unix()
+	maxExpire := after.Add(3600*time.Second + (expireGraceSecs+1)*time.Second).Unix()
 	if createReq.Expire < minExpire || createReq.Expire > maxExpire {
-		t.Errorf("CreateUser Expire = %d; expected in [%d, %d] (leaseEnd + 60s grace)",
-			createReq.Expire, minExpire, maxExpire)
+		t.Errorf("CreateUser Expire = %d; expected in [%d, %d] (leaseEnd + %ds grace)",
+			createReq.Expire, minExpire, maxExpire, expireGraceSecs)
+	}
+	// C1: CreateUser.Comment must be non-empty (the WAL nonce for ownership verification).
+	if createReq.Comment == "" {
+		t.Error("CreateUser Comment must be non-empty (WAL nonce for ownership verification)")
 	}
 
 	// WAL must be cleaned up on the success path (no wal/ entries remain).
@@ -357,10 +369,10 @@ func TestCredsRead_ExpireGrace(t *testing.T) {
 		t.Fatalf("readCreds: err=%v resp=%v", err, resp)
 	}
 
-	// expire must be leaseEnd + 60s.
-	// leaseEnd = now + TTL(3600s), so expire ∈ [before+3600+60, after+3600+61].
-	minExpire := before.Add(3600*time.Second + 60*time.Second).Unix()
-	maxExpire := after.Add(3600*time.Second + 61*time.Second).Unix()
+	// expire must be leaseEnd + expireGraceSecs.
+	// leaseEnd = now + TTL(3600s), so expire ∈ [before+3600+expireGraceSecs, after+3600+(expireGraceSecs+1)].
+	minExpire := before.Add(3600*time.Second + expireGraceSecs*time.Second).Unix()
+	maxExpire := after.Add(3600*time.Second + (expireGraceSecs+1)*time.Second).Unix()
 	if capturedExpire < minExpire || capturedExpire > maxExpire {
 		t.Errorf("CreateUser Expire = %d; expected in [%d, %d] (leaseEnd+%ds grace)",
 			capturedExpire, minExpire, maxExpire, expireGraceSecs)
@@ -1138,5 +1150,17 @@ func TestCredsRead_InternalData_RoundTrip(t *testing.T) {
 		_ = v
 	default:
 		t.Errorf("InternalData effective_max_ttl type = %T; want int64 or float64", raw)
+	}
+
+	// C2: role_name and expire must be present.
+	rn, ok := intData["role_name"].(string)
+	if !ok {
+		t.Fatalf("InternalData role_name: expected string, got %T %v", intData["role_name"], intData["role_name"])
+	}
+	if rn != "myrole" {
+		t.Errorf("InternalData role_name = %q; want %q", rn, "myrole")
+	}
+	if _, ok := intData["expire"]; !ok {
+		t.Error("InternalData expire missing")
 	}
 }

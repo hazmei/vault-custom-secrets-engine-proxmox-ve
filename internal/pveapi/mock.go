@@ -197,9 +197,10 @@ func (m *MockClient) CreateUser(ctx context.Context, req CreateUserRequest) erro
 		}
 	}
 	m.Users[req.UserID] = UserInfo{
-		Groups: groups,
-		Enable: req.Enable,
-		Expire: req.Expire,
+		Groups:  groups,
+		Enable:  req.Enable,
+		Expire:  req.Expire,
+		Comment: req.Comment,
 	}
 	return nil
 }

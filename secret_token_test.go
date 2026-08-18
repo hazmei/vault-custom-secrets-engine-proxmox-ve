@@ -5,7 +5,7 @@
 //
 // Test coverage:
 //   - Renew happy path: InternalData decoded, pre-update GetUser (enabled), UpdateUser
-//     called with correct args (+60s expire grace, Groups, Enable=true, Append=true),
+//     called with correct args (+expireGraceSecs expire grace, Groups, Enable=true, Append=true),
 //     post-update GetUser group read-back, returns renewed Secret with TTL>0.
 //   - Renew refuses when pre-update GetUser returns Enable==false (disabled user):
 //     UpdateUser must NOT be called.
@@ -13,6 +13,9 @@
 //   - Renew effective_max_ttl float64 round-trip: JSON-decoded float64 decodes correctly.
 //   - Renew refuses when TTL collapses to <=0 (past max): error, no PVE calls.
 //   - Renew errors on missing/invalid InternalData keys.
+//   - Renew with role_name pointing to existing role honors role.ttl.
+//   - Renew with role_name pointing to deleted role falls back gracefully (no hard fail).
+//   - Renew with multiple groups warns but does not fail.
 //   - Revoke happy path: DeleteUser called, returns (nil,nil).
 //   - Revoke idempotent: ErrUserNotFound → (nil,nil).
 //   - Revoke transient error: other error returned wrapped.
@@ -35,6 +38,8 @@ import (
 // makeRenewRequest builds a logical.Request for a renew operation with the
 // given InternalData. The Secret is pre-populated with IssueTime=now (for
 // CalculateTTL) and a positive TTL/MaxTTL so the framework sees it as valid.
+// req.Storage is set to the provided storage so that secretTokenRenew can
+// call getRole/getConfig without the caller having to set it again.
 func makeRenewRequest(storage logical.Storage, internalData map[string]interface{}, issueTime time.Time, increment time.Duration) *logical.Request {
 	s := &logical.Secret{
 		InternalData: internalData,
@@ -44,25 +49,32 @@ func makeRenewRequest(storage logical.Storage, internalData map[string]interface
 	s.TTL = 3600 * time.Second
 	s.MaxTTL = 86400 * time.Second
 	s.Renewable = true
-	return logical.RenewRequest("creds/myrole", s, nil)
+	req := logical.RenewRequest("creds/myrole", s, nil)
+	req.Storage = storage
+	return req
 }
 
 // makeRevokeRequest builds a logical.Request for a revoke operation with the
-// given InternalData.
+// given InternalData. req.Storage is set to the provided storage.
 func makeRevokeRequest(storage logical.Storage, internalData map[string]interface{}) *logical.Request {
 	s := &logical.Secret{
 		InternalData: internalData,
 	}
-	return logical.RevokeRequest("creds/myrole", s, nil)
+	req := logical.RevokeRequest("creds/myrole", s, nil)
+	req.Storage = storage
+	return req
 }
 
 // standardRenewInternalData returns valid InternalData for a renew request,
 // with effective_max_ttl stored as int64 (the issuance path writes int64).
+// role_name and expire are included per the documented 5-field InternalData schema.
 func standardRenewInternalData(effectiveMaxTTL time.Duration) map[string]interface{} {
 	return map[string]interface{}{
 		"pve_userid":        "vault-myrole-abc12345@pve",
 		"group":             "vault-vm-admins",
 		"effective_max_ttl": int64(effectiveMaxTTL),
+		"role_name":         "",                                     // empty — role lookup returns nil → lease-TTL fallback
+		"expire":            time.Now().Add(effectiveMaxTTL).Unix(), // placeholder
 	}
 }
 
@@ -96,7 +108,7 @@ func setupBackendForRenew(t *testing.T, userid, group string, userEnabled bool, 
 
 // TestSecretTokenRenew_HappyPath verifies the full happy-path renewal:
 //   - pre-update GetUser is called (user is enabled).
-//   - UpdateUser is called with Expire ≥ now+ttl+60s, Groups=group, Enable=true, Append=true.
+//   - UpdateUser is called with Expire ≥ now+ttl+expireGraceSecs, Groups=group, Enable=true, Append=true.
 //   - post-update GetUser group read-back succeeds.
 //   - Returns non-nil Secret with TTL>0, MaxTTL==effectiveMaxTTL, Renewable.
 func TestSecretTokenRenew_HappyPath(t *testing.T) {
@@ -132,7 +144,6 @@ func TestSecretTokenRenew_HappyPath(t *testing.T) {
 	before := time.Now()
 	internalData := standardRenewInternalData(effectiveMaxTTL)
 	req := makeRenewRequest(storage, internalData, time.Now().Add(-30*time.Minute), renewIncrement)
-	req.Storage = storage
 
 	resp, err := b.secretTokenRenew(ctx, req, nil)
 	after := time.Now()
@@ -178,17 +189,22 @@ func TestSecretTokenRenew_HappyPath(t *testing.T) {
 		t.Error("UpdateUser Append must be true (MANDATORY)")
 	}
 
-	// Expire grace: expire must be ≥ before+TTL+60s.
-	minExpire := before.Add(resp.Secret.TTL + 60*time.Second).Unix()
-	maxExpire := after.Add(resp.Secret.TTL + 61*time.Second).Unix()
+	// Expire grace: expire must be ≥ before+TTL+expireGraceSecs.
+	minExpire := before.Add(resp.Secret.TTL + expireGraceSecs*time.Second).Unix()
+	maxExpire := after.Add(resp.Secret.TTL + (expireGraceSecs+1)*time.Second).Unix()
 	if capturedUpdateReq.Expire < minExpire || capturedUpdateReq.Expire > maxExpire {
-		t.Errorf("UpdateUser Expire = %d; expected in [%d, %d] (now+TTL+60s grace)",
-			capturedUpdateReq.Expire, minExpire, maxExpire)
+		t.Errorf("UpdateUser Expire = %d; expected in [%d, %d] (now+TTL+%ds grace)",
+			capturedUpdateReq.Expire, minExpire, maxExpire, expireGraceSecs)
 	}
 
 	// Both a pre-update GetUser and a post-update GetUser must have been called (2 total).
 	if getCallCount < 2 {
 		t.Errorf("GetUser call count = %d; want ≥ 2 (pre-update + post-update)", getCallCount)
+	}
+
+	// InternalData["expire"] must have been rewritten to the new expire value.
+	if storedExpire, ok := resp.Secret.InternalData["expire"].(int64); !ok || storedExpire != capturedUpdateReq.Expire {
+		t.Errorf("InternalData expire = %v; want %d (newExpire from this renewal)", resp.Secret.InternalData["expire"], capturedUpdateReq.Expire)
 	}
 }
 
@@ -224,7 +240,6 @@ func TestSecretTokenRenew_DisabledUser_RefusesRenewal(t *testing.T) {
 
 	internalData := standardRenewInternalData(effectiveMaxTTL)
 	req := makeRenewRequest(storage, internalData, time.Now().Add(-30*time.Minute), 3600*time.Second)
-	req.Storage = storage
 
 	resp, err := b.secretTokenRenew(ctx, req, nil)
 	// Must fail.
@@ -281,7 +296,6 @@ func TestSecretTokenRenew_GroupReadbackFails(t *testing.T) {
 
 	internalData := standardRenewInternalData(effectiveMaxTTL)
 	req := makeRenewRequest(storage, internalData, time.Now().Add(-30*time.Minute), 3600*time.Second)
-	req.Storage = storage
 
 	_, err := b.secretTokenRenew(ctx, req, nil)
 	if err == nil {
@@ -315,7 +329,6 @@ func TestSecretTokenRenew_Float64EffectiveMaxTTL(t *testing.T) {
 		"effective_max_ttl": float64(int64(effectiveMaxTTL)), // float64, as JSON decodes it
 	}
 	req := makeRenewRequest(storage, internalData, time.Now().Add(-30*time.Minute), 3600*time.Second)
-	req.Storage = storage
 
 	resp, err := b.secretTokenRenew(ctx, req, nil)
 	if err != nil {
@@ -336,6 +349,7 @@ func TestSecretTokenRenew_Float64EffectiveMaxTTL(t *testing.T) {
 // TestSecretTokenRenew_TTLPastMax verifies that renewal is refused when the
 // effective TTL collapses to ≤0 (past max). This is achieved by setting
 // IssueTime far enough in the past that IssueTime + effectiveMaxTTL < now.
+// Also asserts that no PVE (GetUser/UpdateUser) calls are made before the refusal.
 func TestSecretTokenRenew_TTLPastMax(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -346,12 +360,22 @@ func TestSecretTokenRenew_TTLPastMax(t *testing.T) {
 		effectiveMaxTTL = 1 * time.Hour // very short max
 	)
 
-	b, storage := setupBackendForRenew(t, userid, group, true, nil)
+	getUserCallCount := 0
+	updateUserCallCount := 0
+	b, storage := setupBackendForRenew(t, userid, group, true, func(mc *pveapi.MockClient) {
+		mc.GetUserFn = func(_ context.Context, _ string) (pveapi.UserInfo, error) {
+			getUserCallCount++
+			return pveapi.UserInfo{Groups: []string{group}, Enable: true}, nil
+		}
+		mc.UpdateUserFn = func(_ context.Context, _ pveapi.UpdateUserRequest) error {
+			updateUserCallCount++
+			return nil
+		}
+	})
 
 	internalData := standardRenewInternalData(effectiveMaxTTL)
 	// IssueTime was 2 hours ago; effectiveMaxTTL is 1h → TTL must be 0 or negative.
 	req := makeRenewRequest(storage, internalData, time.Now().Add(-2*time.Hour), 3600*time.Second)
-	req.Storage = storage
 
 	_, err := b.secretTokenRenew(ctx, req, nil)
 	if err == nil {
@@ -360,6 +384,16 @@ func TestSecretTokenRenew_TTLPastMax(t *testing.T) {
 	errMsg := strings.ToLower(err.Error())
 	if !strings.Contains(errMsg, "ttl") && !strings.Contains(errMsg, "zero") && !strings.Contains(errMsg, "max") {
 		t.Errorf("error should mention TTL/zero/max; got: %q", err.Error())
+	}
+
+	// No PVE calls (GetUser/UpdateUser) must have been made — the TTL refusal
+	// must happen before any PVE interaction. Storage reads (getRole/getConfig) are
+	// not PVE calls and are allowed before the TTL check.
+	if getUserCallCount != 0 {
+		t.Errorf("GetUser was called %d times; want 0 (TTL refusal must precede PVE calls)", getUserCallCount)
+	}
+	if updateUserCallCount != 0 {
+		t.Errorf("UpdateUser was called %d times; want 0 (TTL refusal must precede PVE calls)", updateUserCallCount)
 	}
 }
 
@@ -380,7 +414,6 @@ func TestSecretTokenRenew_MissingPveUserid(t *testing.T) {
 		"effective_max_ttl": int64(86400 * time.Second),
 	}
 	req := makeRenewRequest(storage, internalData, time.Now(), 3600*time.Second)
-	req.Storage = storage
 
 	_, err := b.secretTokenRenew(ctx, req, nil)
 	if err == nil {
@@ -408,7 +441,6 @@ func TestSecretTokenRenew_MissingGroup(t *testing.T) {
 		"effective_max_ttl": int64(86400 * time.Second),
 	}
 	req := makeRenewRequest(storage, internalData, time.Now(), 3600*time.Second)
-	req.Storage = storage
 
 	_, err := b.secretTokenRenew(ctx, req, nil)
 	if err == nil {
@@ -436,7 +468,6 @@ func TestSecretTokenRenew_MissingEffectiveMaxTTL(t *testing.T) {
 		// effective_max_ttl intentionally omitted
 	}
 	req := makeRenewRequest(storage, internalData, time.Now(), 3600*time.Second)
-	req.Storage = storage
 
 	_, err := b.secretTokenRenew(ctx, req, nil)
 	if err == nil {
@@ -464,12 +495,168 @@ func TestSecretTokenRenew_WrongTypeEffectiveMaxTTL(t *testing.T) {
 		"effective_max_ttl": "not-a-number", // wrong type
 	}
 	req := makeRenewRequest(storage, internalData, time.Now(), 3600*time.Second)
-	req.Storage = storage
 
 	_, err := b.secretTokenRenew(ctx, req, nil)
 	if err == nil {
 		t.Fatal("expected error for wrong type effective_max_ttl; got nil")
 	}
+}
+
+// TestSecretTokenRenew_RoleNamePresent_HonorsRoleTTL verifies that when
+// role_name in InternalData points to an existing role with a configured ttl,
+// a no-increment renewal (increment=0) uses the role's ttl as the backendTTL
+// rather than the system default of 0.
+func TestSecretTokenRenew_RoleNamePresent_HonorsRoleTTL(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	const (
+		userid          = "vault-myrole-rolettl001@pve"
+		group           = "vault-vm-admins"
+		effectiveMaxTTL = 86400 * time.Second
+		roleTTL         = 3600 // seconds — the role's configured ttl
+	)
+
+	b, storage := setupBackendForRenew(t, userid, group, true, func(mc *pveapi.MockClient) {
+		mc.GetPermissionsResult = pveapi.PermissionTree{
+			"/access/groups":                 {"User.Modify": 1, "Sys.Audit": 1},
+			"/access/groups/vault-vm-admins": {"User.Modify": 1},
+			"/access/realm/pve":              {"Realm.AllocateUser": 1},
+		}
+		mc.Groups = map[string]bool{"vault-vm-admins": true}
+	})
+
+	// Write a role with a known ttl.
+	roleData := map[string]interface{}{
+		"group":       "vault-vm-admins",
+		"user_prefix": "vault",
+		"realm":       "pve",
+		"ttl":         roleTTL,
+		"max_ttl":     86400,
+	}
+	if _, err := writeRole(ctx, b, storage, "myrole", roleData); err != nil {
+		t.Fatalf("writeRole: %v", err)
+	}
+
+	internalData := map[string]interface{}{
+		"pve_userid":        userid,
+		"group":             group,
+		"effective_max_ttl": int64(effectiveMaxTTL),
+		"role_name":         "myrole", // points to the role above
+		"expire":            time.Now().Add(effectiveMaxTTL).Unix(),
+	}
+	// Use increment=0 so CalculateTTL falls back to backendTTL (= role.ttl).
+	req := makeRenewRequest(storage, internalData, time.Now().Add(-30*time.Minute), 0)
+
+	resp, err := b.secretTokenRenew(ctx, req, nil)
+	if err != nil {
+		t.Fatalf("secretTokenRenew: unexpected error: %v", err)
+	}
+	if resp == nil || resp.Secret == nil {
+		t.Fatal("expected non-nil Secret")
+	}
+	// TTL must be approximately roleTTL (the role's configured backendTTL).
+	// CalculateTTL with increment=0 and backendTTL=3600s yields ~3600s.
+	if resp.Secret.TTL <= 0 {
+		t.Errorf("resp.Secret.TTL = %v; want > 0", resp.Secret.TTL)
+	}
+	// Assert TTL is close to roleTTL (within 5s tolerance for test timing).
+	want := time.Duration(roleTTL) * time.Second
+	diff := resp.Secret.TTL - want
+	if diff < 0 {
+		diff = -diff
+	}
+	if diff > 5*time.Second {
+		t.Errorf("resp.Secret.TTL = %v; want ~%v (role.ttl); diff=%v", resp.Secret.TTL, want, diff)
+	}
+}
+
+// TestSecretTokenRenew_DeletedRole_FallsBackGracefully verifies that when
+// role_name in InternalData points to a role that no longer exists, renewal
+// still succeeds without a hard fail. This is the documented fallback behavior:
+// missing role → backendTTL=0 → CalculateTTL uses increment from the renewal request.
+func TestSecretTokenRenew_DeletedRole_FallsBackGracefully(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	const (
+		userid          = "vault-myrole-delrole002@pve"
+		group           = "vault-vm-admins"
+		effectiveMaxTTL = 86400 * time.Second
+	)
+
+	b, storage := setupBackendForRenew(t, userid, group, true, nil)
+
+	// Do NOT write a role named "deleted-role" — it should be absent.
+	internalData := map[string]interface{}{
+		"pve_userid":        userid,
+		"group":             group,
+		"effective_max_ttl": int64(effectiveMaxTTL),
+		"role_name":         "deleted-role", // role does not exist in storage
+		"expire":            time.Now().Add(effectiveMaxTTL).Unix(),
+	}
+	// Use a positive increment so the renewal can succeed even with backendTTL=0.
+	req := makeRenewRequest(storage, internalData, time.Now().Add(-30*time.Minute), 3600*time.Second)
+
+	resp, err := b.secretTokenRenew(ctx, req, nil)
+	if err != nil {
+		t.Fatalf("secretTokenRenew with deleted role: expected graceful fallback, got error: %v", err)
+	}
+	if resp == nil || resp.Secret == nil {
+		t.Fatal("expected non-nil Secret on deleted-role fallback")
+	}
+	if resp.Secret.TTL <= 0 {
+		t.Errorf("resp.Secret.TTL = %v; want > 0", resp.Secret.TTL)
+	}
+}
+
+// TestSecretTokenRenew_MultiGroup_WarnsNoFail verifies that when the post-update
+// GetUser returns multiple groups (len > 1), renewal does NOT hard-fail — only
+// a log warning is emitted. The containsGroup hard gate (the expected group is
+// present) still passes.
+func TestSecretTokenRenew_MultiGroup_WarnsNoFail(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	const (
+		userid          = "vault-myrole-multigrp003@pve"
+		group           = "vault-vm-admins"
+		effectiveMaxTTL = 86400 * time.Second
+	)
+
+	getCallCount := 0
+	b, storage := setupBackendForRenew(t, userid, group, true, func(mc *pveapi.MockClient) {
+		mc.GetUserFn = func(_ context.Context, _ string) (pveapi.UserInfo, error) {
+			getCallCount++
+			if getCallCount == 1 {
+				// pre-update: user enabled, in expected group
+				return pveapi.UserInfo{Groups: []string{group}, Enable: true}, nil
+			}
+			// post-update: user now in TWO groups (unexpected cardinality)
+			return pveapi.UserInfo{Groups: []string{group, "extra-grp"}, Enable: true}, nil
+		}
+		mc.UpdateUserFn = func(_ context.Context, _ pveapi.UpdateUserRequest) error {
+			return nil
+		}
+	})
+
+	internalData := standardRenewInternalData(effectiveMaxTTL)
+	req := makeRenewRequest(storage, internalData, time.Now().Add(-30*time.Minute), 3600*time.Second)
+
+	resp, err := b.secretTokenRenew(ctx, req, nil)
+	// Must NOT fail — cardinality warning is soft.
+	if err != nil {
+		t.Fatalf("secretTokenRenew: unexpected error on multi-group: %v", err)
+	}
+	if resp == nil || resp.Secret == nil {
+		t.Fatal("expected non-nil Secret on multi-group renewal")
+	}
+	if resp.Secret.TTL <= 0 {
+		t.Errorf("resp.Secret.TTL = %v; want > 0", resp.Secret.TTL)
+	}
+
+	// containsGroup assertion still holds for the expected group.
+	// (No hard assertion on the log line — we just verify non-fail behavior.)
 }
 
 // ── secretTokenRevoke tests ──────────────────────────────────────────────────
@@ -499,7 +686,6 @@ func TestSecretTokenRevoke_HappyPath(t *testing.T) {
 		"effective_max_ttl": int64(86400 * time.Second),
 	}
 	req := makeRevokeRequest(storage, internalData)
-	req.Storage = storage
 
 	resp, err := b.secretTokenRevoke(ctx, req, nil)
 	if err != nil {
@@ -540,7 +726,6 @@ func TestSecretTokenRevoke_Idempotent_ErrUserNotFound(t *testing.T) {
 		"effective_max_ttl": int64(86400 * time.Second),
 	}
 	req := makeRevokeRequest(storage, internalData)
-	req.Storage = storage
 
 	resp, err := b.secretTokenRevoke(ctx, req, nil)
 	if err != nil {
@@ -576,7 +761,6 @@ func TestSecretTokenRevoke_TransientError(t *testing.T) {
 		"effective_max_ttl": int64(86400 * time.Second),
 	}
 	req := makeRevokeRequest(storage, internalData)
-	req.Storage = storage
 
 	resp, err := b.secretTokenRevoke(ctx, req, nil)
 	if err == nil {
@@ -590,11 +774,3 @@ func TestSecretTokenRevoke_TransientError(t *testing.T) {
 		t.Errorf("expected error to wrap transientErr; got: %v", err)
 	}
 }
-
-// NOTE on group-cardinality warning test (F2-followup):
-// The mock.UpdateUser implements full-replace semantics and re-parses the CSV
-// groups field — it will produce exactly one group for a single-group role.
-// The mock cannot produce len(Groups) > 1 without modifying UpdateUser semantics,
-// which would violate the "do NOT modify the mock's semantics" directive.
-// The cardinality warning path (len != 1) is therefore not exercisable via the
-// mock; it is covered by the code comment and soft-assertion in secret_token.go.

@@ -15,6 +15,8 @@
 //   - "pve_userid"        (string) — fully-qualified PVE userid
 //   - "group"             (string) — PVE group name (needed for full-replace renewal)
 //   - "effective_max_ttl" (int64)  — nanoseconds; governs renewal ceiling
+//   - "role_name"         (string) — role name; used to load role TTL for no-increment renewal
+//   - "expire"            (int64)  — Unix epoch; rewritten on each renewal to track PVE state
 //
 // See docs/ARCHITECTURE.md §Lease Renewal and §Revocation for the full spec.
 package proxmox
@@ -64,8 +66,9 @@ func secretToken(b *backend) *framework.Secret {
 
 		// Renew must be non-nil — Secret.Renewable() returns (Renew != nil), so a
 		// nil Renew silently makes every issued lease non-renewable. Full renewal
-		// logic: read pve_userid+group+effective_max_ttl from InternalData,
-		// compute new TTL via CalculateTTL, PUT /access/users (full-replace with
+		// logic: read pve_userid+group+effective_max_ttl+role_name+expire from
+		// InternalData, compute new TTL via CalculateTTL (honoring role.ttl when
+		// the role is still present), PUT /access/users (full-replace with
 		// expire+groups+enable+append=1), read-back group assertion, return updated Secret.
 		Renew: b.secretTokenRenew,
 
@@ -79,30 +82,58 @@ func secretToken(b *backend) *framework.Secret {
 // secretTokenRenew handles lease renewal for PVE dynamic tokens.
 //
 // Steps:
-//  1. Extract pve_userid, group, and effective_max_ttl from req.Secret.InternalData.
-//  2. Compute new TTL via framework.CalculateTTL (honors increment and effective_max_ttl).
-//  3. Refuse renewal if new TTL is zero.
-//  4. Pre-update GetUser: refuse renewal if the user is currently disabled (an
+//  1. Extract pve_userid, group, effective_max_ttl, role_name from InternalData.
+//  2. Load role to obtain role.ttl for use as backendTTL (fallback if role gone: use 0
+//     so CalculateTTL falls back to the increment from the renewal request).
+//  3. Compute new TTL via framework.CalculateTTL (honors increment and effective_max_ttl).
+//  4. Refuse renewal if new TTL is zero.
+//  5. Pre-update GetUser: refuse renewal if the user is currently disabled (an
 //     operator may have disabled it for incident response; we must not re-enable it).
-//  5. UpdateUser: PUT /access/users/{userid} with expire+groups+enable+append=1
+//  6. UpdateUser: PUT /access/users/{userid} with expire+groups+enable+append=1
 //     (FULL-REPLACE — omitting groups wipes membership; confirmed PVE 9.2.10 Probe 7).
-//  6. Read-back: GetUser asserts group membership survived the PUT.
-//  7. Return updated Secret with new TTL/MaxTTL.
+//  7. Read-back: GetUser asserts group membership survived the PUT.
+//  8. Rewrite expire in InternalData to the newExpire computed this renewal.
+//  9. Return updated Secret with new TTL/MaxTTL.
 func (b *backend) secretTokenRenew(ctx context.Context, req *logical.Request, _ *framework.FieldData) (*logical.Response, error) {
 	// Step 1: extract from InternalData.
-	userid, group, effectiveMaxTTL, err := extractLeaseInternalData(req.Secret.InternalData)
+	userid, group, effectiveMaxTTL, roleName, err := extractLeaseInternalData(req.Secret.InternalData)
 	if err != nil {
 		return nil, fmt.Errorf("proxmox: renew: %w", err)
 	}
 
-	// Step 2: compute new TTL.
-	// CalculateTTL args: sysView, increment, backendTTL=0, period=0,
-	// backendMaxTTL=effectiveMaxTTL, explicitMaxTTL=0, startTime=IssueTime.
-	// Using backendMaxTTL so the cap is respected via CalculateTTL's capping logic.
+	// Step 2: load role for TTL fallback.
+	// If the role still exists, use role.ttls(cfg).backendTTL so a no-increment
+	// renewal honors the role's configured ttl (not just the system default).
+	// If the role is gone (nil), fall back gracefully — use backendTTL=0 so
+	// CalculateTTL falls back to the increment from the renewal request, which
+	// preserves the existing lease TTL. Do NOT hard-fail renewal just because the
+	// role was deleted; outstanding leases must still renew and be revocable.
+	var backendTTL time.Duration
+	if roleName != "" {
+		cfg, cfgErr := getConfig(ctx, req.Storage)
+		if cfgErr != nil {
+			return nil, fmt.Errorf("proxmox: renew: load config: %w", cfgErr)
+		}
+		if cfg != nil {
+			role, roleErr := getRole(ctx, req.Storage, roleName)
+			if roleErr != nil {
+				return nil, fmt.Errorf("proxmox: renew: load role %q: %w", roleName, roleErr)
+			}
+			if role != nil {
+				backendTTL, _ = role.ttls(cfg)
+			}
+			// If role is nil (deleted): backendTTL stays 0 → CalculateTTL falls back
+			// to the increment from the renewal request (lease-TTL fallback, per docs).
+		}
+	}
+
+	// Step 3: compute new TTL.
+	// CalculateTTL args: sysView, increment, backendTTL (role.ttl fallback),
+	// period=0, backendMaxTTL=effectiveMaxTTL, explicitMaxTTL=0, startTime=IssueTime.
 	ttl, warnings, err := framework.CalculateTTL(
 		b.System(),
 		req.Secret.Increment, // requested increment from the renewal request
-		0,                    // backendTTL: not used on renewal; increment drives the value
+		backendTTL,           // role.ttl if role exists; 0 (lease-TTL fallback) if role gone
 		0,                    // period: not used
 		effectiveMaxTTL,      // backendMaxTTL: the governance ceiling captured at issue time
 		0,                    // explicitMaxTTL: not used
@@ -112,14 +143,14 @@ func (b *backend) secretTokenRenew(ctx context.Context, req *logical.Request, _ 
 		return nil, fmt.Errorf("proxmox: renew: CalculateTTL: %w", err)
 	}
 
-	// Step 3: refuse if TTL collapsed to zero.
+	// Step 4: refuse if TTL collapsed to zero.
 	if ttl <= 0 {
 		return nil, fmt.Errorf("proxmox: renew: effective TTL is zero or past max; cannot renew")
 	}
 
-	newExpire := time.Now().Add(ttl).Unix() + 60 // +60s grace (same as issuance)
+	newExpire := time.Now().Add(ttl).Unix() + expireGraceSecs // +grace, same as issuance
 
-	// Step 4: Get PVE client and perform a pre-update GetUser to check Enable.
+	// Step 5: Get PVE client and perform a pre-update GetUser to check Enable.
 	client, err := b.getClient(ctx, req.Storage)
 	if err != nil {
 		return nil, fmt.Errorf("proxmox: renew: get PVE client: %w", err)
@@ -129,6 +160,10 @@ func (b *backend) secretTokenRenew(ctx context.Context, req *logical.Request, _ 
 	// Renewal sends Enable:true, which would silently undo an operator's deliberate
 	// containment (e.g. disabling a suspected-compromised synthetic user for incident
 	// response). We must not re-enable a user that an operator has deliberately disabled.
+	//
+	// NOTE (TOCTOU): an operator disabling the user BETWEEN this GetUser and the
+	// UpdateUser below will still be re-enabled by the update. The guard reduces
+	// but does not eliminate the window; no conditional-update PVE API exists.
 	preInfo, preErr := client.GetUser(ctx, userid)
 	if preErr != nil {
 		return nil, fmt.Errorf("proxmox: renew: pre-update GetUser %q: %w", userid, preErr)
@@ -141,7 +176,7 @@ func (b *backend) secretTokenRenew(ctx context.Context, req *logical.Request, _ 
 		)
 	}
 
-	// Step 5: UpdateUser — full-replace with expire+groups+enable+append=1.
+	// Step 6: UpdateUser — full-replace with expire+groups+enable+append=1.
 	if updateErr := client.UpdateUser(ctx, pveapi.UpdateUserRequest{
 		UserID: userid,
 		Expire: newExpire,
@@ -152,7 +187,7 @@ func (b *backend) secretTokenRenew(ctx context.Context, req *logical.Request, _ 
 		return nil, fmt.Errorf("proxmox: renew: UpdateUser %q: %w", userid, updateErr)
 	}
 
-	// Step 6: post-update read-back — assert group membership survived the full-replace PUT.
+	// Step 7: post-update read-back — assert group membership survived the full-replace PUT.
 	info, err := client.GetUser(ctx, userid)
 	if err != nil {
 		return nil, fmt.Errorf("proxmox: renew: GetUser %q read-back: %w", userid, err)
@@ -168,7 +203,11 @@ func (b *backend) secretTokenRenew(ctx context.Context, req *logical.Request, _ 
 			"userid", userid, "groups", info.Groups)
 	}
 
-	// Step 7: return updated Secret.
+	// Step 8: rewrite expire in InternalData to track the PVE user state.
+	// This keeps the stored expire consistent with reality across renewals.
+	req.Secret.InternalData["expire"] = newExpire
+
+	// Step 9: return updated Secret.
 	resp := &logical.Response{Secret: req.Secret}
 	resp.Secret.TTL = ttl
 	resp.Secret.MaxTTL = effectiveMaxTTL
@@ -184,7 +223,7 @@ func (b *backend) secretTokenRenew(ctx context.Context, req *logical.Request, _ 
 // group memberships, and ACL entries in a single call. Idempotent:
 // ErrUserNotFound (HTTP 500 + body "no such user") is treated as success.
 func (b *backend) secretTokenRevoke(ctx context.Context, req *logical.Request, _ *framework.FieldData) (*logical.Response, error) {
-	userid, _, _, err := extractLeaseInternalData(req.Secret.InternalData)
+	userid, _, _, _, err := extractLeaseInternalData(req.Secret.InternalData)
 	if err != nil {
 		return nil, fmt.Errorf("proxmox: revoke: %w", err)
 	}
@@ -205,9 +244,11 @@ func (b *backend) secretTokenRevoke(ctx context.Context, req *logical.Request, _
 	return nil, fmt.Errorf("proxmox: revoke: DeleteUser %q: %w", userid, err)
 }
 
-// extractLeaseInternalData reads the three required keys from InternalData.
-// Returns an error if any key is missing or has the wrong type.
-func extractLeaseInternalData(data map[string]interface{}) (userid, group string, effectiveMaxTTL time.Duration, err error) {
+// extractLeaseInternalData reads the required keys from InternalData.
+// Returns an error if the mandatory keys (pve_userid, group, effective_max_ttl) are
+// missing or have the wrong type. role_name is optional (may be absent on leases
+// issued before this field was added — treat missing as "" for backward compat).
+func extractLeaseInternalData(data map[string]interface{}) (userid, group string, effectiveMaxTTL time.Duration, roleName string, err error) {
 	rawUserid, ok := data["pve_userid"]
 	if !ok {
 		err = fmt.Errorf("InternalData missing pve_userid")
@@ -252,6 +293,16 @@ func extractLeaseInternalData(data map[string]interface{}) (userid, group string
 	default:
 		err = fmt.Errorf("InternalData effective_max_ttl has unexpected type %T", rawMaxTTL)
 		return
+	}
+
+	// role_name: optional — leases issued before this field was added will not
+	// have it. Treat missing or wrong-type as "" so renew falls back to the
+	// lease's current TTL (backward compatibility for pre-existing leases).
+	if rawRoleName, hasRoleName := data["role_name"]; hasRoleName {
+		if rn, isStr := rawRoleName.(string); isStr {
+			roleName = rn
+		}
+		// Silently ignore wrong-type role_name (treat as absent).
 	}
 
 	return

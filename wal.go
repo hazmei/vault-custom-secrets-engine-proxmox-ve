@@ -15,6 +15,15 @@
 // and revocation because PVE checks User.Modify at the parent /access/groups
 // path for those operations. The full threat model is documented in
 // docs/ARCHITECTURE.md § Security Considerations.
+//
+// # WAL Nonce Ownership
+//
+// walUser carries a per-attempt random nonce written into both the WAL entry
+// and the PVE user's comment field at creation time. walRollbackUser verifies
+// the nonce before deleting: a comment mismatch (or absent comment) means the
+// userid belongs to a foreign/pre-existing user and must NOT be deleted. This
+// closes the stale-WAL foreign-user-deletion class: a WAL entry that names a
+// colliding userid we did NOT create cannot trigger deletion of that foreign user.
 package proxmox
 
 import (
@@ -44,6 +53,14 @@ type walUser struct {
 	// "vault-myrole-a3b7x2kp@pve". Stored at WAL-write time so the rollback
 	// callback can issue the DELETE even without loading the role config.
 	UserID string `json:"user_id" mapstructure:"user_id"`
+
+	// Nonce is a per-attempt random value (~40-bit Crockford base32 string)
+	// written into both this WAL entry and the PVE user's comment field at
+	// creation time. walRollbackUser compares the user's live comment against
+	// this nonce before deleting: a mismatch means the userid is owned by a
+	// foreign/pre-existing user (e.g. a colliding legacy account) and must NOT
+	// be deleted. This prevents the stale-WAL foreign-user-deletion class.
+	Nonce string `json:"nonce" mapstructure:"nonce"`
 }
 
 // walRollback is registered as framework.Backend.WALRollback.
@@ -73,8 +90,16 @@ func (b *backend) walRollback(ctx context.Context, req *logical.Request, kind st
 }
 
 // walRollbackUser handles rollback for walTypeUser entries.
-// It decodes the map[string]interface{} payload into a walUser, then attempts
-// to delete the orphaned PVE user.
+// It decodes the map[string]interface{} payload into a walUser, then performs
+// nonce-based ownership verification before attempting to delete the PVE user.
+//
+// Ownership verification prevents deleting a foreign user that coincidentally
+// holds the same userid as a stale WAL entry:
+//  1. GetUser: if ErrUserNotFound → already gone, return nil.
+//  2. Compare user's comment to WAL Nonce:
+//     - match → our orphan → DeleteUser.
+//     - mismatch or empty comment → foreign user → log Warn, return nil (drop WAL).
+//  3. GetUser transient error → return error (framework retries).
 func (b *backend) walRollbackUser(ctx context.Context, req *logical.Request, data interface{}) error {
 	// WALEntry.Data is JSON-decoded into interface{}, which arrives here as
 	// map[string]interface{}. mapstructure.Decode handles the conversion.
@@ -95,6 +120,37 @@ func (b *backend) walRollbackUser(ctx context.Context, req *logical.Request, dat
 		return fmt.Errorf("proxmox: walRollback user %q: get client: %w", entry.UserID, err)
 	}
 
+	// Ownership verification: GetUser before Delete.
+	// If the user is already absent we are done (idempotent success).
+	// If the user exists, compare its comment to the WAL nonce to confirm we
+	// created it and not a foreign/pre-existing account with the same userid.
+	info, getUserErr := client.GetUser(ctx, entry.UserID)
+	if getUserErr != nil {
+		if errors.Is(getUserErr, pveapi.ErrUserNotFound) {
+			// User is already absent — nothing to clean up.
+			b.Logger().Info("walRollback: PVE user already absent (idempotent)", "userid", entry.UserID)
+			return nil
+		}
+		// Transient error (network, 403, etc.) — return so the framework retries.
+		// Leave the WAL entry in place.
+		b.Logger().Warn("walRollback: GetUser failed; will retry", "userid", entry.UserID, "error", getUserErr)
+		return fmt.Errorf("proxmox: walRollback user %q: GetUser: %w", entry.UserID, getUserErr)
+	}
+
+	// Nonce / ownership check: the user's comment must match the WAL nonce.
+	// If the nonce is absent (old WAL entries written before this change) or the
+	// comment does not match, this is a foreign user — do NOT delete it.
+	if entry.Nonce == "" || info.Comment != entry.Nonce {
+		b.Logger().Warn("walRollback: user comment does not match WAL nonce; not our user, dropping WAL without deleting",
+			"userid", entry.UserID,
+			"wal_nonce", entry.Nonce,
+			"user_comment", info.Comment,
+		)
+		// Return nil so the framework drops this WAL entry without touching the user.
+		return nil
+	}
+
+	// Nonce matches — this is our orphaned user; proceed with deletion.
 	err = client.DeleteUser(ctx, entry.UserID)
 	if err == nil {
 		// User deleted successfully.
@@ -102,9 +158,7 @@ func (b *backend) walRollbackUser(ctx context.Context, req *logical.Request, dat
 		return nil
 	}
 
-	// ErrUserNotFound: PVE returns HTTP 500 + body "no such user" when the user
-	// is already absent. Treat as success — the user does not exist, nothing to
-	// clean up. The framework will delete the WAL entry after we return nil.
+	// ErrUserNotFound: already absent. Treat as success.
 	if errors.Is(err, pveapi.ErrUserNotFound) {
 		b.Logger().Info("walRollback: PVE user already absent (idempotent)", "userid", entry.UserID)
 		return nil
