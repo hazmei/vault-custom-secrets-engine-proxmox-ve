@@ -7,9 +7,9 @@ package main
 import (
 	"os"
 
-	proxmox "github.com/hazmei/vault-plugin-secrets-proxmox"
 	hclog "github.com/hashicorp/go-hclog"
 	"github.com/hashicorp/vault/sdk/plugin"
+	proxmox "github.com/hazmei/vault-plugin-secrets-proxmox"
 )
 
 func main() {

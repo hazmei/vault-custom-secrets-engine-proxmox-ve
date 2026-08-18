@@ -17,9 +17,9 @@ import (
 	"sync"
 	"time"
 
-	pveapi "github.com/hazmei/vault-plugin-secrets-proxmox/internal/pveapi"
 	"github.com/hashicorp/vault/sdk/framework"
 	"github.com/hashicorp/vault/sdk/logical"
+	"github.com/hazmei/vault-plugin-secrets-proxmox/internal/pveapi"
 )
 
 // backend is the root struct for the Proxmox VE secrets engine.
@@ -84,7 +84,7 @@ func newBackend(ctx context.Context, conf *logical.BackendConfig) (*backend, err
 		Invalidate: b.invalidate,
 	}
 
-	if err := b.Backend.Setup(ctx, conf); err != nil {
+	if err := b.Setup(ctx, conf); err != nil {
 		return nil, err
 	}
 
@@ -142,11 +142,11 @@ func (b *backend) invalidate(_ context.Context, key string) {
 // PathsSpecial.SealWrapStorage and the invalidate comparison.
 type proxmoxConfig struct {
 	Address       string `json:"address"`
-	TokenID       string `json:"token_id"`      // returned on GET (identity only)
-	TokenSecret   string `json:"token_secret"`  // NEVER returned on GET
+	TokenID       string `json:"token_id"`     // returned on GET (identity only)
+	TokenSecret   string `json:"token_secret"` // NEVER returned on GET
 	TLSSkipVerify bool   `json:"tls_skip_verify"`
 	CACert        string `json:"ca_cert"`
-	DefaultTTL    int    `json:"default_ttl"`    // seconds; 0 = unset (fallback to Vault system default)
+	DefaultTTL    int    `json:"default_ttl"`     // seconds; 0 = unset (fallback to Vault system default)
 	DefaultMaxTTL int    `json:"default_max_ttl"` // seconds; 0 = unset
 }
 

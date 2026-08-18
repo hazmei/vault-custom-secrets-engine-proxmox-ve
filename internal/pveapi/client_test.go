@@ -51,7 +51,7 @@ func TestClientAuthHeaderFormat(t *testing.T) {
 			t.Errorf("Authorization header = %q; want %q", got, wantHeader)
 		}
 		// Respond with a minimal valid version response.
-		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{ //nolint:errcheck // httptest handler — write error not actionable
 			"data": map[string]interface{}{"version": "9.2.10"},
 		})
 	}))
@@ -72,7 +72,7 @@ func TestGetPermissionsParsesTree(t *testing.T) {
 		if r.URL.Path != "/api2/json/access/permissions" {
 			t.Errorf("unexpected path: %q", r.URL.Path)
 		}
-		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{ //nolint:errcheck // httptest handler — write error not actionable
 			"data": map[string]interface{}{
 				"/access/groups": map[string]interface{}{
 					"User.Modify": 1,
@@ -120,7 +120,7 @@ func TestCreateTokenPrivsepIsLiteralZero(t *testing.T) {
 			t.Errorf("privsep form value = %q; want literal \"0\"", privsep)
 		}
 
-		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{ //nolint:errcheck // httptest handler — write error not actionable
 			"data": map[string]interface{}{
 				"value": "tok-secret-value",
 			},
@@ -147,7 +147,7 @@ func TestCreateTokenPrivsepTrueIsLiteralOne(t *testing.T) {
 		if privsep != "1" {
 			t.Errorf("privsep form value = %q; want literal \"1\"", privsep)
 		}
-		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{ //nolint:errcheck // httptest handler — write error not actionable
 			"data": map[string]interface{}{"value": "tok"},
 		})
 	}))
@@ -174,7 +174,7 @@ func TestCreateUserEnableIsLiteralOne(t *testing.T) {
 			t.Errorf("enable form value = %q; want literal \"1\"", enable)
 		}
 		// Return 200 with empty data.
-		_ = json.NewEncoder(w).Encode(map[string]interface{}{"data": nil})
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{"data": nil}) //nolint:errcheck // httptest handler — write error not actionable
 	}))
 	defer ts.Close()
 
@@ -213,7 +213,7 @@ func TestCreateUserGroupsIsOneCSVField(t *testing.T) {
 			}
 		}
 
-		_ = json.NewEncoder(w).Encode(map[string]interface{}{"data": nil})
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{"data": nil}) //nolint:errcheck // httptest handler — write error not actionable
 	}))
 	defer ts.Close()
 
@@ -253,7 +253,7 @@ func TestUpdateUserAppendIsLiteralOne(t *testing.T) {
 			t.Errorf("groups on UpdateUser: %d values; want exactly 1", len(groupsValues))
 		}
 
-		_ = json.NewEncoder(w).Encode(map[string]interface{}{"data": nil})
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{"data": nil}) //nolint:errcheck // httptest handler — write error not actionable
 	}))
 	defer ts.Close()
 
@@ -282,7 +282,7 @@ func TestTokenSecretNeverInErrorStrings(t *testing.T) {
 		// Simulate a 500 error response that PVE might return.
 		// The body contains the word "secret" — should never appear in errors.
 		w.WriteHeader(http.StatusInternalServerError)
-		_, _ = w.Write([]byte(`{"message":"internal error: ` + tokenSecret + `"}`))
+		_, _ = w.Write([]byte(`{"message":"internal error: ` + tokenSecret + `"}`)) //nolint:errcheck // httptest handler — write error not actionable
 	}))
 	defer ts.Close()
 
@@ -340,7 +340,7 @@ func TestClassifyPVEErrorIntegration(t *testing.T) {
 
 			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				w.WriteHeader(tc.statusCode)
-				_, _ = w.Write([]byte(tc.body))
+				_, _ = w.Write([]byte(tc.body)) //nolint:errcheck // httptest handler — write error not actionable
 			}))
 			defer ts.Close()
 
@@ -376,7 +376,7 @@ func TestClientBaseURLPathConstruction(t *testing.T) {
 	var capturedPath string
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		capturedPath = r.URL.Path
-		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{ //nolint:errcheck // httptest handler — write error not actionable
 			"data": map[string]interface{}{"version": "9.2.10"},
 		})
 	}))
@@ -404,7 +404,7 @@ func TestCreateTokenPathEncoding(t *testing.T) {
 	var capturedPath string
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		capturedPath = r.URL.Path
-		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{ //nolint:errcheck // httptest handler — write error not actionable
 			"data": map[string]interface{}{"value": "tok"},
 		})
 	}))

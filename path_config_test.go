@@ -13,8 +13,8 @@ import (
 	"errors"
 	"testing"
 
-	pveapi "github.com/hazmei/vault-plugin-secrets-proxmox/internal/pveapi"
 	"github.com/hashicorp/vault/sdk/logical"
+	pveapi "github.com/hazmei/vault-plugin-secrets-proxmox/internal/pveapi"
 )
 
 // newTestBackend builds a backend with an in-memory storage and a mock PVE
@@ -473,7 +473,7 @@ func TestConfigWriteReadDeleteRoundTrip(t *testing.T) {
 	}
 
 	// Delete with force — should succeed.
-	if _, err := deleteConfig(ctx, b, storage, true); err != nil {
+	if _, err = deleteConfig(ctx, b, storage, true); err != nil {
 		t.Fatalf("delete with force: %v", err)
 	}
 

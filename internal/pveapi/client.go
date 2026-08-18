@@ -81,10 +81,10 @@ type Client interface {
 
 // httpClient is the real PVE API client backed by net/http.
 type httpClient struct {
-	baseURL   string // e.g. "https://pve.example.com:8006/api2/json"
-	tokenID   string // full token id: "<user>@<realm>!<tokenid>"
-	tokenSec  string // token secret — never logged
-	http      *http.Client
+	baseURL  string // e.g. "https://pve.example.com:8006/api2/json"
+	tokenID  string // full token id: "<user>@<realm>!<tokenid>"
+	tokenSec string // token secret — never logged
+	http     *http.Client
 }
 
 // ClientConfig holds the parameters needed to construct a real httpClient.
@@ -164,7 +164,7 @@ func (c *httpClient) doRequest(
 	if err != nil {
 		return nil, 0, fmt.Errorf("pveapi: request %s %s: %w", method, path, err)
 	}
-	defer func() { _ = resp.Body.Close() }()
+	defer resp.Body.Close() //nolint:errcheck // response body close error is not actionable
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -212,7 +212,7 @@ func classifyPVEError(status int, body []byte) error {
 	// Decode into a struct that captures both message and all errors values.
 	var errBody pveErrorBody
 	// Best-effort decode; if it fails we fall back to raw body scan.
-	_ = json.Unmarshal(body, &errBody)
+	_ = json.Unmarshal(body, &errBody) //nolint:errcheck // intentional best-effort; raw body scan is the fallback
 
 	// Build a haystack: message + all errors values, joined with space.
 	// This ensures we match "Token already exists" even when it's in
@@ -303,7 +303,7 @@ func (c *httpClient) GetGroup(ctx context.Context, group string) error {
 func (c *httpClient) CreateUser(ctx context.Context, req CreateUserRequest) error {
 	form := url.Values{}
 	form.Set("userid", req.UserID)
-	form.Set("groups", req.Groups)     // single CSV field, never array-repeated
+	form.Set("groups", req.Groups) // single CSV field, never array-repeated
 	form.Set("expire", fmt.Sprintf("%d", req.Expire))
 	if req.Enable {
 		form.Set("enable", "1") // explicit literal "1", never bool encoding
@@ -439,12 +439,6 @@ func (c *httpClient) DeleteUser(ctx context.Context, userid string) error {
 
 // ensure httpClient implements Client at compile time.
 var _ Client = (*httpClient)(nil)
-
-// buildAuthHeader is exported for testing: constructs the expected auth header
-// value from a token_id and token_secret without needing a full client.
-func buildAuthHeader(tokenID, tokenSecret string) string {
-	return "PVEAPIToken=" + tokenID + "=" + tokenSecret
-}
 
 // ClassifyPVEError is the exported wrapper used in tests.
 // Production code uses the unexported classifyPVEError directly inside doRequest.

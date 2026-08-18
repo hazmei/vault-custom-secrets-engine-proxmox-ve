@@ -1,8 +1,10 @@
 // Package proxmox — config path: <mount>/config (POST/GET/DELETE).
 //
 // POST:   Validate TTL ordering, build PVE client, check GetVersion +
-//         GetPermissions (User.Modify + Sys.Audit at /access/groups via
-//         ancestor-walk), store seal-wrapped at key "config".
+//
+//	GetPermissions (User.Modify + Sys.Audit at /access/groups via
+//	ancestor-walk), store seal-wrapped at key "config".
+//
 // GET:    Return all fields except token_secret.
 // DELETE: Require force=true query parameter.
 //
@@ -15,9 +17,9 @@ import (
 	"errors"
 	"fmt"
 
-	pveapi "github.com/hazmei/vault-plugin-secrets-proxmox/internal/pveapi"
 	"github.com/hashicorp/vault/sdk/framework"
 	"github.com/hashicorp/vault/sdk/logical"
+	pveapi "github.com/hazmei/vault-plugin-secrets-proxmox/internal/pveapi"
 )
 
 // configExistenceCheck reports whether a config entry already exists.
@@ -142,11 +144,12 @@ func (b *backend) configWrite(ctx context.Context, req *logical.Request, d *fram
 	}
 
 	// Step 3: reachability + TLS check.
-	if _, err := client.GetVersion(ctx); err != nil {
-		if errors.Is(err, pveapi.ErrForbidden) {
+	var versionErr error
+	if _, versionErr = client.GetVersion(ctx); versionErr != nil {
+		if errors.Is(versionErr, pveapi.ErrForbidden) {
 			return logical.ErrorResponse("PVE /version returned 403 — check address and token credentials"), nil
 		}
-		return logical.ErrorResponse("PVE connectivity check failed: %s", err), nil
+		return logical.ErrorResponse("PVE connectivity check failed: %s", versionErr), nil
 	}
 
 	// Step 4: privilege check via permission tree with ancestor-walk.
@@ -160,13 +163,13 @@ func (b *backend) configWrite(ctx context.Context, req *logical.Request, d *fram
 
 	if !tree.HasPrivilege("/access/groups", "User.Modify") {
 		return logical.ErrorResponse(
-			"admin token lacks User.Modify at /access/groups (or an ancestor with propagate=1); "+
+			"admin token lacks User.Modify at /access/groups (or an ancestor with propagate=1); " +
 				"grant: pveum acl modify /access/groups --user <admin> --role <role> --propagate 1",
 		), nil
 	}
 	if !tree.HasPrivilege("/access/groups", "Sys.Audit") {
 		return logical.ErrorResponse(
-			"admin token lacks Sys.Audit at /access/groups (or an ancestor with propagate=1); "+
+			"admin token lacks Sys.Audit at /access/groups (or an ancestor with propagate=1); " +
 				"required for group-existence validation at role-write time",
 		), nil
 	}
@@ -216,8 +219,8 @@ func (b *backend) configRead(ctx context.Context, req *logical.Request, _ *frame
 
 	return &logical.Response{
 		Data: map[string]interface{}{
-			"address":         cfg.Address,
-			"token_id":        cfg.TokenID,
+			"address":  cfg.Address,
+			"token_id": cfg.TokenID,
 			// token_secret is intentionally omitted — write-only.
 			"tls_skip_verify": cfg.TLSSkipVerify,
 			"ca_cert":         cfg.CACert,

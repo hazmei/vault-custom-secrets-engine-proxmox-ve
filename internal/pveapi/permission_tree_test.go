@@ -15,11 +15,11 @@ func TestPermissionTreeHasPrivilege(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name  string
-		tree  PermissionTree
-		path  string
-		priv  string
-		want  bool
+		name string
+		tree PermissionTree
+		path string
+		priv string
+		want bool
 	}{
 		// ── Exact path match ──────────────────────────────────────────────
 		{
