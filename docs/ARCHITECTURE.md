@@ -134,9 +134,10 @@ refuse based on lease existence. Requiring `force=true` is an explicit
 acknowledgement by the operator. **WARNING**: Deleting the config removes
 the admin credentials, so any OUTSTANDING leases become NON-REVOCABLE and
 NON-RENEWABLE by the engine — renewal also loads config to reach PVE, so
-it fails immediately too. Their PVE users/tokens will remain until they hit
-their `expire` backstop or are cleaned up out-of-band. Operators should
-revoke outstanding leases BEFORE deleting config.
+it fails immediately too. Their PVE users/tokens persist on the cluster; once past the user's `expire`
+the credential is neutralized (authentication rejected, 401 — Probe 8), but
+the user record remains until cleaned up out-of-band (PVE has no auto-reap).
+Operators should revoke outstanding leases BEFORE deleting config.
 
 
 ## Roles

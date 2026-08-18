@@ -845,7 +845,7 @@ Registered via `backend.WALRollback` and `backend.WALRollbackMinAge = 5 * time.M
 
   **Accepted risk — crash between `DeleteWAL` and lease persistence**: there is ONE window this does not cover: a crash between the successful `DeleteWAL` (issuance step 9) and Vault core persisting the returned Secret/lease. In that narrow window the WAL entry is already gone and no lease exists, so neither WALRollback nor Vault revocation fires. The PVE `expire` backstop (set to lease-end + grace at creation time) only **neutralizes** the credential — authentication is rejected once past `expire` (Probe 8) — it does **NOT** delete the user; PVE has no auto-reap, so the stale user record **persists in user.cfg until out-of-band cleanup**. This window is therefore a leak of an inert (auth-rejected) but undeleted user, not a live credential. Requires a crash inside that narrow window. Documented, not mitigated.
 - **Vault revocation retry**: Handles failed revocations on existing leases.
-- **PVE `expire` backstop**: Caps any leaked user that slips through both.
+- **PVE `expire` backstop**: neutralizes any leaked user that slips through both — authentication is rejected once past `expire` (Probe 8) — but does NOT delete the user record (persists until out-of-band cleanup).
 
 **References**: `docs/ARCHITECTURE.md` — WAL-Based Orphan Recovery section, division of responsibility.
 
