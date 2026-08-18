@@ -37,7 +37,7 @@ type MockClient struct {
 	CallLog []Call
 
 	// In-memory state (used by default implementations).
-	// Groups is a set of known group names; GetGroup returns ErrNotFound for unknown groups.
+	// Groups is a set of known group names; GetGroup returns ErrGroupNotFound for unknown groups.
 	Groups map[string]bool
 	// Users maps userid → UserInfo; pre-seed for GetUser; CreateUser adds entries.
 	Users map[string]UserInfo
@@ -157,7 +157,7 @@ func (m *MockClient) GetGroup(ctx context.Context, group string) error {
 	defer m.mu.Unlock()
 	if m.Groups != nil {
 		if !m.Groups[group] {
-			return fmt.Errorf("pveapi: GetGroup %q: %w", group, ErrNotFound)
+			return fmt.Errorf("pveapi: GetGroup %q: %w", group, ErrGroupNotFound)
 		}
 		return nil
 	}
@@ -186,6 +186,12 @@ func (m *MockClient) CreateUser(ctx context.Context, req CreateUserRequest) erro
 		for _, g := range strings.Split(req.Groups, ",") {
 			g = strings.TrimSpace(g)
 			if g != "" {
+				// Reject unresolvable groups: real PVE returns HTTP 500 "no such group"
+				// on POST /access/users when a requested group does not exist.
+				// PVE silently drops unknown groups on modify/append, but REJECTS on create.
+				if m.Groups != nil && !m.Groups[g] {
+					return fmt.Errorf("pveapi: CreateUser %q: group %q: %w", req.UserID, g, ErrGroupNotFound)
+				}
 				groups = append(groups, g)
 			}
 		}
@@ -214,7 +220,7 @@ func (m *MockClient) GetUser(ctx context.Context, userid string) (UserInfo, erro
 			return info, nil
 		}
 	}
-	return UserInfo{}, fmt.Errorf("pveapi: GetUser %q: %w", userid, ErrNotFound)
+	return UserInfo{}, fmt.Errorf("pveapi: GetUser %q: %w", userid, ErrUserNotFound)
 }
 
 // CreateToken implements Client.
@@ -243,11 +249,11 @@ func (m *MockClient) UpdateUser(ctx context.Context, req UpdateUserRequest) erro
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.Users == nil {
-		return fmt.Errorf("pveapi: UpdateUser %q: %w", req.UserID, ErrNotFound)
+		return fmt.Errorf("pveapi: UpdateUser %q: %w", req.UserID, ErrUserNotFound)
 	}
 	info, ok := m.Users[req.UserID]
 	if !ok {
-		return fmt.Errorf("pveapi: UpdateUser %q: %w", req.UserID, ErrNotFound)
+		return fmt.Errorf("pveapi: UpdateUser %q: %w", req.UserID, ErrUserNotFound)
 	}
 	info.Expire = req.Expire
 	info.Enable = req.Enable
@@ -277,6 +283,11 @@ func (m *MockClient) DeleteUser(ctx context.Context, userid string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.Users != nil {
+		if _, ok := m.Users[userid]; !ok {
+			// Real PVE: DELETE /access/users/{userid} returns HTTP 500 "no such user"
+			// when the user is absent (not 404). Confirmed PVE 9.2.10, PVE_PROBES.md Probe 3.
+			return fmt.Errorf("pveapi: DeleteUser %q: %w", userid, ErrUserNotFound)
+		}
 		delete(m.Users, userid)
 	}
 	return nil

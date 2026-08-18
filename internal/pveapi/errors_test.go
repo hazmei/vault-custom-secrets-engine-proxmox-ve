@@ -36,24 +36,35 @@ func TestClassifyPVEError(t *testing.T) {
 			body:   []byte(`{"message":"Parameter verification failed.\n","data":null,"errors":{"tokenid":"Token already exists."}}`),
 			want:   ErrConflict,
 		},
-		// ── ErrNotFound cases ─────────────────────────────────────────────
+		// ── ErrUserNotFound / ErrGroupNotFound cases (DR-2) ─────────────────
 		{
-			name:   "no such user (HTTP 500)",
+			// DR-2: "no such user" maps to ErrUserNotFound specifically.
+			name:   "no such user (HTTP 500) → ErrUserNotFound",
 			status: 500,
 			body:   []byte(`{"data":null,"message":"no such user ('vault-test@pve')\n"}`),
-			want:   ErrNotFound,
+			want:   ErrUserNotFound,
 		},
 		{
-			name:   "group does not exist (HTTP 500)",
+			// DR-2: "does not exist" (group GET) maps to ErrGroupNotFound specifically.
+			name:   "group does not exist (HTTP 500) → ErrGroupNotFound",
 			status: 500,
 			body:   []byte(`{"data":null,"message":"group 'vault-test-grp' does not exist\n"}`),
-			want:   ErrNotFound,
+			want:   ErrGroupNotFound,
 		},
 		{
-			name:   "create user with no such group (HTTP 500)",
+			// DR-2: "no such group" (user create with bad group) maps to ErrGroupNotFound.
+			name:   "create user with no such group (HTTP 500) → ErrGroupNotFound",
 			status: 500,
 			body:   []byte(`{"data":null,"message":"create user failed: no such group 'vault-test-grp'\n"}`),
-			want:   ErrNotFound,
+			want:   ErrGroupNotFound,
+		},
+		// DR-2: "no such user" maps to ErrUserNotFound.
+		// errors.Is(ErrUserNotFound, ErrGroupNotFound) is false; they are distinct.
+		{
+			name:   "no such user satisfies ErrUserNotFound (DR-2)",
+			status: 500,
+			body:   []byte(`{"data":null,"message":"no such user ('vault-test@pve')\n"}`),
+			want:   ErrUserNotFound,
 		},
 		// ── ErrForbidden cases ────────────────────────────────────────────
 		{
@@ -86,7 +97,7 @@ func TestClassifyPVEError(t *testing.T) {
 			name:   "message with trailing newline in JSON string",
 			status: 500,
 			body:   []byte("{\"data\":null,\"message\":\"no such user ('x@pve')\\n\"}"),
-			want:   ErrNotFound,
+			want:   ErrUserNotFound,
 		},
 		{
 			name:   "already exists with embedded quoted id",
@@ -173,8 +184,8 @@ func TestClassifyPVEErrorStructuredFieldsOnly(t *testing.T) {
 	body := []byte(`{"data":null,"message":"no such user ('vault-test@pve')","errors":{}}`)
 
 	got := classifyPVEError(500, body)
-	if !errors.Is(got, ErrNotFound) {
-		t.Errorf("expected ErrNotFound from structured message field, got %v", got)
+	if !errors.Is(got, ErrUserNotFound) {
+		t.Errorf("expected ErrUserNotFound from structured message field, got %v", got)
 	}
 }
 
@@ -188,8 +199,8 @@ func TestClassifyPVEErrorRawFallback(t *testing.T) {
 	body := []byte(`no such user (plain text error from PVE)`)
 
 	got := classifyPVEError(500, body)
-	if !errors.Is(got, ErrNotFound) {
-		t.Errorf("expected ErrNotFound from raw-body fallback, got %v", got)
+	if !errors.Is(got, ErrUserNotFound) {
+		t.Errorf("expected ErrUserNotFound from raw-body fallback, got %v", got)
 	}
 }
 
@@ -229,11 +240,12 @@ func TestClassifyPVEErrorNoFalsePositiveFromJSONSyntax(t *testing.T) {
 // These confirm that body-string classification is ONLY performed for HTTP 400
 // and 500 (PVE's confirmed error statuses).  A proxy/LB returning 502/503/404
 // with a body that happens to contain a sentinel phrase must NOT be classified
-// as ErrNotFound/ErrConflict — that would make revocation silently "succeed"
-// while live PVE users remain and no WAL entry is left to sweep them.
+// as ErrUserNotFound/ErrGroupNotFound/ErrConflict — that would make revocation
+// silently "succeed" while live PVE users remain and no WAL entry is left to
+// sweep them.
 
 // TestClassifyPVEErrorStatusGate502NoFalsePositive confirms that HTTP 502 with
-// a body containing "does not exist" returns nil, not ErrNotFound.
+// a body containing "does not exist" returns nil, not ErrGroupNotFound.
 func TestClassifyPVEErrorStatusGate502NoFalsePositive(t *testing.T) {
 	t.Parallel()
 
@@ -247,7 +259,7 @@ func TestClassifyPVEErrorStatusGate502NoFalsePositive(t *testing.T) {
 }
 
 // TestClassifyPVEErrorStatusGate503NoFalsePositive confirms that HTTP 503 with
-// a body containing "no such user" returns nil, not ErrNotFound.
+// a body containing "no such user" returns nil, not ErrUserNotFound.
 func TestClassifyPVEErrorStatusGate503NoFalsePositive(t *testing.T) {
 	t.Parallel()
 
@@ -280,8 +292,8 @@ func TestClassifyPVEErrorStatusGate500StillWorks(t *testing.T) {
 	body := []byte(`{"data":null,"message":"no such user ('vault-test@pve')"}`)
 
 	got := classifyPVEError(500, body)
-	if !errors.Is(got, ErrNotFound) {
-		t.Errorf("HTTP 500 with 'no such user' body should return ErrNotFound; got %v", got)
+	if !errors.Is(got, ErrUserNotFound) {
+		t.Errorf("HTTP 500 with 'no such user' body should return ErrUserNotFound; got %v", got)
 	}
 }
 
@@ -295,5 +307,22 @@ func TestClassifyPVEErrorStatusGate400StillWorks(t *testing.T) {
 	got := classifyPVEError(400, body)
 	if !errors.Is(got, ErrConflict) {
 		t.Errorf("HTTP 400 with 'Token already exists' body should return ErrConflict; got %v", got)
+	}
+}
+
+// TestSentinelDistinctness asserts the DR-2 sentinel-distinctness invariant:
+//
+//   - errors.Is(ErrGroupNotFound, ErrUserNotFound) must be FALSE
+//
+// This property is what makes DR-2 meaningful: revocation call sites can key on
+// ErrUserNotFound to treat a missing-user delete as success, while group-not-found
+// (ErrGroupNotFound) surfaces as a hard role-write failure rather than silently
+// resolving to the wrong branch.
+func TestSentinelDistinctness(t *testing.T) {
+	t.Parallel()
+
+	// ErrGroupNotFound is a DISTINCT sentinel — must NOT satisfy ErrUserNotFound.
+	if errors.Is(ErrGroupNotFound, ErrUserNotFound) {
+		t.Error("errors.Is(ErrGroupNotFound, ErrUserNotFound) must be FALSE: distinct sentinels must not overlap")
 	}
 }

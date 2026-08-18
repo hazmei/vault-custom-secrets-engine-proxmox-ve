@@ -300,7 +300,7 @@ func TestClassifyPVEErrorIntegration(t *testing.T) {
 			statusCode: 500,
 			body:       `{"data":null,"message":"no such user ('x@pve')\n"}`,
 			method:     http.MethodDelete,
-			wantErr:    ErrNotFound,
+			wantErr:    ErrUserNotFound,
 		},
 		{
 			name:       "forbidden via GetPermissions",

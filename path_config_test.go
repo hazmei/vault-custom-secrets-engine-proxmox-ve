@@ -133,6 +133,54 @@ func TestConfigWrite_DefaultTTLExceedsMaxTTL_Rejected(t *testing.T) {
 	}
 }
 
+func TestConfigWrite_NegativeDefaultTTL_Rejected(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	b, storage := newTestBackend(t, defaultMock())
+
+	data := validConfigData()
+	data["default_ttl"] = -3600
+
+	resp, err := writeConfig(ctx, b, storage, data)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !resp.IsError() {
+		t.Fatal("expected error response for negative default_ttl")
+	}
+	// The SDK rejects TypeDurationSecond negative values at the framework layer
+	// before our handler runs. Either the framework message ("cannot provide
+	// negative value") or our explicit guard ("default_ttl cannot be negative")
+	// is acceptable — what matters is that the request is rejected.
+	if !strings.Contains(resp.Error().Error(), "negative") {
+		t.Errorf("error should mention 'negative'; got: %q", resp.Error())
+	}
+}
+
+func TestConfigWrite_NegativeDefaultMaxTTL_Rejected(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	b, storage := newTestBackend(t, defaultMock())
+
+	data := validConfigData()
+	data["default_max_ttl"] = -86400
+
+	resp, err := writeConfig(ctx, b, storage, data)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !resp.IsError() {
+		t.Fatal("expected error response for negative default_max_ttl")
+	}
+	// The SDK rejects TypeDurationSecond negative values at the framework layer
+	// before our handler runs. Either the framework message ("cannot provide
+	// negative value") or our explicit guard ("default_max_ttl cannot be negative")
+	// is acceptable — what matters is that the request is rejected.
+	if !strings.Contains(resp.Error().Error(), "negative") {
+		t.Errorf("error should mention 'negative'; got: %q", resp.Error())
+	}
+}
+
 func TestConfigWrite_MissingAddress_Rejected(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()

@@ -31,6 +31,12 @@ type backend struct {
 	// config invalidation. Built lazily by getClient.
 	client pveapi.Client
 
+	// roleLock serializes roleWrite's read-modify-write (load existing role →
+	// merge fields → store). Without this, concurrent updates to the same role
+	// can interleave and the last writer silently drops fields from earlier
+	// concurrent writers. sync.Mutex zero value is ready to use.
+	roleLock sync.Mutex
+
 	// newClient is the factory used by the config-write handler to build a
 	// PVE client from incoming credentials BEFORE storing config.
 	// Defaults to the real constructor; overridden in unit tests to inject
@@ -72,7 +78,8 @@ func newBackend(ctx context.Context, conf *logical.BackendConfig) (*backend, err
 
 		Paths: framework.PathAppend(
 			[]*framework.Path{pathConfig(b)},
-			// Phases 2–3 will add pathRoles(b) and pathCreds(b) here.
+			pathRoles(b),
+			// Phase 3 will add pathCreds(b) here.
 		),
 
 		// Phases 3+ will add Secrets and WAL registration here:

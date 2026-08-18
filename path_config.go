@@ -122,6 +122,12 @@ func (b *backend) configWrite(ctx context.Context, req *logical.Request, d *fram
 	}
 
 	// Validate TTL ordering (sanity guard; CalculateTTL would cap silently).
+	if defaultTTL < 0 {
+		return logical.ErrorResponse("default_ttl cannot be negative"), nil
+	}
+	if defaultMaxTTL < 0 {
+		return logical.ErrorResponse("default_max_ttl cannot be negative"), nil
+	}
 	if defaultTTL > 0 && defaultMaxTTL > 0 && defaultTTL > defaultMaxTTL {
 		return logical.ErrorResponse("default_ttl (%d) must not exceed default_max_ttl (%d)", defaultTTL, defaultMaxTTL), nil
 	}
