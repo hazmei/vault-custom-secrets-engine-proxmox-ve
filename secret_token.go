@@ -82,10 +82,12 @@ func secretToken(b *backend) *framework.Secret {
 //  1. Extract pve_userid, group, and effective_max_ttl from req.Secret.InternalData.
 //  2. Compute new TTL via framework.CalculateTTL (honors increment and effective_max_ttl).
 //  3. Refuse renewal if new TTL is zero.
-//  4. UpdateUser: PUT /access/users/{userid} with expire+groups+enable+append=1
+//  4. Pre-update GetUser: refuse renewal if the user is currently disabled (an
+//     operator may have disabled it for incident response; we must not re-enable it).
+//  5. UpdateUser: PUT /access/users/{userid} with expire+groups+enable+append=1
 //     (FULL-REPLACE — omitting groups wipes membership; confirmed PVE 9.2.10 Probe 7).
-//  5. Read-back: GetUser asserts group membership survived the PUT.
-//  6. Return updated Secret with new TTL/MaxTTL.
+//  6. Read-back: GetUser asserts group membership survived the PUT.
+//  7. Return updated Secret with new TTL/MaxTTL.
 func (b *backend) secretTokenRenew(ctx context.Context, req *logical.Request, _ *framework.FieldData) (*logical.Response, error) {
 	// Step 1: extract from InternalData.
 	userid, group, effectiveMaxTTL, err := extractLeaseInternalData(req.Secret.InternalData)
@@ -117,12 +119,29 @@ func (b *backend) secretTokenRenew(ctx context.Context, req *logical.Request, _ 
 
 	newExpire := time.Now().Add(ttl).Unix() + 60 // +60s grace (same as issuance)
 
-	// Step 4: UpdateUser — full-replace with expire+groups+enable+append=1.
+	// Step 4: Get PVE client and perform a pre-update GetUser to check Enable.
 	client, err := b.getClient(ctx, req.Storage)
 	if err != nil {
 		return nil, fmt.Errorf("proxmox: renew: get PVE client: %w", err)
 	}
 
+	// Pre-update read: refuse renewal if the user is currently disabled.
+	// Renewal sends Enable:true, which would silently undo an operator's deliberate
+	// containment (e.g. disabling a suspected-compromised synthetic user for incident
+	// response). We must not re-enable a user that an operator has deliberately disabled.
+	preInfo, preErr := client.GetUser(ctx, userid)
+	if preErr != nil {
+		return nil, fmt.Errorf("proxmox: renew: pre-update GetUser %q: %w", userid, preErr)
+	}
+	if !preInfo.Enable {
+		return nil, fmt.Errorf(
+			"proxmox: renew: user %q is disabled; refusing to re-enable via renewal — "+
+				"an operator may have disabled it for incident response; revoke the lease instead",
+			userid,
+		)
+	}
+
+	// Step 5: UpdateUser — full-replace with expire+groups+enable+append=1.
 	if updateErr := client.UpdateUser(ctx, pveapi.UpdateUserRequest{
 		UserID: userid,
 		Expire: newExpire,
@@ -133,7 +152,7 @@ func (b *backend) secretTokenRenew(ctx context.Context, req *logical.Request, _ 
 		return nil, fmt.Errorf("proxmox: renew: UpdateUser %q: %w", userid, updateErr)
 	}
 
-	// Step 5: read-back — assert group membership survived the full-replace PUT.
+	// Step 6: post-update read-back — assert group membership survived the full-replace PUT.
 	info, err := client.GetUser(ctx, userid)
 	if err != nil {
 		return nil, fmt.Errorf("proxmox: renew: GetUser %q read-back: %w", userid, err)
@@ -141,8 +160,15 @@ func (b *backend) secretTokenRenew(ctx context.Context, req *logical.Request, _ 
 	if !containsGroup(info.Groups, group) {
 		return nil, fmt.Errorf("proxmox: renew: group read-back assertion failed: user %q not in group %q after UpdateUser (groups: %v)", userid, group, info.Groups)
 	}
+	// Soft cardinality check: PVE group membership is a set (no duplicates), so len>1
+	// means the user is in multiple groups, which is unexpected for a synthetic lease user.
+	// This is not a hard failure — the containsGroup assertion above is the hard gate.
+	if len(info.Groups) != 1 {
+		b.Logger().Warn("proxmox: renew: unexpected group cardinality on synthetic lease user",
+			"userid", userid, "groups", info.Groups)
+	}
 
-	// Step 6: return updated Secret.
+	// Step 7: return updated Secret.
 	resp := &logical.Response{Secret: req.Secret}
 	resp.Secret.TTL = ttl
 	resp.Secret.MaxTTL = effectiveMaxTTL
@@ -215,6 +241,11 @@ func extractLeaseInternalData(data map[string]interface{}) (userid, group string
 	case int64:
 		effectiveMaxTTL = time.Duration(v)
 	case float64:
+		// float64 exactly represents integer nanoseconds up to 2^53 ns (~104 days),
+		// comfortably covering Vault's default 32-day max lease TTL. The int64→
+		// JSON(float64)→Duration round-trip is therefore lossless for realistic TTLs
+		// (worst-case ≤2 ns error only beyond ~104-day durations, negligible vs the
+		// 60 s expire grace).
 		effectiveMaxTTL = time.Duration(int64(v))
 	case int:
 		effectiveMaxTTL = time.Duration(v)

@@ -193,8 +193,15 @@ func (b *backend) handleCredsRead(ctx context.Context, req *logical.Request, d *
 			b.Logger().Warn("creds: userid collision, retrying with new suffix",
 				"userid", userid, "attempt", attempt+1)
 			if delErr := framework.DeleteWAL(ctx, req.Storage, walID); delErr != nil {
-				b.Logger().Warn("creds: DeleteWAL after collision failed",
-					"walID", walID, "error", delErr)
+				// DeleteWAL failure on the collision path is a hard stop.
+				// The stale WAL entry names a userid we did NOT create (the
+				// conflicting user belongs to another lease or external entity).
+				// Continuing would risk walRollback deleting a foreign user after
+				// WALRollbackMinAge elapses. Surface the failure immediately so
+				// the operator can investigate; do NOT set walID="" and continue.
+				b.Logger().Error("creds: DeleteWAL after collision failed; aborting issuance to avoid stale WAL naming a foreign user",
+					"walID", walID, "userid", userid, "error", delErr)
+				return nil, fmt.Errorf("proxmox: creds/%s: DeleteWAL after collision for %q: %w", roleName, userid, delErr)
 			}
 			walID = "" // clear so exhaustion path knows last attempt was cleaned
 			continue
@@ -221,7 +228,8 @@ func (b *backend) handleCredsRead(ctx context.Context, req *logical.Request, d *
 	if err != nil {
 		b.Logger().Warn("creds: GetUser read-back failed; cleaning up", "userid", userid, "error", err)
 		if cleanErr := b.cleanupUser(ctx, req.Storage, userid, walID); cleanErr != nil {
-			b.Logger().Warn("creds: cleanupUser after GetUser failure also failed", "userid", userid, "error", cleanErr)
+			b.Logger().Error("creds: compensation failed after GetUser failure; WAL left for walRollback",
+				"userid", userid, "walID", walID, "cleanup_error", cleanErr)
 		}
 		return nil, fmt.Errorf("proxmox: creds/%s: GetUser read-back %q: %w", roleName, userid, err)
 	}
@@ -229,7 +237,8 @@ func (b *backend) handleCredsRead(ctx context.Context, req *logical.Request, d *
 		b.Logger().Warn("creds: group read-back assertion failed; cleaning up",
 			"userid", userid, "expected_group", role.Group, "actual_groups", info.Groups)
 		if cleanErr := b.cleanupUser(ctx, req.Storage, userid, walID); cleanErr != nil {
-			b.Logger().Warn("creds: cleanupUser after group assertion failure also failed", "userid", userid, "error", cleanErr)
+			b.Logger().Error("creds: compensation failed after group assertion failure; WAL left for walRollback",
+				"userid", userid, "walID", walID, "cleanup_error", cleanErr)
 		}
 		return nil, fmt.Errorf(
 			"proxmox: creds/%s: group read-back assertion failed: user %q not in group %q (groups: %v); "+
@@ -243,7 +252,8 @@ func (b *backend) handleCredsRead(ctx context.Context, req *logical.Request, d *
 	if err != nil {
 		b.Logger().Warn("creds: CreateToken failed; cleaning up", "userid", userid, "error", err)
 		if cleanErr := b.cleanupUser(ctx, req.Storage, userid, walID); cleanErr != nil {
-			b.Logger().Warn("creds: cleanupUser after CreateToken failure also failed", "userid", userid, "error", cleanErr)
+			b.Logger().Error("creds: compensation failed after CreateToken failure; WAL left for walRollback",
+				"userid", userid, "walID", walID, "cleanup_error", cleanErr)
 		}
 		return nil, fmt.Errorf("proxmox: creds/%s: CreateToken for %q: %w", roleName, userid, err)
 	}
