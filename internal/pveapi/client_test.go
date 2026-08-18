@@ -22,13 +22,15 @@ import (
 	"testing"
 )
 
-// makeTestClient creates a real httpClient pointed at the given test server.
+// makeTestClient creates a real httpClient pointed at the given TLS test server.
+// It sets TLSSkipVerify=true since httptest.NewTLSServer uses a self-signed cert.
 func makeTestClient(t *testing.T, serverURL, tokenID, tokenSecret string) Client {
 	t.Helper()
 	client, err := NewClient(ClientConfig{
-		Address:     serverURL,
-		TokenID:     tokenID,
-		TokenSecret: tokenSecret,
+		Address:       serverURL,
+		TokenID:       tokenID,
+		TokenSecret:   tokenSecret,
+		TLSSkipVerify: true, // httptest TLS server uses a self-signed cert
 	})
 	if err != nil {
 		t.Fatalf("NewClient: %v", err)
@@ -45,7 +47,7 @@ func TestClientAuthHeaderFormat(t *testing.T) {
 	const tokenSecret = "test-secret-uuid"
 	wantHeader := "PVEAPIToken=" + tokenID + "=" + tokenSecret
 
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	ts := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		got := r.Header.Get("Authorization")
 		if got != wantHeader {
 			t.Errorf("Authorization header = %q; want %q", got, wantHeader)
@@ -68,7 +70,7 @@ func TestClientAuthHeaderFormat(t *testing.T) {
 func TestGetPermissionsParsesTree(t *testing.T) {
 	t.Parallel()
 
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	ts := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/api2/json/access/permissions" {
 			t.Errorf("unexpected path: %q", r.URL.Path)
 		}
@@ -110,7 +112,7 @@ func TestGetPermissionsParsesTree(t *testing.T) {
 func TestCreateTokenPrivsepIsLiteralZero(t *testing.T) {
 	t.Parallel()
 
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	ts := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if err := r.ParseForm(); err != nil {
 			t.Fatalf("ParseForm: %v", err)
 		}
@@ -139,7 +141,7 @@ func TestCreateTokenPrivsepIsLiteralZero(t *testing.T) {
 func TestCreateTokenPrivsepTrueIsLiteralOne(t *testing.T) {
 	t.Parallel()
 
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	ts := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if err := r.ParseForm(); err != nil {
 			t.Fatalf("ParseForm: %v", err)
 		}
@@ -165,7 +167,7 @@ func TestCreateTokenPrivsepTrueIsLiteralOne(t *testing.T) {
 func TestCreateUserEnableIsLiteralOne(t *testing.T) {
 	t.Parallel()
 
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	ts := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if err := r.ParseForm(); err != nil {
 			t.Fatalf("ParseForm: %v", err)
 		}
@@ -195,7 +197,7 @@ func TestCreateUserEnableIsLiteralOne(t *testing.T) {
 func TestCreateUserGroupsIsOneCSVField(t *testing.T) {
 	t.Parallel()
 
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	ts := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if err := r.ParseForm(); err != nil {
 			t.Fatalf("ParseForm: %v", err)
 		}
@@ -234,7 +236,7 @@ func TestCreateUserGroupsIsOneCSVField(t *testing.T) {
 func TestUpdateUserAppendIsLiteralOne(t *testing.T) {
 	t.Parallel()
 
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	ts := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPut {
 			return // only check PUT
 		}
@@ -278,7 +280,7 @@ func TestTokenSecretNeverInErrorStrings(t *testing.T) {
 
 	const tokenSecret = "super-secret-token-value-must-not-leak"
 
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	ts := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Simulate a 500 error response that PVE might return.
 		// The body contains the word "secret" — should never appear in errors.
 		w.WriteHeader(http.StatusInternalServerError)
@@ -338,7 +340,7 @@ func TestClassifyPVEErrorIntegration(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			ts := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				w.WriteHeader(tc.statusCode)
 				_, _ = w.Write([]byte(tc.body)) //nolint:errcheck // httptest handler — write error not actionable
 			}))
@@ -374,7 +376,7 @@ func TestClientBaseURLPathConstruction(t *testing.T) {
 	t.Parallel()
 
 	var capturedPath string
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	ts := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		capturedPath = r.URL.Path
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{ //nolint:errcheck // httptest handler — write error not actionable
 			"data": map[string]interface{}{"version": "9.2.10"},
@@ -402,7 +404,7 @@ func TestCreateTokenPathEncoding(t *testing.T) {
 	const tokenid = "vault"
 
 	var capturedPath string
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	ts := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		capturedPath = r.URL.Path
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{ //nolint:errcheck // httptest handler — write error not actionable
 			"data": map[string]interface{}{"value": "tok"},
@@ -419,5 +421,60 @@ func TestCreateTokenPathEncoding(t *testing.T) {
 	wantPathSuffix := "/access/users/" + url.PathEscape(userid) + "/token/" + url.PathEscape(tokenid)
 	if !strings.HasSuffix(capturedPath, wantPathSuffix) {
 		t.Errorf("path = %q; want suffix %q", capturedPath, wantPathSuffix)
+	}
+}
+
+// ── NewClient scheme-enforcement tests ───────────────────────────────────────
+
+// TestNewClientRejectsHTTPScheme asserts that NewClient returns an error when
+// the address uses http:// instead of https://.
+// Rationale: the admin token travels in the Authorization header; over plain
+// http it is exposed in cleartext and tls_skip_verify/ca_cert are meaningless.
+func TestNewClientRejectsHTTPScheme(t *testing.T) {
+	t.Parallel()
+
+	_, err := NewClient(ClientConfig{
+		Address:     "http://pve.example.com:8006",
+		TokenID:     "vault-admin@pve!tok",
+		TokenSecret: "secret",
+	})
+	if err == nil {
+		t.Fatal("expected error for http:// address, got nil")
+	}
+	if !strings.Contains(err.Error(), "https") {
+		t.Errorf("error should mention https requirement; got: %q", err.Error())
+	}
+}
+
+// TestNewClientRejectsSchemelessAddress asserts that NewClient returns an error
+// when the address has no scheme (or an empty/unknown scheme).
+func TestNewClientRejectsSchemelessAddress(t *testing.T) {
+	t.Parallel()
+
+	_, err := NewClient(ClientConfig{
+		Address:     "pve.example.com:8006",
+		TokenID:     "vault-admin@pve!tok",
+		TokenSecret: "secret",
+	})
+	if err == nil {
+		t.Fatal("expected error for scheme-less address, got nil")
+	}
+	if !strings.Contains(err.Error(), "https") {
+		t.Errorf("error should mention https requirement; got: %q", err.Error())
+	}
+}
+
+// TestNewClientAcceptsHTTPSScheme asserts that NewClient succeeds for a valid
+// https:// address (no network I/O is performed by NewClient itself).
+func TestNewClientAcceptsHTTPSScheme(t *testing.T) {
+	t.Parallel()
+
+	_, err := NewClient(ClientConfig{
+		Address:     "https://pve.example.com:8006",
+		TokenID:     "vault-admin@pve!tok",
+		TokenSecret: "secret",
+	})
+	if err != nil {
+		t.Fatalf("expected success for https:// address; got: %v", err)
 	}
 }

@@ -15,7 +15,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"sync"
-	"time"
 
 	"github.com/hashicorp/vault/sdk/framework"
 	"github.com/hashicorp/vault/sdk/logical"
@@ -168,7 +167,3 @@ func getConfig(ctx context.Context, storage logical.Storage) (*proxmoxConfig, er
 
 	return &cfg, nil
 }
-
-// Ensure the backend compiles cleanly with the time import used.
-// (time is used in WALRollbackMinAge in later phases; keep here as a reminder.)
-var _ = time.Minute

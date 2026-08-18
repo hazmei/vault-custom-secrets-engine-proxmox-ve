@@ -98,7 +98,19 @@ type ClientConfig struct {
 
 // NewClient constructs a real PVE API client from the given config.
 // It does NOT perform any network I/O; call GetVersion to test connectivity.
+//
+// NewClient rejects any address that does not use the https:// scheme.
+// Sending the admin token over plain http exposes it in cleartext; the
+// tls_skip_verify and ca_cert options are meaningless without TLS.
 func NewClient(cfg ClientConfig) (Client, error) {
+	parsed, err := url.Parse(cfg.Address)
+	if err != nil {
+		return nil, fmt.Errorf("pveapi: invalid address %q: %w", cfg.Address, err)
+	}
+	if parsed.Scheme != "https" {
+		return nil, fmt.Errorf("pveapi: address must use https:// scheme; got %q", cfg.Address)
+	}
+
 	tlsCfg := &tls.Config{
 		InsecureSkipVerify: cfg.TLSSkipVerify, //nolint:gosec // operator-controlled
 	}
@@ -185,7 +197,7 @@ func (c *httpClient) doRequest(
 	return body, resp.StatusCode, nil
 }
 
-// classifyPVEError inspects the HTTP status code and the FULL decoded body
+// classifyPVEError inspects the HTTP status code and the decoded body
 // to map PVE error conditions to typed sentinel errors.
 //
 // PVE's error contract (PVE 9.2.10, PVE_PROBES.md Probes 2–6b):
@@ -197,9 +209,10 @@ func (c *httpClient) doRequest(
 //   - HTTP 403 (any body)         → ErrForbidden
 //   - anything else               → nil (caller wraps with status+endpoint)
 //
-// The match runs against the FULL body — the top-level message string AND
-// every value under the errors object — because some errors only appear in
-// errors.tokenid (e.g. "Token already exists.").
+// The match prefers STRUCTURED fields (message + all errors-map values) to
+// avoid false-positive widening from raw-body noise.  The raw body string is
+// used as a genuine fallback ONLY when json.Unmarshal fails or both message
+// and errors are empty (e.g. a plain-text or malformed response).
 func classifyPVEError(status int, body []byte) error {
 	if status == http.StatusForbidden {
 		return ErrForbidden
@@ -209,25 +222,28 @@ func classifyPVEError(status int, body []byte) error {
 		return nil
 	}
 
-	// Decode into a struct that captures both message and all errors values.
+	// Attempt to decode structured fields from the PVE error body.
 	var errBody pveErrorBody
-	// Best-effort decode; if it fails we fall back to raw body scan.
-	_ = json.Unmarshal(body, &errBody) //nolint:errcheck // intentional best-effort; raw body scan is the fallback
+	decodeOK := json.Unmarshal(body, &errBody) == nil
 
-	// Build a haystack: message + all errors values, joined with space.
-	// This ensures we match "Token already exists" even when it's in
-	// errors.tokenid rather than message.
-	var parts []string
-	if errBody.Message != "" {
-		parts = append(parts, errBody.Message)
+	var haystack string
+	if decodeOK && (errBody.Message != "" || len(errBody.Errors) > 0) {
+		// Prefer structured fields: message + all errors-map values.
+		// This ensures we match "Token already exists" even when it's in
+		// errors.tokenid rather than message (PVE_PROBES.md Probe 6b).
+		var parts []string
+		if errBody.Message != "" {
+			parts = append(parts, errBody.Message)
+		}
+		for _, v := range errBody.Errors {
+			parts = append(parts, v)
+		}
+		haystack = strings.ToLower(strings.Join(parts, " "))
+	} else {
+		// Fallback: scan raw body when JSON decode failed or yielded no fields.
+		// Covers plain-text PVE responses and other unexpected shapes.
+		haystack = strings.ToLower(string(body))
 	}
-	for _, v := range errBody.Errors {
-		parts = append(parts, v)
-	}
-	// Also include the raw body as a fallback for unexpected shapes.
-	parts = append(parts, string(body))
-
-	haystack := strings.ToLower(strings.Join(parts, " "))
 
 	switch {
 	case strings.Contains(haystack, "token already exists"):
@@ -439,10 +455,3 @@ func (c *httpClient) DeleteUser(ctx context.Context, userid string) error {
 
 // ensure httpClient implements Client at compile time.
 var _ Client = (*httpClient)(nil)
-
-// ClassifyPVEError is the exported wrapper used in tests.
-// Production code uses the unexported classifyPVEError directly inside doRequest.
-// Exported here so errors_test.go and client_test.go can call it directly.
-func ClassifyPVEError(status int, body []byte) error {
-	return classifyPVEError(status, body)
-}

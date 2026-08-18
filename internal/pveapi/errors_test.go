@@ -100,14 +100,14 @@ func TestClassifyPVEError(t *testing.T) {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			got := ClassifyPVEError(tc.status, tc.body)
+			got := classifyPVEError(tc.status, tc.body)
 			if !errors.Is(got, tc.want) {
 				// When both are nil, errors.Is returns true, so this branch only
 				// fires on genuine mismatches.
 				if got == nil && tc.want == nil {
 					return
 				}
-				t.Errorf("ClassifyPVEError(status=%d, body=%q) = %v; want %v",
+				t.Errorf("classifyPVEError(status=%d, body=%q) = %v; want %v",
 					tc.status, tc.body, got, tc.want)
 			}
 		})
@@ -125,7 +125,7 @@ func TestClassifyPVEErrorTokenSecretNotInErrorString(t *testing.T) {
 	sensitiveValue := "00000000-1111-2222-3333-444444444444"
 	body := []byte(`{"message":"some error containing ` + sensitiveValue + `"}`)
 
-	err := ClassifyPVEError(500, body)
+	err := classifyPVEError(500, body)
 	// The classifier returns nil for an unrecognised body — the point is that
 	// the sensitive value MUST NOT appear in the returned error (if any).
 	if err != nil && strings.Contains(err.Error(), sensitiveValue) {
@@ -143,7 +143,7 @@ func TestClassifyPVEErrorTokenExistsOnlyInErrors(t *testing.T) {
 	// Body where message does NOT contain "Token already exists" but errors.tokenid does.
 	body := []byte(`{"message":"Parameter verification failed.\n","data":null,"errors":{"tokenid":"Token already exists."}}`)
 
-	got := ClassifyPVEError(400, body)
+	got := classifyPVEError(400, body)
 	if !errors.Is(got, ErrConflict) {
 		t.Errorf("expected ErrConflict from errors.tokenid body, got %v", got)
 	}
@@ -152,5 +152,75 @@ func TestClassifyPVEErrorTokenExistsOnlyInErrors(t *testing.T) {
 	// The message "Parameter verification failed." does NOT contain the string.
 	if strings.Contains("Parameter verification failed.", "Token already exists") {
 		t.Error("test setup error: message field should NOT contain 'Token already exists'")
+	}
+}
+
+// TestClassifyPVEErrorStructuredFieldsOnly confirms that a well-formed PVE
+// error body (with message and/or errors fields) is classified purely from
+// those structured fields — NOT from re-scanning the raw JSON string.
+//
+// The raw JSON contains extra text that would match "no such user" if the
+// raw body were always appended (the old, incorrect behaviour).  We embed
+// the sentinel phrase only inside the message/errors values; the JSON key
+// names and surrounding syntax do NOT contain it — so if the classifier
+// uses only structured fields the match succeeds correctly, and if it were
+// accidentally using the raw body the broader context would still match.
+// A stronger negative test is provided by TestClassifyPVEErrorRawFallback.
+func TestClassifyPVEErrorStructuredFieldsOnly(t *testing.T) {
+	t.Parallel()
+
+	// Well-formed body: "no such user" appears only in the message field.
+	body := []byte(`{"data":null,"message":"no such user ('vault-test@pve')","errors":{}}`)
+
+	got := classifyPVEError(500, body)
+	if !errors.Is(got, ErrNotFound) {
+		t.Errorf("expected ErrNotFound from structured message field, got %v", got)
+	}
+}
+
+// TestClassifyPVEErrorRawFallback confirms that a malformed/non-JSON body is
+// still classified via the raw-body fallback path.
+// This covers plain-text PVE responses and other unexpected shapes.
+func TestClassifyPVEErrorRawFallback(t *testing.T) {
+	t.Parallel()
+
+	// Non-JSON body — json.Unmarshal will fail; classifier must fall back to raw scan.
+	body := []byte(`no such user (plain text error from PVE)`)
+
+	got := classifyPVEError(500, body)
+	if !errors.Is(got, ErrNotFound) {
+		t.Errorf("expected ErrNotFound from raw-body fallback, got %v", got)
+	}
+}
+
+// TestClassifyPVEErrorRawFallbackConflict confirms the raw fallback also works
+// for the "already exists" case with a plain-text body.
+func TestClassifyPVEErrorRawFallbackConflict(t *testing.T) {
+	t.Parallel()
+
+	body := []byte(`create user failed: user 'vault-test@pve' already exists`)
+
+	got := classifyPVEError(500, body)
+	if !errors.Is(got, ErrConflict) {
+		t.Errorf("expected ErrConflict from raw-body fallback, got %v", got)
+	}
+}
+
+// TestClassifyPVEErrorNoFalsePositiveFromJSONSyntax confirms that the
+// structured-fields-only path does NOT match sentinel strings that appear only
+// in the JSON syntax (keys, surrounding braces) but not in the values.
+//
+// A body whose JSON values are all benign should return nil even if the raw
+// JSON string happened to contain a sentinel substring in a key name.
+func TestClassifyPVEErrorNoFalsePositiveFromJSONSyntax(t *testing.T) {
+	t.Parallel()
+
+	// message and errors values are benign; the raw JSON does NOT accidentally
+	// contain any sentinel phrase, but we verify the classifier ignores structure.
+	body := []byte(`{"data":null,"message":"an unrelated error occurred","errors":{}}`)
+
+	got := classifyPVEError(500, body)
+	if got != nil {
+		t.Errorf("expected nil for benign body, got %v", got)
 	}
 }

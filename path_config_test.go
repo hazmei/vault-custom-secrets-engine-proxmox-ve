@@ -11,6 +11,7 @@ package proxmox
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/hashicorp/vault/sdk/logical"
@@ -484,5 +485,40 @@ func TestConfigWriteReadDeleteRoundTrip(t *testing.T) {
 	}
 	if resp != nil {
 		t.Error("expected nil response after delete")
+	}
+}
+
+// TestConfigWrite_EmptyPermissionTree_Privsep1Diagnostic asserts that when
+// GetPermissions returns an empty PermissionTree ({"data":{}}), configWrite
+// returns a clear error explaining the privsep=1 root cause.
+//
+// This is grounded in PVE_PROBES.md Probe 6: a token created with privsep=1
+// (the PVE default) returns an empty permissions tree because it has its own
+// empty ACL and inherits nothing from its user account.  The fix is to
+// recreate the token with --privsep 0.
+func TestConfigWrite_EmptyPermissionTree_Privsep1Diagnostic(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	b, storage := newTestBackend(t, func(mc *pveapi.MockClient) {
+		// Simulate a token created with privsep=1: GET /access/permissions
+		// returns {"data":{}} — an empty permission tree.
+		mc.GetPermissionsResult = pveapi.PermissionTree{}
+	})
+
+	resp, err := writeConfig(ctx, b, storage, validConfigData())
+	if err != nil {
+		t.Fatalf("unexpected framework error: %v", err)
+	}
+	if !resp.IsError() {
+		t.Fatal("expected error response when permission tree is empty (privsep=1 scenario)")
+	}
+
+	errMsg := resp.Error().Error()
+	// The error must mention privsep=0 so the operator knows the fix.
+	if !strings.Contains(strings.ToLower(errMsg), "privsep") {
+		t.Errorf("error should mention privsep; got: %q", errMsg)
+	}
+	if !strings.Contains(errMsg, "0") {
+		t.Errorf("error should mention privsep 0 (the fix); got: %q", errMsg)
 	}
 }

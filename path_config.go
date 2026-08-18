@@ -161,6 +161,25 @@ func (b *backend) configWrite(ctx context.Context, req *logical.Request, d *fram
 		return logical.ErrorResponse("PVE GetPermissions failed: %s", err), nil
 	}
 
+	// Early-exit if the permission tree is empty.
+	// An empty tree ({"data":{}}) means the admin token's effective ACL is
+	// empty — most commonly because the token was created with privsep=1 (the
+	// PVE default), which gives the token its own empty ACL and it inherits
+	// nothing from its user account.  The fix is to recreate the token with
+	// privsep=0, e.g.:
+	//   pveum user token add <user> <tokenid> --privsep 0
+	// (Confirmed PVE 9.2.10, PVE_PROBES.md Probe 6: a privsep=1 token returns
+	// {"data":{}} from GET /access/permissions.)
+	if len(tree) == 0 {
+		return logical.ErrorResponse(
+			"admin token has an empty permission tree — this almost always means the token was " +
+				"created with privsep=1 (the PVE default), which gives the token its own empty ACL " +
+				"and inherits nothing from its user account; " +
+				"fix: recreate the token with --privsep 0, e.g. " +
+				"\"pveum user token add <user> <tokenid> --privsep 0\"",
+		), nil
+	}
+
 	if !tree.HasPrivilege("/access/groups", "User.Modify") {
 		return logical.ErrorResponse(
 			"admin token lacks User.Modify at /access/groups (or an ancestor with propagate=1); " +
