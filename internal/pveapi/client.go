@@ -4,9 +4,10 @@
 // Base URL: <address>/api2/json  (address already includes scheme, e.g. https://host:8006)
 //
 // Error contract: PVE 9.2.10 uses HTTP 500 and 400 with a body for conditions
-// that REST would encode as 404/409. Error classification runs against the
-// RAW FULL decoded body — both the top-level message string AND every value
-// under the errors object. Only HTTP 403 is a genuine status to branch on.
+// that REST would encode as 404/409. Error classification is GATED to HTTP 400
+// and 500; all other non-2xx statuses (e.g. 502/503 from a proxy) fall through
+// to a generic "HTTP <status>" error to prevent false-positive sentinel matches.
+// Only HTTP 403 is a genuine status to branch on.
 // (Confirmed PVE 9.2.10, PVE_PROBES.md Probes 2–6b.)
 //
 // Secret hygiene: token_secret (the admin credential from config, and the
@@ -63,10 +64,12 @@ type Client interface {
 	// CreateToken performs POST /access/users/{userid}/token/{tokenid} with
 	// privsep=0 (MANDATORY — privsep=1 gives the token an empty ACL and zero
 	// effective permissions; see AGENTS.md).
+	// privsep=0 is always sent; the parameter is not exposed because there is
+	// no legitimate call site that would pass privsep=1.
 	// Returns the token secret string on success.
 	// Returns ErrConflict (mapped from HTTP 400 + body errors.tokenid "Token already exists").
 	// NEVER logs or returns the secret in error messages.
-	CreateToken(ctx context.Context, userid, tokenid string, privsep bool) (string, error)
+	CreateToken(ctx context.Context, userid, tokenid string) (string, error)
 
 	// UpdateUser performs PUT /access/users/{userid}.
 	// PUT is FULL-REPLACE (confirmed PVE 9.2.10, Probe 7): always re-send
@@ -209,6 +212,13 @@ func (c *httpClient) doRequest(
 //   - HTTP 403 (any body)         → ErrForbidden
 //   - anything else               → nil (caller wraps with status+endpoint)
 //
+// Body-string matching is GATED to the statuses PVE probes actually confirmed
+// (400 and 500).  Any other non-2xx status (502, 503, 404 from a reverse proxy,
+// etc.) falls through and returns nil so the caller emits a plain
+// "HTTP <status>" error — this prevents a proxy error page containing e.g.
+// "the page you requested does not exist" from being misclassified as
+// ErrNotFound and silently "succeeding" revocation while PVE users remain live.
+//
 // The match prefers STRUCTURED fields (message + all errors-map values) to
 // avoid false-positive widening from raw-body noise.  The raw body string is
 // used as a genuine fallback ONLY when json.Unmarshal fails or both message
@@ -216,6 +226,13 @@ func (c *httpClient) doRequest(
 func classifyPVEError(status int, body []byte) error {
 	if status == http.StatusForbidden {
 		return ErrForbidden
+	}
+
+	// Only HTTP 400 and 500 carry PVE's body-string error contract (confirmed
+	// PVE 9.2.10, PVE_PROBES.md Probes 2–6b).  Let everything else fall through
+	// to the generic "HTTP <status>" error returned by the caller.
+	if status != http.StatusInternalServerError && status != http.StatusBadRequest {
+		return nil
 	}
 
 	if len(body) == 0 {
@@ -373,21 +390,18 @@ func (c *httpClient) GetUser(ctx context.Context, userid string) (UserInfo, erro
 // MANDATORY: privsep MUST be serialized as the literal "0" (never omitted).
 // PVE defaults privsep=1 when the field is absent, giving the token an empty
 // ACL with zero effective permissions (confirmed PVE 9.2.10, AGENTS.md).
-// We use the privsep bool parameter: false → "0", true → "1".
+// privsep=0 is always sent and is not an exposed parameter — there is no
+// legitimate call site that would pass privsep=1.
 //
 // The token secret is returned on success. It is one-time and non-reproducible.
 // NEVER log or return it in an error message — token endpoint errors redact body.
 //
 // Returns ErrConflict if PVE returns HTTP 400 + errors.tokenid "Token already exists".
-func (c *httpClient) CreateToken(ctx context.Context, userid, tokenid string, privsep bool) (string, error) {
+func (c *httpClient) CreateToken(ctx context.Context, userid, tokenid string) (string, error) {
 	path := "/access/users/" + url.PathEscape(userid) + "/token/" + url.PathEscape(tokenid)
 
 	form := url.Values{}
-	if privsep {
-		form.Set("privsep", "1")
-	} else {
-		form.Set("privsep", "0") // explicit literal "0" — NEVER omitted
-	}
+	form.Set("privsep", "0") // explicit literal "0" — NEVER omitted, NEVER "1"
 
 	// redactBody=true: token endpoint responses must never appear in error strings.
 	body, _, err := c.doRequest(ctx, http.MethodPost, path, form, true)

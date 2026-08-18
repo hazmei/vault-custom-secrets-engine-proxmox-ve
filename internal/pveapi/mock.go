@@ -49,7 +49,7 @@ type MockClient struct {
 	GetGroupFn       func(ctx context.Context, group string) error
 	CreateUserFn     func(ctx context.Context, req CreateUserRequest) error
 	GetUserFn        func(ctx context.Context, userid string) (UserInfo, error)
-	CreateTokenFn    func(ctx context.Context, userid, tokenid string, privsep bool) (string, error)
+	CreateTokenFn    func(ctx context.Context, userid, tokenid string) (string, error)
 	UpdateUserFn     func(ctx context.Context, req UpdateUserRequest) error
 	DeleteUserFn     func(ctx context.Context, userid string) error
 
@@ -218,10 +218,10 @@ func (m *MockClient) GetUser(ctx context.Context, userid string) (UserInfo, erro
 }
 
 // CreateToken implements Client.
-func (m *MockClient) CreateToken(ctx context.Context, userid, tokenid string, privsep bool) (string, error) {
-	m.log("CreateToken", userid, tokenid, privsep)
+func (m *MockClient) CreateToken(ctx context.Context, userid, tokenid string) (string, error) {
+	m.log("CreateToken", userid, tokenid)
 	if m.CreateTokenFn != nil {
-		return m.CreateTokenFn(ctx, userid, tokenid, privsep)
+		return m.CreateTokenFn(ctx, userid, tokenid)
 	}
 	if m.CreateTokenError != nil {
 		return "", m.CreateTokenError

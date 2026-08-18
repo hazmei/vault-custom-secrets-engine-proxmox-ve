@@ -224,3 +224,76 @@ func TestClassifyPVEErrorNoFalsePositiveFromJSONSyntax(t *testing.T) {
 		t.Errorf("expected nil for benign body, got %v", got)
 	}
 }
+
+// ── Status-gate tests ─────────────────────────────────────────────────────────
+// These confirm that body-string classification is ONLY performed for HTTP 400
+// and 500 (PVE's confirmed error statuses).  A proxy/LB returning 502/503/404
+// with a body that happens to contain a sentinel phrase must NOT be classified
+// as ErrNotFound/ErrConflict — that would make revocation silently "succeed"
+// while live PVE users remain and no WAL entry is left to sweep them.
+
+// TestClassifyPVEErrorStatusGate502NoFalsePositive confirms that HTTP 502 with
+// a body containing "does not exist" returns nil, not ErrNotFound.
+func TestClassifyPVEErrorStatusGate502NoFalsePositive(t *testing.T) {
+	t.Parallel()
+
+	// A reverse proxy 502 page that happens to mention "does not exist".
+	body := []byte(`<html><body>502 Bad Gateway: the page you requested does not exist</body></html>`)
+
+	got := classifyPVEError(502, body)
+	if got != nil {
+		t.Errorf("HTTP 502 body containing sentinel phrase should return nil; got %v", got)
+	}
+}
+
+// TestClassifyPVEErrorStatusGate503NoFalsePositive confirms that HTTP 503 with
+// a body containing "no such user" returns nil, not ErrNotFound.
+func TestClassifyPVEErrorStatusGate503NoFalsePositive(t *testing.T) {
+	t.Parallel()
+
+	body := []byte(`{"message":"service unavailable: no such user in auth backend"}`)
+
+	got := classifyPVEError(503, body)
+	if got != nil {
+		t.Errorf("HTTP 503 body containing sentinel phrase should return nil; got %v", got)
+	}
+}
+
+// TestClassifyPVEErrorStatusGate404NoFalsePositive confirms that HTTP 404 with
+// a body containing "already exists" returns nil, not ErrConflict.
+func TestClassifyPVEErrorStatusGate404NoFalsePositive(t *testing.T) {
+	t.Parallel()
+
+	body := []byte(`{"message":"resource already exists at this path"}`)
+
+	got := classifyPVEError(404, body)
+	if got != nil {
+		t.Errorf("HTTP 404 body containing sentinel phrase should return nil; got %v", got)
+	}
+}
+
+// TestClassifyPVEErrorStatusGate500StillWorks confirms that the 500 path is
+// still active after the gate — a genuine PVE 500 is still classified.
+func TestClassifyPVEErrorStatusGate500StillWorks(t *testing.T) {
+	t.Parallel()
+
+	body := []byte(`{"data":null,"message":"no such user ('vault-test@pve')"}`)
+
+	got := classifyPVEError(500, body)
+	if !errors.Is(got, ErrNotFound) {
+		t.Errorf("HTTP 500 with 'no such user' body should return ErrNotFound; got %v", got)
+	}
+}
+
+// TestClassifyPVEErrorStatusGate400StillWorks confirms that the 400 path is
+// still active after the gate — a genuine PVE 400 token conflict is still classified.
+func TestClassifyPVEErrorStatusGate400StillWorks(t *testing.T) {
+	t.Parallel()
+
+	body := []byte(`{"message":"Parameter verification failed.\n","data":null,"errors":{"tokenid":"Token already exists."}}`)
+
+	got := classifyPVEError(400, body)
+	if !errors.Is(got, ErrConflict) {
+		t.Errorf("HTTP 400 with 'Token already exists' body should return ErrConflict; got %v", got)
+	}
+}

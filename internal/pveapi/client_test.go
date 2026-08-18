@@ -105,10 +105,11 @@ func TestGetPermissionsParsesTree(t *testing.T) {
 	}
 }
 
-// TestCreateTokenPrivsepIsLiteralZero asserts that CreateToken sends privsep
-// as the literal string "0" when privsep=false.
+// TestCreateTokenPrivsepIsLiteralZero asserts that CreateToken always sends
+// privsep as the literal string "0" on the wire.
 // This is MANDATORY: PVE defaults privsep=1 when the field is absent or
 // "false", giving the token an empty ACL with zero effective permissions.
+// privsep is hardcoded in the impl; there is no caller-visible bool parameter.
 func TestCreateTokenPrivsepIsLiteralZero(t *testing.T) {
 	t.Parallel()
 
@@ -131,32 +132,7 @@ func TestCreateTokenPrivsepIsLiteralZero(t *testing.T) {
 	defer ts.Close()
 
 	client := makeTestClient(t, ts.URL, "admin@pve!tok", "secret")
-	_, err := client.CreateToken(context.Background(), "vault-test@pve", "vault", false)
-	if err != nil {
-		t.Fatalf("CreateToken: %v", err)
-	}
-}
-
-// TestCreateTokenPrivsepTrueIsLiteralOne asserts that privsep=true sends "1".
-func TestCreateTokenPrivsepTrueIsLiteralOne(t *testing.T) {
-	t.Parallel()
-
-	ts := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if err := r.ParseForm(); err != nil {
-			t.Fatalf("ParseForm: %v", err)
-		}
-		privsep := r.FormValue("privsep")
-		if privsep != "1" {
-			t.Errorf("privsep form value = %q; want literal \"1\"", privsep)
-		}
-		_ = json.NewEncoder(w).Encode(map[string]interface{}{ //nolint:errcheck // httptest handler — write error not actionable
-			"data": map[string]interface{}{"value": "tok"},
-		})
-	}))
-	defer ts.Close()
-
-	client := makeTestClient(t, ts.URL, "admin@pve!tok", "secret")
-	_, err := client.CreateToken(context.Background(), "user@pve", "vault", true)
+	_, err := client.CreateToken(context.Background(), "vault-test@pve", "vault")
 	if err != nil {
 		t.Fatalf("CreateToken: %v", err)
 	}
@@ -289,7 +265,7 @@ func TestTokenSecretNeverInErrorStrings(t *testing.T) {
 	defer ts.Close()
 
 	client := makeTestClient(t, ts.URL, "admin@pve!tok", tokenSecret)
-	_, err := client.CreateToken(context.Background(), "user@pve", "vault", false)
+	_, err := client.CreateToken(context.Background(), "user@pve", "vault")
 	if err == nil {
 		t.Fatal("expected error from failing token endpoint, got nil")
 	}
@@ -413,7 +389,7 @@ func TestCreateTokenPathEncoding(t *testing.T) {
 	defer ts.Close()
 
 	client := makeTestClient(t, ts.URL, "admin@pve!tok", "secret")
-	_, err := client.CreateToken(context.Background(), userid, tokenid, false)
+	_, err := client.CreateToken(context.Background(), userid, tokenid)
 	if err != nil {
 		t.Fatalf("CreateToken: %v", err)
 	}
