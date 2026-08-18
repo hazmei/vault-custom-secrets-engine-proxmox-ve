@@ -221,7 +221,13 @@ func (b *backend) roleExistenceCheck(ctx context.Context, req *logical.Request, 
 //     /access/groups/<group> (catches --propagate 0 misconfiguration).
 //  8. Store role to roles/<name>.
 func (b *backend) roleWrite(ctx context.Context, req *logical.Request, d *framework.FieldData) (*logical.Response, error) {
-	// Serialize the entire load-merge-store so concurrent updates to the same
+	// roleLock is held for the whole handler, including PVE validation calls
+	// (GetGroup/GetPermissions). Role writes are rare, operator-driven actions,
+	// so serializing them behind a single lock — even across network I/O — is an
+	// acceptable tradeoff; a hung PVE endpoint blocks only role administration,
+	// not credential issuance. Bounded by the request context timeout.
+	//
+	// Also serializes the load-merge-store so concurrent updates to the same
 	// role cannot interleave and silently drop each other's fields.
 	b.roleLock.Lock()
 	defer b.roleLock.Unlock()
@@ -447,7 +453,14 @@ func (b *backend) roleList(ctx context.Context, req *logical.Request, _ *framewo
 // credentials remain valid until their lease expires or is explicitly revoked.
 // Renew and revoke operations rely on pve_userid stored in lease InternalData,
 // not on the role still existing.
+//
+// b.roleLock serializes deletes against concurrent roleWrite calls so that a
+// write's load-merge-store cannot resurrect a role that a concurrent delete
+// just removed (last-writer-wins on stale state).
 func (b *backend) roleDelete(ctx context.Context, req *logical.Request, d *framework.FieldData) (*logical.Response, error) {
+	b.roleLock.Lock()
+	defer b.roleLock.Unlock()
+
 	name := d.Get("name").(string)
 
 	if err := req.Storage.Delete(ctx, "roles/"+name); err != nil {
