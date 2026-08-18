@@ -72,7 +72,8 @@ func newBackend(ctx context.Context, conf *logical.BackendConfig) (*backend, err
 
 		Paths: framework.PathAppend(
 			[]*framework.Path{pathConfig(b)},
-			// Phases 2–3 will add pathRoles(b) and pathCreds(b) here.
+			pathRoles(b),
+			// Phase 3 will add pathCreds(b) here.
 		),
 
 		// Phases 3+ will add Secrets and WAL registration here:

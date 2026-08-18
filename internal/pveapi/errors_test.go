@@ -36,24 +36,35 @@ func TestClassifyPVEError(t *testing.T) {
 			body:   []byte(`{"message":"Parameter verification failed.\n","data":null,"errors":{"tokenid":"Token already exists."}}`),
 			want:   ErrConflict,
 		},
-		// ── ErrNotFound cases ─────────────────────────────────────────────
+		// ── ErrUserNotFound / ErrGroupNotFound cases (DR-2) ─────────────────
 		{
-			name:   "no such user (HTTP 500)",
+			// DR-2: "no such user" maps to ErrUserNotFound specifically.
+			name:   "no such user (HTTP 500) → ErrUserNotFound",
 			status: 500,
 			body:   []byte(`{"data":null,"message":"no such user ('vault-test@pve')\n"}`),
-			want:   ErrNotFound,
+			want:   ErrUserNotFound,
 		},
 		{
-			name:   "group does not exist (HTTP 500)",
+			// DR-2: "does not exist" (group GET) maps to ErrGroupNotFound specifically.
+			name:   "group does not exist (HTTP 500) → ErrGroupNotFound",
 			status: 500,
 			body:   []byte(`{"data":null,"message":"group 'vault-test-grp' does not exist\n"}`),
-			want:   ErrNotFound,
+			want:   ErrGroupNotFound,
 		},
 		{
-			name:   "create user with no such group (HTTP 500)",
+			// DR-2: "no such group" (user create with bad group) maps to ErrGroupNotFound.
+			name:   "create user with no such group (HTTP 500) → ErrGroupNotFound",
 			status: 500,
 			body:   []byte(`{"data":null,"message":"create user failed: no such group 'vault-test-grp'\n"}`),
-			want:   ErrNotFound,
+			want:   ErrGroupNotFound,
+		},
+		// Backward-compat: ErrNotFound is an alias for ErrUserNotFound (DR-2).
+		// errors.Is(ErrUserNotFound, ErrNotFound) is true; group NOT found is NOT ErrNotFound.
+		{
+			name:   "no such user satisfies ErrNotFound alias (DR-2 compat)",
+			status: 500,
+			body:   []byte(`{"data":null,"message":"no such user ('vault-test@pve')\n"}`),
+			want:   ErrNotFound, // alias = ErrUserNotFound
 		},
 		// ── ErrForbidden cases ────────────────────────────────────────────
 		{
@@ -295,5 +306,35 @@ func TestClassifyPVEErrorStatusGate400StillWorks(t *testing.T) {
 	got := classifyPVEError(400, body)
 	if !errors.Is(got, ErrConflict) {
 		t.Errorf("HTTP 400 with 'Token already exists' body should return ErrConflict; got %v", got)
+	}
+}
+
+// TestSentinelDistinctness asserts the DR-2 sentinel-distinctness invariant:
+//
+//   - errors.Is(ErrUserNotFound, ErrNotFound) must be TRUE  (ErrNotFound is an alias)
+//   - errors.Is(ErrGroupNotFound, ErrNotFound) must be FALSE (distinct sentinel)
+//   - errors.Is(ErrGroupNotFound, ErrUserNotFound) must be FALSE
+//
+// This property is what makes DR-2 meaningful: revocation call sites can key on
+// ErrUserNotFound to treat a missing-user delete as success, while group-not-found
+// (ErrGroupNotFound) surfaces as a hard role-write failure rather than silently
+// resolving to the wrong branch.
+func TestSentinelDistinctness(t *testing.T) {
+	t.Parallel()
+
+	// ErrNotFound is an alias for ErrUserNotFound — must satisfy.
+	if !errors.Is(ErrUserNotFound, ErrNotFound) {
+		t.Error("errors.Is(ErrUserNotFound, ErrNotFound) must be TRUE: ErrNotFound is an alias for ErrUserNotFound")
+	}
+	if !errors.Is(ErrNotFound, ErrUserNotFound) {
+		t.Error("errors.Is(ErrNotFound, ErrUserNotFound) must be TRUE: the alias is bidirectional")
+	}
+
+	// ErrGroupNotFound is a DISTINCT sentinel — must NOT satisfy ErrNotFound or ErrUserNotFound.
+	if errors.Is(ErrGroupNotFound, ErrNotFound) {
+		t.Error("errors.Is(ErrGroupNotFound, ErrNotFound) must be FALSE: group-not-found must NOT satisfy the user-not-found alias")
+	}
+	if errors.Is(ErrGroupNotFound, ErrUserNotFound) {
+		t.Error("errors.Is(ErrGroupNotFound, ErrUserNotFound) must be FALSE: distinct sentinels must not overlap")
 	}
 }

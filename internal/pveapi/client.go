@@ -48,17 +48,17 @@ type Client interface {
 	GetPermissions(ctx context.Context) (PermissionTree, error)
 
 	// GetGroup performs GET /access/groups/{group}.
-	// Returns ErrNotFound (mapped from HTTP 500 + body "does not exist").
+	// Returns ErrGroupNotFound (mapped from HTTP 500 + body "does not exist").
 	GetGroup(ctx context.Context, group string) error
 
 	// CreateUser performs POST /access/users.
 	// Returns ErrConflict (mapped from HTTP 500 + body "already exists").
-	// Returns ErrNotFound (mapped from HTTP 500 + body "no such group") if the
+	// Returns ErrGroupNotFound (mapped from HTTP 500 + body "no such group") if the
 	// group does not exist at issuance time.
 	CreateUser(ctx context.Context, req CreateUserRequest) error
 
 	// GetUser performs GET /access/users/{userid} for read-back assertions.
-	// Returns ErrNotFound (mapped from HTTP 500 + body "no such user").
+	// Returns ErrUserNotFound (mapped from HTTP 500 + body "no such user").
 	GetUser(ctx context.Context, userid string) (UserInfo, error)
 
 	// CreateToken performs POST /access/users/{userid}/token/{tokenid} with
@@ -77,7 +77,7 @@ type Client interface {
 	UpdateUser(ctx context.Context, req UpdateUserRequest) error
 
 	// DeleteUser performs DELETE /access/users/{userid}.
-	// Returns ErrNotFound (mapped from HTTP 500 + body "no such user") — treat
+	// Returns ErrUserNotFound (mapped from HTTP 500 + body "no such user") — treat
 	// as success for idempotent revocation.
 	DeleteUser(ctx context.Context, userid string) error
 }
@@ -204,11 +204,11 @@ func (c *httpClient) doRequest(
 // to map PVE error conditions to typed sentinel errors.
 //
 // PVE's error contract (PVE 9.2.10, PVE_PROBES.md Probes 2–6b):
-//   - body "already exists"       → ErrConflict  (HTTP 500)
-//   - body "Token already exists" → ErrConflict  (HTTP 400, in errors.tokenid NOT message)
-//   - body "no such user"         → ErrNotFound  (HTTP 500)
-//   - body "does not exist"       → ErrNotFound  (HTTP 500, e.g. group GET)
-//   - body "no such group"        → ErrNotFound  (HTTP 500, user create with bad group)
+//   - body "already exists"       → ErrConflict      (HTTP 500)
+//   - body "Token already exists" → ErrConflict      (HTTP 400, in errors.tokenid NOT message)
+//   - body "no such user"         → ErrUserNotFound  (HTTP 500)
+//   - body "does not exist"       → ErrGroupNotFound (HTTP 500, e.g. group GET)
+//   - body "no such group"        → ErrGroupNotFound (HTTP 500, user create with bad group)
 //   - HTTP 403 (any body)         → ErrForbidden
 //   - anything else               → nil (caller wraps with status+endpoint)
 //
@@ -217,12 +217,16 @@ func (c *httpClient) doRequest(
 // etc.) falls through and returns nil so the caller emits a plain
 // "HTTP <status>" error — this prevents a proxy error page containing e.g.
 // "the page you requested does not exist" from being misclassified as
-// ErrNotFound and silently "succeeding" revocation while PVE users remain live.
+// ErrGroupNotFound and silently "succeeding" revocation while PVE users remain live.
 //
 // The match prefers STRUCTURED fields (message + all errors-map values) to
 // avoid false-positive widening from raw-body noise.  The raw body string is
 // used as a genuine fallback ONLY when json.Unmarshal fails or both message
 // and errors are empty (e.g. a plain-text or malformed response).
+//
+// DR-2: "no such user" maps to ErrUserNotFound; "does not exist" and
+// "no such group" map to ErrGroupNotFound. Call sites use errors.Is to
+// distinguish the two without a second body-string scan.
 func classifyPVEError(status int, body []byte) error {
 	if status == http.StatusForbidden {
 		return ErrForbidden
@@ -268,11 +272,14 @@ func classifyPVEError(status int, body []byte) error {
 	case strings.Contains(haystack, "already exists"):
 		return ErrConflict
 	case strings.Contains(haystack, "no such user"):
-		return ErrNotFound
+		// DR-2: user-specific sentinel; revocation treats this as idempotent success.
+		return ErrUserNotFound
 	case strings.Contains(haystack, "no such group"):
-		return ErrNotFound
+		// DR-2: group-specific sentinel; role-write surfaces as "group does not exist".
+		return ErrGroupNotFound
 	case strings.Contains(haystack, "does not exist"):
-		return ErrNotFound
+		// DR-2: covers GET /access/groups/{group} → "group 'x' does not exist".
+		return ErrGroupNotFound
 	}
 
 	return nil
@@ -315,7 +322,7 @@ func (c *httpClient) GetPermissions(ctx context.Context) (PermissionTree, error)
 }
 
 // GetGroup calls GET /access/groups/{group} to verify the group exists.
-// Returns ErrNotFound if PVE responds HTTP 500 + body containing "does not exist".
+// Returns ErrGroupNotFound if PVE responds HTTP 500 + body containing "does not exist".
 func (c *httpClient) GetGroup(ctx context.Context, group string) error {
 	path := "/access/groups/" + url.PathEscape(group)
 	_, _, err := c.doRequest(ctx, http.MethodGet, path, nil, false)
@@ -332,7 +339,7 @@ func (c *httpClient) GetGroup(ctx context.Context, group string) error {
 //   - enable: serialized as literal "1", never bool/omitempty.
 //
 // Returns ErrConflict if PVE returns HTTP 500 + body "already exists".
-// Returns ErrNotFound if PVE returns HTTP 500 + body "no such group".
+// Returns ErrGroupNotFound if PVE returns HTTP 500 + body "no such group".
 func (c *httpClient) CreateUser(ctx context.Context, req CreateUserRequest) error {
 	form := url.Values{}
 	form.Set("userid", req.UserID)
@@ -355,7 +362,7 @@ func (c *httpClient) CreateUser(ctx context.Context, req CreateUserRequest) erro
 // Used for read-back assertions after CreateUser and UpdateUser to confirm
 // group membership was applied (PVE silently drops unresolvable groups on
 // modify/append; on create, PVE rejects with HTTP 500 "no such group" instead).
-// Returns ErrNotFound if PVE responds HTTP 500 + body "no such user".
+// Returns ErrUserNotFound if PVE responds HTTP 500 + body "no such user".
 func (c *httpClient) GetUser(ctx context.Context, userid string) (UserInfo, error) {
 	path := "/access/users/" + url.PathEscape(userid)
 	body, _, err := c.doRequest(ctx, http.MethodGet, path, nil, false)
@@ -456,8 +463,8 @@ func (c *httpClient) UpdateUser(ctx context.Context, req UpdateUserRequest) erro
 // DeleteUser calls DELETE /access/users/{userid}.
 // Cascades to remove the user's tokens, group memberships, and ACL entries.
 //
-// Returns ErrNotFound if PVE responds HTTP 500 + body "no such user" — callers
-// should treat ErrNotFound as success for idempotent revocation.
+// Returns ErrUserNotFound if PVE responds HTTP 500 + body "no such user" — callers
+// should treat ErrUserNotFound as success for idempotent revocation.
 func (c *httpClient) DeleteUser(ctx context.Context, userid string) error {
 	path := "/access/users/" + url.PathEscape(userid)
 	_, _, err := c.doRequest(ctx, http.MethodDelete, path, nil, false)
