@@ -83,8 +83,13 @@ func secretToken(b *backend) *framework.Secret {
 //
 // Steps:
 //  1. Extract pve_userid, group, effective_max_ttl, role_name from InternalData.
-//  2. Load role to obtain role.ttl for use as backendTTL (fallback if role gone: use 0
-//     so CalculateTTL falls back to the increment from the renewal request).
+//  2. Load role to obtain role.ttl for use as backendTTL.
+//     - role found → backendTTL = role.ttls(cfg).backendTTL (honors role.ttl).
+//     - roleName == "" (old lease, no role_name) → backendTTL = req.Secret.TTL
+//     (fall back to the lease's current TTL, per documented behavior).
+//     - role == nil (role deleted since issuance) → backendTTL = req.Secret.TTL
+//     (fall back to the lease's current TTL; do NOT hard-fail outstanding leases).
+//     An explicit positive increment still wins (CalculateTTL uses increment when > 0).
 //  3. Compute new TTL via framework.CalculateTTL (honors increment and effective_max_ttl).
 //  4. Refuse renewal if new TTL is zero.
 //  5. Pre-update GetUser: refuse renewal if the user is currently disabled (an
@@ -102,13 +107,9 @@ func (b *backend) secretTokenRenew(ctx context.Context, req *logical.Request, _ 
 	}
 
 	// Step 2: load role for TTL fallback.
-	// If the role still exists, use role.ttls(cfg).backendTTL so a no-increment
-	// renewal honors the role's configured ttl (not just the system default).
-	// If the role is gone (nil), fall back gracefully — use backendTTL=0 so
-	// CalculateTTL falls back to the increment from the renewal request, which
-	// preserves the existing lease TTL. Do NOT hard-fail renewal just because the
-	// role was deleted; outstanding leases must still renew and be revocable.
-	var backendTTL time.Duration
+	// Default: fall back to the lease's current TTL so a no-increment renewal on a
+	// deleted or pre-role_name lease does not collapse to the mount default.
+	backendTTL := req.Secret.TTL
 	if roleName != "" {
 		cfg, cfgErr := getConfig(ctx, req.Storage)
 		if cfgErr != nil {
@@ -120,20 +121,26 @@ func (b *backend) secretTokenRenew(ctx context.Context, req *logical.Request, _ 
 				return nil, fmt.Errorf("proxmox: renew: load role %q: %w", roleName, roleErr)
 			}
 			if role != nil {
+				// Role still exists: use its configured TTL as the backend default.
 				backendTTL, _ = role.ttls(cfg)
 			}
-			// If role is nil (deleted): backendTTL stays 0 → CalculateTTL falls back
-			// to the increment from the renewal request (lease-TTL fallback, per docs).
+			// If role is nil (deleted since issuance): backendTTL keeps the
+			// lease's current TTL — do NOT hard-fail renewal; outstanding leases
+			// must still renew and be revocable.
 		}
 	}
+	// roleName == "": old lease written before role_name was added to InternalData.
+	// backendTTL is already set to req.Secret.TTL (the default above).
 
 	// Step 3: compute new TTL.
-	// CalculateTTL args: sysView, increment, backendTTL (role.ttl fallback),
+	// CalculateTTL args: sysView, increment, backendTTL (role.ttl or lease-TTL fallback),
 	// period=0, backendMaxTTL=effectiveMaxTTL, explicitMaxTTL=0, startTime=IssueTime.
+	// An explicit positive increment from the renewal request overrides backendTTL
+	// (CalculateTTL uses increment when > 0).
 	ttl, warnings, err := framework.CalculateTTL(
 		b.System(),
 		req.Secret.Increment, // requested increment from the renewal request
-		backendTTL,           // role.ttl if role exists; 0 (lease-TTL fallback) if role gone
+		backendTTL,           // role.ttl if role exists; lease current TTL if role gone/absent
 		0,                    // period: not used
 		effectiveMaxTTL,      // backendMaxTTL: the governance ceiling captured at issue time
 		0,                    // explicitMaxTTL: not used

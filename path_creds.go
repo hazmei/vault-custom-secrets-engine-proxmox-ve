@@ -49,6 +49,15 @@ const (
 	// token. Scoped per-user (each lease gets a unique userid), so there is
 	// no collision risk between leases.
 	leaseTokenID = "lease"
+
+	// walCommentPrefix is prepended to the random nonce written into both the
+	// WAL entry (walUser.Nonce) and the PVE user's comment field at creation
+	// time. The prefix makes the marker self-documenting when operators browse
+	// the Proxmox VE UI or API — they see "vault-wal:<random>" rather than a
+	// bare random string. Both the WAL nonce and the PVE comment carry the
+	// full prefixed value so walRollbackUser's ownership comparison remains a
+	// simple string equality check with no stripping required.
+	walCommentPrefix = "vault-wal:"
 )
 
 // pathCreds returns the framework.Path for <mount>/creds/:role.
@@ -172,10 +181,15 @@ func (b *backend) handleCredsRead(ctx context.Context, req *logical.Request, d *
 		// field. walRollbackUser compares the two at rollback time: a mismatch
 		// means the userid belongs to a foreign user (collision with a pre-existing
 		// account) and must not be deleted.
-		nonce, nonceErr := randomSuffix()
+		// The walCommentPrefix makes the marker self-documenting in the PVE UI.
+		// Both walUser.Nonce and CreateUserRequest.Comment store the SAME full
+		// prefixed string so the comparison in walRollbackUser remains a simple
+		// equality check.
+		rawNonce, nonceErr := randomSuffix()
 		if nonceErr != nil {
 			return nil, fmt.Errorf("proxmox: creds/%s: generate nonce: %w", roleName, nonceErr)
 		}
+		nonce := walCommentPrefix + rawNonce
 
 		// Step 4a: Write WAL before CreateUser. Capture the RETURNED id (random UUID).
 		// This id is used for DeleteWAL — it is NOT the userid.

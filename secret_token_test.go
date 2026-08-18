@@ -610,6 +610,70 @@ func TestSecretTokenRenew_DeletedRole_FallsBackGracefully(t *testing.T) {
 	}
 }
 
+// TestSecretTokenRenew_DeletedRole_NoIncrement_UsesLeaseTTL verifies that when
+// increment=0 and the role referenced by role_name is gone (deleted since issuance),
+// renewal uses req.Secret.TTL (the lease's current TTL) as the backendTTL fallback —
+// NOT the mount/system default.
+//
+// This is the N1 regression test: with the pre-fix code, backendTTL was left as 0
+// for a deleted role, and CalculateTTL(increment=0, backendTTL=0, ...) would return
+// the system DefaultLeaseTTL (24h in TestSystemView), not the lease's current TTL.
+//
+// Assertion: resp.Secret.TTL ≈ leaseTTL (45m), NOT sysview DefaultLeaseTTL (24h).
+// The two values are distinct by design so the assertion is meaningful.
+func TestSecretTokenRenew_DeletedRole_NoIncrement_UsesLeaseTTL(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	const (
+		userid = "vault-myrole-noincrement007@pve"
+		group  = "vault-vm-admins"
+		// effectiveMaxTTL must be larger than leaseTTL so the renewal is not rejected.
+		effectiveMaxTTL = 24 * time.Hour
+		// leaseTTL is the current TTL of the lease — the expected fallback value.
+		// This must differ from the sysview DefaultLeaseTTL (24h) so the test assertion
+		// is meaningful. 45m is clearly distinct from 24h.
+		leaseTTL = 45 * time.Minute
+	)
+
+	b, storage := setupBackendForRenew(t, userid, group, true, nil)
+	// Do NOT write a role named "deleted-role" — it should be absent from storage.
+
+	internalData := map[string]interface{}{
+		"pve_userid":        userid,
+		"group":             group,
+		"effective_max_ttl": int64(effectiveMaxTTL),
+		"role_name":         "deleted-role", // role does not exist in storage
+		"expire":            time.Now().Add(effectiveMaxTTL).Unix(),
+	}
+	req := makeRenewRequest(storage, internalData, time.Now().Add(-30*time.Minute), 0 /* increment=0 */)
+	// Override the Secret.TTL to a known value distinct from the sysview default.
+	req.Secret.TTL = leaseTTL
+
+	resp, err := b.secretTokenRenew(ctx, req, nil)
+	if err != nil {
+		t.Fatalf("secretTokenRenew with deleted role + increment=0: unexpected error: %v", err)
+	}
+	if resp == nil || resp.Secret == nil {
+		t.Fatal("expected non-nil Secret on deleted-role no-increment fallback")
+	}
+	if resp.Secret.TTL <= 0 {
+		t.Errorf("resp.Secret.TTL = %v; want > 0", resp.Secret.TTL)
+	}
+
+	// The sysview DefaultLeaseTTL is 24h (from TestSystemView). With the pre-fix
+	// backendTTL=0 path, CalculateTTL would return 24h instead of leaseTTL.
+	// Assert TTL is approximately leaseTTL (within 5s tolerance for test timing).
+	diff := resp.Secret.TTL - leaseTTL
+	if diff < 0 {
+		diff = -diff
+	}
+	if diff > 5*time.Second {
+		t.Errorf("resp.Secret.TTL = %v; want ~%v (lease-TTL fallback, not sysview default 24h); diff=%v",
+			resp.Secret.TTL, leaseTTL, diff)
+	}
+}
+
 // TestSecretTokenRenew_MultiGroup_WarnsNoFail verifies that when the post-update
 // GetUser returns multiple groups (len > 1), renewal does NOT hard-fail — only
 // a log warning is emitted. The containsGroup hard gate (the expected group is
