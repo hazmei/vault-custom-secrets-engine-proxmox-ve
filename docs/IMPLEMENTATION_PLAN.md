@@ -691,15 +691,15 @@ Every attempt therefore has to keep its own `walID`.
                 // for future retry/metrics, distinguish "group confirmed absent in a successful
                 // GetUser" from "GetUser errored (couldn't confirm)" in the log/error message.
                 - delErr := DeleteUser(userid)
-               - if delErr == nil OR errors.Is(delErr, pveapi.ErrNotFound):
-                     // user is gone (or never persisted) → safe to drop the WAL entry
-                     framework.DeleteWAL(ctx, req.Storage, walID) [best-effort]
-               - else:
-                     // DeleteUser failed transiently — LEAVE the WAL entry so walRollback
-                     // retries the cleanup. Do NOT DeleteWAL here (would orphan the user).
-                     // (walID still points at this userid.)
-               - return error "group membership not reflected after create (group %q may be unresolvable on cluster)"
-                 (wrap delErr if non-nil/non-NotFound so the operator sees the cleanup failure)
+                - if delErr == nil OR errors.Is(delErr, pveapi.ErrNotFound):
+                      // user is gone (or never persisted) → safe to drop the WAL entry
+                      framework.DeleteWAL(ctx, req.Storage, walID) [best-effort]
+                - else:
+                      // DeleteUser failed transiently — LEAVE the WAL entry so walRollback
+                      // retries the cleanup. Do NOT DeleteWAL here (would orphan the user).
+                      // (walID still points at this userid.)
+                - return error "group membership not reflected after create (group %q may be unresolvable on cluster)"
+                  (wrap delErr if non-nil/non-NotFound so the operator sees the cleanup failure)
       - break loop (keep walID for steps 8–9)
 7. If loop exhausted (5 attempts all ErrConflict): return internal error "userid collision after 5 retries"
 8. tokenSecret, err := CreateToken(userid, "vault", privsep=false)  // wire form value "0"
@@ -843,7 +843,7 @@ Registered via `backend.WALRollback` and `backend.WALRollbackMinAge = 5 * time.M
 **Division of responsibility**:
 - **WALRollback**: Cleans up users orphaned by crash/failover BETWEEN `PutWAL` and `DeleteWAL` (i.e., WAL entry exists but issuance never completed, no Secret returned, no lease registered). It ALSO catches users left behind when an in-line cleanup `DeleteUser` fails transiently: the issuance path deletes its WAL entry ONLY when `DeleteUser` returns nil or `ErrNotFound`; if `DeleteUser` fails otherwise, the WAL entry is deliberately RETAINED and the error is returned so walRollback retries the delete. This guarantees no code path **chooses** to orphan a PVE user with no surviving WAL entry (every in-line cleanup that deletes the WAL first confirms the user is gone or ErrNotFound).
 
-  **Accepted risk — crash between `DeleteWAL` and lease persistence**: there is ONE window this does not cover: a crash between the successful `DeleteWAL` (issuance step 9) and Vault core persisting the returned Secret/lease. In that narrow window the WAL entry is already gone and no lease exists, so neither WALRollback nor Vault revocation fires. The PVE `expire` backstop (set to lease-end + grace at creation time) is the sole — and coarse — cleanup for this specific case, reaping the synthetic user at expiry rather than within WALRollbackMinAge. Requires a crash inside that narrow window. Documented, not mitigated.
+  **Accepted risk — crash between `DeleteWAL` and lease persistence**: there is ONE window this does not cover: a crash between the successful `DeleteWAL` (issuance step 9) and Vault core persisting the returned Secret/lease. In that narrow window the WAL entry is already gone and no lease exists, so neither WALRollback nor Vault revocation fires. The PVE `expire` backstop (set to lease-end + grace at creation time) only **neutralizes** the credential — authentication is rejected once past `expire` (Probe 8) — it does **NOT** delete the user; PVE has no auto-reap, so the stale user record **persists in user.cfg until out-of-band cleanup**. This window is therefore a leak of an inert (auth-rejected) but undeleted user, not a live credential. Requires a crash inside that narrow window. Documented, not mitigated.
 - **Vault revocation retry**: Handles failed revocations on existing leases.
 - **PVE `expire` backstop**: Caps any leaked user that slips through both.
 

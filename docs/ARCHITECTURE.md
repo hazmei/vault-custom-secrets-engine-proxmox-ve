@@ -178,11 +178,22 @@ silently change the effective privileges conferred (if the group's ACL
 binding was altered). **Because Proxmox evaluates ACLs at request time,
 re-binding a group changes the effective privileges of EVERY
 OUTSTANDING credential immediately, not just future issuance.** 
-Additionally, because `DELETE /access/users/{userid}` checks `User.Modify`
-at `/access/groups`, if the operator removes the group or the admin
-token's grant on `/access/groups`, outstanding leases become
-NON-REVOCABLE and NON-RENEWABLE and their PVE users/tokens orphan on the cluster. These
-are out-of-contract operator actions.
+Additionally, two distinct operator actions have different blast-radius profiles:
+
+- **(a) Operator removes the admin token's grant on `/access/groups`**: both
+  `DELETE /access/users/{userid}` and `PUT /access/users/{userid}` (renewal)
+  check `User.Modify` at the parent `/access/groups` path. Removing that grant
+  means outstanding leases become **NON-REVOCABLE and NON-RENEWABLE** and their
+  PVE users/tokens orphan on the cluster.
+
+- **(b) Operator deletes the PVE group**: revocation **still succeeds** — the
+  `DELETE /access/users/{userid}` call checks `User.Modify` at the parent path
+  `/access/groups`, which remains intact after a group deletion; nothing orphans.
+  Only **renewal fails**, and it fails at the engine's read-back assertion (PVE
+  silently drops the now-missing group on the `PUT` modify with HTTP 200, so the
+  subsequent `GET` reveals group membership is gone), not at a permission check.
+
+These are out-of-contract operator actions.
 
 **Guidance**: enforce a **1:1 mapping** between a Vault role and a PVE
 group to avoid shared blast radius. If two Vault roles share the same PVE
@@ -552,10 +563,12 @@ WALRollback never faces a live returned credential.
 
 **Accepted risk**: one narrow window is NOT covered — a crash between the
 successful `DeleteWAL` (step 4) and Vault core persisting the returned
-Secret/lease (step 5). In that window the WAL entry is already gone and no
-lease exists, so neither WALRollback nor Vault revocation fires. The PVE
-`expire` backstop is the sole cleanup for this specific case. See the
-WAL Rollback section of `docs/IMPLEMENTATION_PLAN.md` for full detail.
+Secret/lease (after step 5 returns). In that window the WAL entry is already
+gone and no lease exists, so neither WALRollback nor Vault revocation fires.
+The PVE `expire` backstop only **neutralizes** the credential — authentication
+is rejected once past `expire` (Probe 8) — it is **not** cleanup: the stale
+user record persists in user.cfg until out-of-band removal. See the WAL
+Rollback section of `docs/IMPLEMENTATION_PLAN.md` for full detail.
 
 ## Testing Strategy
 
