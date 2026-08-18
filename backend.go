@@ -15,6 +15,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/hashicorp/vault/sdk/framework"
 	"github.com/hashicorp/vault/sdk/logical"
@@ -79,13 +80,12 @@ func newBackend(ctx context.Context, conf *logical.BackendConfig) (*backend, err
 		Paths: framework.PathAppend(
 			[]*framework.Path{pathConfig(b)},
 			pathRoles(b),
-			// Phase 3 will add pathCreds(b) here.
+			[]*framework.Path{pathCreds(b)},
 		),
 
-		// Phases 3+ will add Secrets and WAL registration here:
-		// Secrets:           []*framework.Secret{secretToken(b)},
-		// WALRollback:       b.walRollback,
-		// WALRollbackMinAge: 5 * time.Minute,
+		Secrets:           []*framework.Secret{secretToken(b)},
+		WALRollback:       b.walRollback,
+		WALRollbackMinAge: 5 * time.Minute,
 
 		Invalidate: b.invalidate,
 	}

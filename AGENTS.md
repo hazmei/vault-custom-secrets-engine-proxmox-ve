@@ -32,7 +32,7 @@ Instructions for AI coding agents working on this Vault secrets engine plugin.
 
 - `<mount>/config` (POST, GET, DELETE — DELETE requires `force=true`)
 - `<mount>/roles/:name` (POST, GET, LIST, DELETE)
-- `<mount>/creds/:role` (GET, mutating)
+- `<mount>/creds/:role` (GET, mutating) — sets `ForwardPerformanceStandby: true` and `ForwardPerformanceSecondary: true` on the `PathOperation`. **This is mandatory, not optional.** Issuance makes external mutating PVE calls (CreateUser, CreateToken) BEFORE writing any Vault storage. If a standby node executed this path locally it would call PVE and then forward the storage write to the active — producing a duplicate PVE user with no WAL entry and no lease. Forwarding the entire request to the active node before any PVE call is the only correct fix; Vault's implicit write-forwarding does not help here.
 - `<mount>/rotate-root` is OUT OF SCOPE for v1 (manual only)
 
 Engine→Proxmox auth header: `Authorization: PVEAPIToken=<user>@<realm>!<tokenid>=<secret>`

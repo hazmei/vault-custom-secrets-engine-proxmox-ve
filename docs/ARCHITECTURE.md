@@ -266,6 +266,8 @@ idempotency expectations. The credential (token secret) is returned
 Proxmox's own "token shown once" behavior and Vault dynamic secrets
 semantics.
 
+**HA/Standby forwarding**: the `PathOperation` sets `ForwardPerformanceStandby: true` and `ForwardPerformanceSecondary: true`. Issuance calls PVE (`CreateUser`, `CreateToken`) **before** any Vault storage write; if a standby node executed this path locally it would make the PVE calls and then forward only the storage write to the active node — producing an orphaned PVE user with no WAL entry and no lease. Forwarding the entire request to the active node before execution is the only correct fix.
+
 Response:
 ```json
 {
