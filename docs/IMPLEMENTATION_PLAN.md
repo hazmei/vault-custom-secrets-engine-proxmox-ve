@@ -8,6 +8,7 @@ This is a greenfield Go implementation of the Proxmox VE dynamic-secrets engine 
 
 These design choices are baked into the implementation and are **not open for revision** during initial implementation:
 
+- **Go version**: `go 1.25.7` (bumped to satisfy `vault/sdk v0.25.1`'s minimum; was 1.23 in the original plan). CI must use Go **≥ 1.25.7**.
 - **Go module path**: `github.com/hazmei/vault-plugin-secrets-proxmox`
 - **DELETE `<mount>/config` guard**: ALWAYS requires `force=true` query parameter. The engine does NOT track active leases (no reliable SDK lease-count API; a counter would drift on crash/failover). Outstanding leases become non-revocable and non-renewable on config delete — renewal also loads config to reach PVE, so it fails immediately too; operators must revoke leases first, then delete config.
 - **userid-collision retry bound**: 5 attempts maximum, then surface as internal error.
@@ -64,15 +65,15 @@ vault-plugin-secrets-proxmox/
 ```go
 module github.com/hazmei/vault-plugin-secrets-proxmox
 
-go 1.23
+go 1.25.7  // resolved: bumped from 1.23 to satisfy vault/sdk v0.25.1 minimum
 
 require (
-	github.com/hashicorp/vault/sdk v0.13.0
-	github.com/hashicorp/go-hclog v1.6.2
+	github.com/hashicorp/vault/sdk v0.25.1
+	github.com/hashicorp/go-hclog v1.6.3
 )
 ```
 
-Pin `vault/sdk` to the latest stable version at time of creation (adjust as needed). Use Go 1.23 or later for modern toolchain.
+The versions above reflect what `go get` resolved at bootstrap time (sdk v0.25.1, go-hclog v1.6.3, go directive 1.25.7). Run `go mod tidy` after any `go get` to keep go.sum consistent.
 
 ### `.gitignore`
 
@@ -190,7 +191,7 @@ CI workflow — do not mix the two.
 
 ### `cmd/vault-plugin-secrets-proxmox/main.go`
 
-Plugin entry point. Calls `plugin.ServeMultiplex` (or `plugin.Serve` if multiplexing not needed) with `BackendFactoryFunc: proxmox.Factory`.
+Plugin entry point. Calls `plugin.ServeMultiplex` (multiplexed gRPC, recommended for Vault v1.12+; **do NOT set `TLSProviderFunc`** — Vault v5+ AutoMTLS handles TLS without it) with `BackendFactoryFunc: proxmox.Factory`.
 
 **Key functions**:
 - `main()` — sets up logging, calls plugin serve.
@@ -1026,7 +1027,7 @@ annotations elsewhere. No code deliverable — this phase gated the design.
 ### Phase 1 — Bootstrap + Proxmox Client + Config Path
 
 **Tasks**:
-- [ ] Create `go.mod` (module path `github.com/hazmei/vault-plugin-secrets-proxmox`, go 1.23, require `vault/sdk` + `go-hclog`)
+- [ ] Create `go.mod` (module path `github.com/hazmei/vault-plugin-secrets-proxmox`, go 1.25.7 — bumped from 1.23 to satisfy sdk v0.25.1 minimum, require `vault/sdk v0.25.1` + `go-hclog v1.6.3`)
 - [ ] Create `.gitignore` (Go + Vault plugin artifacts)
 - [ ] Create `Makefile` (build/test/testacc/fmt/lint/tidy targets)
 - [ ] Create `.golangci.yml` (v2 schema — see Bootstrap Files)
@@ -1051,6 +1052,8 @@ annotations elsewhere. No code deliverable — this phase gated the design.
 
 **Architecture References**: `docs/ARCHITECTURE.md` Configuration section, Required privilege scoping, ancestor-path walk (Implementation note on permission-tree ancestor walk), DELETE config behavior.
 
+**Phase 1 post-review fixes applied**: Jester consensus review surfaced 5 fixes applied in commit `d6f9cb3` — HTTPS enforcement on config address, privsep=1 empty-tree diagnostic in `classifyPVEError`, structured-fields-first error classification, removed time hack, and exported `ClassifyPVEError` wrapper. 6 additional items were intentionally deferred; see the Phase 2 deferred backlog below.
+
 ---
 
 ### Phase 2 — Userid + TTL Helpers + Roles Path
@@ -1069,6 +1072,152 @@ annotations elsewhere. No code deliverable — this phase gated the design.
 - `ttls()` returns config defaults when role values are unset, and leaves 0 as 0 for `CalculateTTL` to resolve
 
 **Architecture References**: `docs/ARCHITECTURE.md` Roles section, userid format and length budget, TTL Precedence section.
+
+---
+
+### Phase 2 — Deferred Review Backlog (from PR #3 Jester consensus)
+
+These items were surfaced during the PR #3 Jester consensus review of Phase 1 and intentionally
+deferred to a later phase. They are tracked here so they are not lost. Each item must be resolved
+before or during the phase where its call site is introduced.
+
+---
+
+#### DR-1 — `ErrUnauthenticated` (401) sentinel
+
+**What**: Add a new typed sentinel `ErrUnauthenticated` in `internal/pveapi/errors.go` and map
+HTTP 401 to it in `classifyPVEError` (`client.go`). Currently a 401 response (e.g. from an
+expired or revoked admin token) falls through to a generic `"HTTP 401 <endpoint>"` error.
+"Engine config credentials are dead" is operationally distinct from Forbidden (403) or NotFound.
+PVE returns 401 with an empty body when a token is expired or revoked (confirmed PVE 9.2.10).
+
+**Why deferred**: Phase 1 config-write only exercises 403 (privilege check). Runtime 401 only
+matters once issuance, renewal, and revocation paths exist (Phase 3–4).
+
+**Where**: `internal/pveapi/errors.go` (new sentinel), `internal/pveapi/client.go`
+(`classifyPVEError`), and any call site in `path_creds.go` / `secret_token.go` that calls the
+PVE client and should surface a clear operator message.
+
+**Acceptance Criterion**: `classifyPVEError` maps `status == 401` (any body, including empty) to
+`ErrUnauthenticated`; at least one call site (e.g. issuance or renewal) wraps the error with a
+human-readable message such as `"admin token unauthenticated — check config credentials"`.
+Unit test: `classifyPVEError(401, []byte{})` returns `ErrUnauthenticated`.
+
+---
+
+#### DR-2 — Split `ErrNotFound` into `ErrUserNotFound` / `ErrGroupNotFound`
+
+**What**: `ErrNotFound` is currently a single sentinel overloaded across three body strings:
+`"no such user"`, `"no such group"`, and `"does not exist"`. Different call sites require
+different handling: revocation treats user-not-found as **success** (idempotent), renewal must
+treat it as **failure**, and role-write surfaces group-not-found as `"group does not exist"`.
+The coarse single sentinel makes those distinctions require an additional body-string scan at
+the call site instead of a clean `errors.Is` check.
+
+**Why deferred**: Phase 1 only uses `ErrNotFound` in `GetGroup` (role-write) and `DeleteUser`
+(WAL rollback), where the current coarse mapping is safe. The call-site semantics that require
+the split (revocation idempotency vs. renewal failure) do not exist until Phase 3–4.
+
+**Where**: `internal/pveapi/errors.go` (new sentinels), `internal/pveapi/client.go`
+(`classifyPVEError`), `secret_token.go` (`secretTokenRevoke`/`secretTokenRenew`), `wal.go`
+(`walRollback`), `path_roles.go` (`GetGroup` error surface).
+
+**Acceptance Criterion**: Distinct sentinels `ErrUserNotFound` and `ErrGroupNotFound` exist;
+`classifyPVEError` maps body `"no such user"` → `ErrUserNotFound` and body `"no such group"` /
+`"does not exist"` (group context) → `ErrGroupNotFound`; revocation idempotency keys on
+`errors.Is(err, ErrUserNotFound)` specifically; renewal treats `ErrUserNotFound` as a hard
+failure. Unit tests: table-driven body fixtures covering both sentinels.
+
+---
+
+#### DR-3 — `UpdateUserRequest` misuse guard (renewal safety)
+
+**What**: `UpdateUserRequest{Enable bool, Append bool}` has dangerous zero values: `Enable=false`
+sends `enable=0` (disabling the lease user in PVE); `Append=false` flips the PUT to a
+full-replace (silently wiping the user's `groups`, stripping all effective privileges). Renewal
+has exactly one valid input combination: `Enable=true`, `Append=true`, with `Groups` re-sent.
+Make invalid combinations unrepresentable or explicitly rejected before the wire call fires.
+
+**Why deferred**: `UpdateUser` is not called until the Phase 4 renewal path. Introducing the
+guard now would add dead code with no exercising call site.
+
+**Where**: `internal/pveapi/types.go` or `client.go` (`UpdateUserRequest` definition / `UpdateUser`
+call site in `secret_token.go`).
+
+**Acceptance Criterion**: Either (a) a constructor `NewRenewalUpdate(userid string, expire int64,
+group string) UpdateUserRequest` that always sets `Enable=true, Append=true` and is the only
+route to renewal updates, or (b) a `Validate() error` on `UpdateUserRequest` that returns an
+error for `!Enable || !Append`; a unit test proves that an expire-only / `Append=false` call is
+rejected or structurally impossible before it reaches the wire.
+
+---
+
+#### DR-4 — Response body size cap (DoS hardening)
+
+**What**: `io.ReadAll(resp.Body)` in `client.go` `doRequest` (or equivalent) has no byte limit.
+A misbehaving, misconfigured, or compromised PVE endpoint (or a MITM proxy) could return an
+arbitrarily large body, causing unbounded memory allocation. PVE responses are small JSON
+objects (< 1 KB in practice).
+
+**Why deferred**: Hardening item with no functional impact on correctness. Deferred until the
+client implementation is otherwise stable to avoid churn on the test helpers.
+
+**Where**: `internal/pveapi/client.go` — the response-body read in `doRequest` (or wherever
+`resp.Body` is consumed before being passed to `classifyPVEError`).
+
+**Acceptance Criterion**: The response body reader is wrapped with
+`http.MaxBytesReader(w, resp.Body, maxBodyBytes)` or `io.LimitReader(resp.Body, maxBodyBytes)`
+(cap ~1 MB); a unit test using `httptest.NewServer` that returns a multi-MB body confirms the
+client returns a size-limit error rather than reading the whole payload.
+
+---
+
+#### DR-5 — `force` / `-force` CLI collision documentation
+
+**What**: `DELETE <mount>/config` requires a `force=true` **data parameter**, but
+`vault delete -force <path>` is a real Vault CLI **flag** (skip-confirmation prompt) that
+transmits **no** `force` data param. An operator running `vault delete -force proxmox/config`
+would hit the `"requires force=true"` error with no obvious explanation why the flag they just
+passed was ignored.
+
+**Why deferred**: Documentation / UX item. The DELETE config guard protects against orphaning
+non-revocable leases — a hazard that does not exist until revocation is implemented in Phase 3.
+Full operator-facing docs (README, field descriptions) are a Phase 6 deliverable.
+
+**Where**: The `force` field `Description` in `pathConfig` (`path_config.go`), the `Build & Run`
+section of this plan, and `README.md` (Phase 6).
+
+**Acceptance Criterion**: The `force` field `Description` in `pathConfig` explicitly states that
+`vault delete -force` is a CLI flag (skip-confirmation) and does **not** satisfy this parameter;
+the correct invocations (`vault delete proxmox/config force=true` for Vault CLI ≥ 1.11, or
+`curl -X DELETE ".../config?force=true"`) are documented in both the field description and
+`README.md`. Optionally: evaluate renaming the field (e.g., `confirm_delete`) to avoid the
+collision entirely — note the trade-off (non-standard name vs. less confusion).
+
+---
+
+#### DR-6 — Probe-fixture tests (upgrade unit tests to verbatim PVE bodies)
+
+**What**: The 9 verbatim-captured PVE response bodies in `docs/PVE_PROBES.md` (Probes 2–6b,
+GROUPADD, RENEWAL-PRESERVE, etc.) should be replayed as test fixtures through
+`classifyPVEError` and `GetPermissions`, rather than hand-authored approximations in `httptest`
+handlers. This upgrades the test suite from "confirm my mental model of PVE" to "confirm actual
+PVE wire output" — i.e. any drift between the plan's body-string assumptions and real PVE
+output becomes a test failure rather than a silent pass.
+
+**Why deferred**: Test-quality improvement. The unit tests in Phase 1 already use representative
+bodies derived from the probes; this item replaces those approximations with verbatim
+copy-pastes. Can be done any time after Phase 1 tests exist, but causes churn if done before
+the error-classify surface stabilises (DR-1, DR-2 above may rename sentinels).
+
+**Where**: `internal/pveapi/errors_test.go` and `internal/pveapi/client_test.go`; fixture bodies
+sourced verbatim from `docs/PVE_PROBES.md`.
+
+**Acceptance Criterion**: A table-driven test in `errors_test.go` replays each of the 9 captured
+probe bodies verbatim (exact byte-for-byte JSON as recorded in `PVE_PROBES.md`) and asserts the
+expected `classifyPVEError` result; a complementary fixture in `client_test.go` or
+`permission_tree_test.go` replays the Probe 1 permissions response body through `GetPermissions`
+and asserts the parsed `PermissionTree` matches the expected structure. No live PVE required.
 
 ---
 

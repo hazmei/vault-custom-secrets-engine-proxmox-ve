@@ -1,0 +1,21 @@
+version: 2
+
+linters:
+  enable:
+    - govet
+    - staticcheck
+    - errcheck
+    - ineffassign
+  settings:
+    govet:
+      enable:
+        - shadow
+    errcheck:
+      check-blank: true
+
+formatters:
+  enable:
+    - gofmt
+
+run:
+  timeout: 5m
