@@ -88,7 +88,7 @@ func pathConfig(b *backend) *framework.Path {
 		},
 		ExistenceCheck:  b.configExistenceCheck,
 		HelpSynopsis:    "Configure the Proxmox VE connection credentials and defaults.",
-		HelpDescription: "POST: Set Proxmox address, admin token, TLS options, and default TTLs. Validates connectivity and privileges. GET: Read config (token_secret omitted). DELETE: Remove config (requires force=true).",
+		HelpDescription: "POST: Set Proxmox address, admin token, TLS options, and default TTLs. Validates connectivity and privileges. Every POST must include all required fields including token_secret (write-only; not returned on GET) — full-resend semantics ensure each write is validated against the supplied credentials. GET: Read config (token_secret omitted). DELETE: Remove config (requires force=true).",
 	}
 }
 
