@@ -58,13 +58,13 @@ func TestClassifyPVEError(t *testing.T) {
 			body:   []byte(`{"data":null,"message":"create user failed: no such group 'vault-test-grp'\n"}`),
 			want:   ErrGroupNotFound,
 		},
-		// Backward-compat: ErrNotFound is an alias for ErrUserNotFound (DR-2).
-		// errors.Is(ErrUserNotFound, ErrNotFound) is true; group NOT found is NOT ErrNotFound.
+		// DR-2: "no such user" maps to ErrUserNotFound.
+		// errors.Is(ErrUserNotFound, ErrGroupNotFound) is false; they are distinct.
 		{
-			name:   "no such user satisfies ErrNotFound alias (DR-2 compat)",
+			name:   "no such user satisfies ErrUserNotFound (DR-2)",
 			status: 500,
 			body:   []byte(`{"data":null,"message":"no such user ('vault-test@pve')\n"}`),
-			want:   ErrNotFound, // alias = ErrUserNotFound
+			want:   ErrUserNotFound,
 		},
 		// ── ErrForbidden cases ────────────────────────────────────────────
 		{
@@ -97,7 +97,7 @@ func TestClassifyPVEError(t *testing.T) {
 			name:   "message with trailing newline in JSON string",
 			status: 500,
 			body:   []byte("{\"data\":null,\"message\":\"no such user ('x@pve')\\n\"}"),
-			want:   ErrNotFound,
+			want:   ErrUserNotFound,
 		},
 		{
 			name:   "already exists with embedded quoted id",
@@ -184,8 +184,8 @@ func TestClassifyPVEErrorStructuredFieldsOnly(t *testing.T) {
 	body := []byte(`{"data":null,"message":"no such user ('vault-test@pve')","errors":{}}`)
 
 	got := classifyPVEError(500, body)
-	if !errors.Is(got, ErrNotFound) {
-		t.Errorf("expected ErrNotFound from structured message field, got %v", got)
+	if !errors.Is(got, ErrUserNotFound) {
+		t.Errorf("expected ErrUserNotFound from structured message field, got %v", got)
 	}
 }
 
@@ -199,8 +199,8 @@ func TestClassifyPVEErrorRawFallback(t *testing.T) {
 	body := []byte(`no such user (plain text error from PVE)`)
 
 	got := classifyPVEError(500, body)
-	if !errors.Is(got, ErrNotFound) {
-		t.Errorf("expected ErrNotFound from raw-body fallback, got %v", got)
+	if !errors.Is(got, ErrUserNotFound) {
+		t.Errorf("expected ErrUserNotFound from raw-body fallback, got %v", got)
 	}
 }
 
@@ -291,8 +291,8 @@ func TestClassifyPVEErrorStatusGate500StillWorks(t *testing.T) {
 	body := []byte(`{"data":null,"message":"no such user ('vault-test@pve')"}`)
 
 	got := classifyPVEError(500, body)
-	if !errors.Is(got, ErrNotFound) {
-		t.Errorf("HTTP 500 with 'no such user' body should return ErrNotFound; got %v", got)
+	if !errors.Is(got, ErrUserNotFound) {
+		t.Errorf("HTTP 500 with 'no such user' body should return ErrUserNotFound; got %v", got)
 	}
 }
 
@@ -311,8 +311,6 @@ func TestClassifyPVEErrorStatusGate400StillWorks(t *testing.T) {
 
 // TestSentinelDistinctness asserts the DR-2 sentinel-distinctness invariant:
 //
-//   - errors.Is(ErrUserNotFound, ErrNotFound) must be TRUE  (ErrNotFound is an alias)
-//   - errors.Is(ErrGroupNotFound, ErrNotFound) must be FALSE (distinct sentinel)
 //   - errors.Is(ErrGroupNotFound, ErrUserNotFound) must be FALSE
 //
 // This property is what makes DR-2 meaningful: revocation call sites can key on
@@ -322,18 +320,7 @@ func TestClassifyPVEErrorStatusGate400StillWorks(t *testing.T) {
 func TestSentinelDistinctness(t *testing.T) {
 	t.Parallel()
 
-	// ErrNotFound is an alias for ErrUserNotFound — must satisfy.
-	if !errors.Is(ErrUserNotFound, ErrNotFound) {
-		t.Error("errors.Is(ErrUserNotFound, ErrNotFound) must be TRUE: ErrNotFound is an alias for ErrUserNotFound")
-	}
-	if !errors.Is(ErrNotFound, ErrUserNotFound) {
-		t.Error("errors.Is(ErrNotFound, ErrUserNotFound) must be TRUE: the alias is bidirectional")
-	}
-
-	// ErrGroupNotFound is a DISTINCT sentinel — must NOT satisfy ErrNotFound or ErrUserNotFound.
-	if errors.Is(ErrGroupNotFound, ErrNotFound) {
-		t.Error("errors.Is(ErrGroupNotFound, ErrNotFound) must be FALSE: group-not-found must NOT satisfy the user-not-found alias")
-	}
+	// ErrGroupNotFound is a DISTINCT sentinel — must NOT satisfy ErrUserNotFound.
 	if errors.Is(ErrGroupNotFound, ErrUserNotFound) {
 		t.Error("errors.Is(ErrGroupNotFound, ErrUserNotFound) must be FALSE: distinct sentinels must not overlap")
 	}

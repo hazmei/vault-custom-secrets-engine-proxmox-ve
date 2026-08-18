@@ -23,6 +23,7 @@ package proxmox
 import (
 	"crypto/rand"
 	"fmt"
+	"unicode"
 )
 
 // crockfordBase32 is the lowercase Crockford base32 alphabet (no padding, no
@@ -73,9 +74,12 @@ func buildUserID(userPrefix, role, randomSuffix, realm string) string {
 //
 // A component is rejected if it is:
 //   - empty
-//   - contains whitespace (breaks `[^\s:/]+` PVE username regex)
-//   - contains ':' or '/' (reserved by PVE username regex)
+//   - contains Unicode whitespace (unicode.IsSpace; rejects U+0020, U+00A0,
+//     U+2003, and all other whitespace matched by PVE's Perl \s)
+//   - contains ':' or '/' (reserved by PVE username regex [^\s:/]+)
 //   - contains '@' or '!' (break PVEAPIToken Authorization header grammar)
+//   - contains '=' (separates tokenid from secret in the Authorization header:
+//     PVEAPIToken=<user>@<realm>!<tokenid>=<secret>)
 //
 // See docs/ARCHITECTURE.md — Roles section, userid character set.
 func validateUserComponent(s string) error {
@@ -92,16 +96,13 @@ func validateUserComponent(s string) error {
 			return fmt.Errorf("proxmox: user component %q contains forbidden character '@' (breaks PVEAPIToken header grammar)", s)
 		case r == '!':
 			return fmt.Errorf("proxmox: user component %q contains forbidden character '!' (breaks PVEAPIToken header grammar)", s)
-		case isWhitespace(r):
+		case r == '=':
+			return fmt.Errorf("proxmox: user component %q contains forbidden character '=' (separates tokenid from secret in PVEAPIToken header)", s)
+		case unicode.IsSpace(r):
 			return fmt.Errorf("proxmox: user component %q contains whitespace", s)
 		}
 	}
 	return nil
-}
-
-// isWhitespace reports whether r is an ASCII whitespace character.
-func isWhitespace(r rune) bool {
-	return r == ' ' || r == '\t' || r == '\n' || r == '\r' || r == '\f' || r == '\v'
 }
 
 // validateRealmComponent validates a realm value against the PVE realm regex
@@ -143,7 +144,8 @@ func validateLengthBudget(userPrefix, role, realm string) error {
 	total := len(userPrefix) + 1 + len(role) + 1 + 8 + 1 + len(realm)
 	if total > 64 {
 		return fmt.Errorf(
-			"proxmox: userid would be %d characters (> 64); shorten user_prefix (%d), role name (%d), or realm (%d chars each): budget = len(prefix)+1+len(role)+1+8+1+len(realm) <= 64",
+			"proxmox: userid would be %d characters (> 64); shorten user_prefix, role name, or realm "+
+				"(prefix=%d, role=%d, realm=%d chars): budget = len(prefix)+1+len(role)+1+8+1+len(realm) <= 64",
 			total, len(userPrefix), len(role), len(realm),
 		)
 	}

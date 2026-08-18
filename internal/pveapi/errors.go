@@ -6,7 +6,7 @@
 // body-string based, not status-code based (confirmed PVE 9.2.10, PVE_PROBES.md
 // Probes 2–6b). Only HTTP 403 is a genuine status to branch on.
 //
-// DR-2: ErrNotFound has been split into ErrUserNotFound and ErrGroupNotFound so
+// DR-2: ErrNotFound was split into ErrUserNotFound and ErrGroupNotFound so
 // that call sites can distinguish between a missing user (revocation idempotency
 // treats it as success; renewal treats it as hard failure) and a missing group
 // (role-write surfaces it as "group does not exist"). Using errors.Is avoids a
@@ -34,13 +34,6 @@ var (
 	// Role-write keyed on errors.Is(err, ErrGroupNotFound) → surface as
 	// "group <name> does not exist on Proxmox cluster".
 	ErrGroupNotFound = errors.New("pveapi: group not found")
-
-	// ErrNotFound is a compatibility alias kept for call sites introduced
-	// before DR-2. New code should use ErrUserNotFound or ErrGroupNotFound
-	// directly.
-	//
-	// Deprecated: prefer ErrUserNotFound or ErrGroupNotFound.
-	ErrNotFound = ErrUserNotFound
 
 	// ErrConflict is returned when the PVE response body contains
 	// "already exists" (user create, HTTP 500) or "Token already exists"

@@ -55,6 +55,18 @@ func listRoles(ctx context.Context, b *backend, storage logical.Storage) (*logic
 	return b.HandleRequest(ctx, req)
 }
 
+// updateRole is a helper that sends a PUT (UpdateOperation) to <mount>/roles/:name.
+// Only the fields present in data are sent — simulating a partial-update request.
+func updateRole(ctx context.Context, b *backend, storage logical.Storage, name string, data map[string]interface{}) (*logical.Response, error) {
+	req := &logical.Request{
+		Operation: logical.UpdateOperation,
+		Path:      "roles/" + name,
+		Storage:   storage,
+		Data:      data,
+	}
+	return b.HandleRequest(ctx, req)
+}
+
 // deleteRole is a helper that sends a DELETE to <mount>/roles/:name.
 func deleteRole(ctx context.Context, b *backend, storage logical.Storage, name string) (*logical.Response, error) {
 	req := &logical.Request{
@@ -979,5 +991,92 @@ func TestRoleWriteReadDeleteRoundTrip(t *testing.T) {
 	}
 	if readResp != nil {
 		t.Error("expected nil response after delete")
+	}
+}
+
+// ── Partial-update test ───────────────────────────────────────────────────────
+
+// TestRoleWrite_PartialUpdate verifies that an UpdateOperation only overwrites
+// the fields explicitly present in the request body. Fields absent from the
+// update request must retain their original stored values and must NOT be
+// silently reset to schema defaults.
+//
+// Scenario: create a role with non-default user_prefix, realm, and max_ttl;
+// then update with only ttl set. The untouched fields (user_prefix, max_ttl,
+// realm) must survive the update unchanged.
+func TestRoleWrite_PartialUpdate(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	b, storage := setupBackendWithConfig(t, func(mc *pveapi.MockClient) {
+		mc.Groups = map[string]bool{
+			"vault-vm-admins": true,
+		}
+		mc.GetPermissionsResult = fullPermTree("vault-vm-admins")
+	})
+
+	// Step 1: create with non-default user_prefix and max_ttl.
+	createData := map[string]interface{}{
+		"group":       "vault-vm-admins",
+		"user_prefix": "myengine", // non-default (schema default is "vault")
+		"realm":       "pve",
+		"ttl":         900,
+		"max_ttl":     7200, // non-default (schema default is 0 = unset)
+	}
+	resp, err := writeRole(ctx, b, storage, "testrole", createData)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if resp != nil && resp.IsError() {
+		t.Fatalf("create error: %s", resp.Error())
+	}
+
+	// Step 2: partial update — only change ttl; leave user_prefix/realm/max_ttl
+	// absent from the request. On a correct merge-on-update implementation these
+	// must retain their original values; on a broken d.Get implementation they
+	// would be silently reset to schema defaults ("vault", 0, "pve").
+	updateData := map[string]interface{}{
+		// group must be present so PVE validation (GetGroup, GetPermissions) can proceed.
+		"group": "vault-vm-admins",
+		"ttl":   1800,
+		// user_prefix, realm, max_ttl intentionally omitted.
+	}
+	resp, err = updateRole(ctx, b, storage, "testrole", updateData)
+	if err != nil {
+		t.Fatalf("partial update: %v", err)
+	}
+	if resp != nil && resp.IsError() {
+		t.Fatalf("partial update error: %s", resp.Error())
+	}
+
+	// Step 3: read back and assert that untouched fields retained their original values.
+	readResp, err := readRole(ctx, b, storage, "testrole")
+	if err != nil {
+		t.Fatalf("read after partial update: %v", err)
+	}
+	if readResp == nil {
+		t.Fatal("expected non-nil read response after update")
+	}
+
+	// ttl SHOULD have been updated.
+	if readResp.Data["ttl"] != 1800 {
+		t.Errorf("ttl = %v; want 1800 (should be updated)", readResp.Data["ttl"])
+	}
+
+	// user_prefix must NOT be reset to the schema default "vault".
+	if readResp.Data["user_prefix"] != "myengine" {
+		t.Errorf("user_prefix = %v; want myengine (must retain original, not reset to default 'vault')",
+			readResp.Data["user_prefix"])
+	}
+
+	// max_ttl must NOT be reset to 0 (schema default for unset TypeDurationSecond).
+	if readResp.Data["max_ttl"] != 7200 {
+		t.Errorf("max_ttl = %v; want 7200 (must retain original, not reset to 0)",
+			readResp.Data["max_ttl"])
+	}
+
+	// realm must be retained as "pve".
+	if readResp.Data["realm"] != "pve" {
+		t.Errorf("realm = %v; want pve (must retain original)", readResp.Data["realm"])
 	}
 }

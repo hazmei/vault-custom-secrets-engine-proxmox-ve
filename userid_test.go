@@ -224,6 +224,25 @@ func TestValidateUserComponent_RejectsNewline(t *testing.T) {
 	}
 }
 
+func TestValidateUserComponent_RejectsEquals(t *testing.T) {
+	t.Parallel()
+
+	// '=' separates tokenid from secret in PVEAPIToken header grammar.
+	if err := validateUserComponent("vault=role"); err == nil {
+		t.Error("validateUserComponent(\"vault=role\") should return an error (= forbidden)")
+	}
+}
+
+func TestValidateUserComponent_RejectsUnicodeNBSP(t *testing.T) {
+	t.Parallel()
+
+	// U+00A0 NO-BREAK SPACE — matched by Perl \s but not by ASCII-only checks.
+	s := "vault\u00A0role"
+	if err := validateUserComponent(s); err == nil {
+		t.Errorf("validateUserComponent(%q) should return an error (U+00A0 Unicode whitespace forbidden)", s)
+	}
+}
+
 // ── validateRealmComponent ────────────────────────────────────────────────────
 
 func TestValidateRealmComponent_ValidRealms(t *testing.T) {

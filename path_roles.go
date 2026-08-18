@@ -64,6 +64,8 @@ type proxmoxRole struct {
 // collapse TTL to 0 when role values are unset. This function only sets ttl/maxTTL
 // to the config default when the role value is 0 (unset). The actual capping
 // against system/mount limits is framework.CalculateTTL's responsibility.
+//
+//nolint:unused // consumed by path_creds.go in Phase 3
 func (r *proxmoxRole) ttls(cfg *proxmoxConfig) (ttl, maxTTL time.Duration) {
 	ttl = time.Duration(r.TTL) * time.Second
 	if ttl == 0 {
@@ -84,8 +86,9 @@ func (r *proxmoxRole) ttls(cfg *proxmoxConfig) (ttl, maxTTL time.Duration) {
 //   - (0, 0)       → 0        (both unset — unlimited; issuance refuses this)
 //   - (A, B)       → min(A,B) (both set — use stricter limit)
 //
-// Home file: path_roles.go (TTL helper, lives alongside ttls()).
 // Used by path_creds.go to compute effective_max_ttl stored in lease InternalData.
+//
+//nolint:unused // consumed by path_creds.go in Phase 3
 func cappedMaxTTL(roleMax, sysMax time.Duration) time.Duration {
 	switch {
 	case roleMax == 0:
@@ -197,6 +200,12 @@ func (b *backend) roleExistenceCheck(ctx context.Context, req *logical.Request, 
 
 // roleWrite handles POST/PUT to <mount>/roles/:name.
 //
+// On create (role does not yet exist in storage), all schema defaults apply.
+// On update (role already exists), only fields explicitly present in the
+// request are overwritten — omitted fields retain their stored values.
+// Field presence is detected with d.GetOk (returns ok=false when the field was
+// not supplied by the caller and has no explicit value in the request body).
+//
 // Steps:
 //  1. Validate TTL ordering (ttl <= max_ttl when both set).
 //  2. Default and validate realm.
@@ -210,11 +219,63 @@ func (b *backend) roleExistenceCheck(ctx context.Context, req *logical.Request, 
 //  8. Store role to roles/<name>.
 func (b *backend) roleWrite(ctx context.Context, req *logical.Request, d *framework.FieldData) (*logical.Response, error) {
 	name := d.Get("name").(string)
-	group := d.Get("group").(string)
-	userPrefix := d.Get("user_prefix").(string)
-	realm := d.Get("realm").(string)
-	ttl := d.Get("ttl").(int)
-	maxTTL := d.Get("max_ttl").(int)
+
+	// For updates, load the existing role as the base so that omitted fields
+	// are retained. For creates (role == nil), schema defaults apply via d.Get.
+	existing, err := getRole(ctx, req.Storage, name)
+	if err != nil {
+		return nil, fmt.Errorf("proxmox: load existing role %q: %w", name, err)
+	}
+
+	isUpdate := existing != nil
+
+	// Resolve each field: if the request explicitly provides the value (d.GetOk
+	// returns ok=true), use it; otherwise fall back to the existing stored value
+	// (update) or the schema default (create via plain d.Get).
+	var group string
+	if rawGroup, ok := d.GetOk("group"); ok {
+		group = rawGroup.(string)
+	} else if isUpdate {
+		group = existing.Group
+	} else {
+		group = d.Get("group").(string)
+	}
+
+	var userPrefix string
+	if rawPrefix, ok := d.GetOk("user_prefix"); ok {
+		userPrefix = rawPrefix.(string)
+	} else if isUpdate {
+		userPrefix = existing.UserPrefix
+	} else {
+		userPrefix = d.Get("user_prefix").(string)
+	}
+
+	var realm string
+	if rawRealm, ok := d.GetOk("realm"); ok {
+		realm = rawRealm.(string)
+	} else if isUpdate {
+		realm = existing.Realm
+	} else {
+		realm = d.Get("realm").(string)
+	}
+
+	var ttl int
+	if rawTTL, ok := d.GetOk("ttl"); ok {
+		ttl = rawTTL.(int)
+	} else if isUpdate {
+		ttl = existing.TTL
+	} else {
+		ttl = d.Get("ttl").(int)
+	}
+
+	var maxTTL int
+	if rawMaxTTL, ok := d.GetOk("max_ttl"); ok {
+		maxTTL = rawMaxTTL.(int)
+	} else if isUpdate {
+		maxTTL = existing.MaxTTL
+	} else {
+		maxTTL = d.Get("max_ttl").(int)
+	}
 
 	// Validate required fields.
 	if group == "" {
