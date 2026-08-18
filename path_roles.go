@@ -206,6 +206,9 @@ func (b *backend) roleExistenceCheck(ctx context.Context, req *logical.Request, 
 // Field presence is detected with d.GetOk (returns ok=false when the field was
 // not supplied by the caller and has no explicit value in the request body).
 //
+// b.roleLock serializes the entire load-merge-store critical section so that
+// concurrent updates to the same role cannot interleave (last-writer-wins race).
+//
 // Steps:
 //  1. Validate TTL ordering (ttl <= max_ttl when both set).
 //  2. Default and validate realm.
@@ -218,6 +221,11 @@ func (b *backend) roleExistenceCheck(ctx context.Context, req *logical.Request, 
 //     /access/groups/<group> (catches --propagate 0 misconfiguration).
 //  8. Store role to roles/<name>.
 func (b *backend) roleWrite(ctx context.Context, req *logical.Request, d *framework.FieldData) (*logical.Response, error) {
+	// Serialize the entire load-merge-store so concurrent updates to the same
+	// role cannot interleave and silently drop each other's fields.
+	b.roleLock.Lock()
+	defer b.roleLock.Unlock()
+
 	name := d.Get("name").(string)
 
 	// For updates, load the existing role as the base so that omitted fields

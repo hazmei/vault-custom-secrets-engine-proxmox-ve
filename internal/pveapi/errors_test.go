@@ -240,11 +240,12 @@ func TestClassifyPVEErrorNoFalsePositiveFromJSONSyntax(t *testing.T) {
 // These confirm that body-string classification is ONLY performed for HTTP 400
 // and 500 (PVE's confirmed error statuses).  A proxy/LB returning 502/503/404
 // with a body that happens to contain a sentinel phrase must NOT be classified
-// as ErrNotFound/ErrConflict — that would make revocation silently "succeed"
-// while live PVE users remain and no WAL entry is left to sweep them.
+// as ErrUserNotFound/ErrGroupNotFound/ErrConflict — that would make revocation
+// silently "succeed" while live PVE users remain and no WAL entry is left to
+// sweep them.
 
 // TestClassifyPVEErrorStatusGate502NoFalsePositive confirms that HTTP 502 with
-// a body containing "does not exist" returns nil, not ErrNotFound.
+// a body containing "does not exist" returns nil, not ErrGroupNotFound.
 func TestClassifyPVEErrorStatusGate502NoFalsePositive(t *testing.T) {
 	t.Parallel()
 
@@ -258,7 +259,7 @@ func TestClassifyPVEErrorStatusGate502NoFalsePositive(t *testing.T) {
 }
 
 // TestClassifyPVEErrorStatusGate503NoFalsePositive confirms that HTTP 503 with
-// a body containing "no such user" returns nil, not ErrNotFound.
+// a body containing "no such user" returns nil, not ErrUserNotFound.
 func TestClassifyPVEErrorStatusGate503NoFalsePositive(t *testing.T) {
 	t.Parallel()
 

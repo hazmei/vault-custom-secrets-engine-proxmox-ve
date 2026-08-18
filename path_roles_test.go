@@ -1031,15 +1031,15 @@ func TestRoleWrite_PartialUpdate(t *testing.T) {
 		t.Fatalf("create error: %s", resp.Error())
 	}
 
-	// Step 2: partial update — only change ttl; leave user_prefix/realm/max_ttl
+	// Step 2: partial update — only change ttl; leave group/user_prefix/realm/max_ttl
 	// absent from the request. On a correct merge-on-update implementation these
 	// must retain their original values; on a broken d.Get implementation they
-	// would be silently reset to schema defaults ("vault", 0, "pve").
+	// would be silently reset to schema defaults ("vault", 0, "pve", "").
+	// group is intentionally omitted: merge-on-update retains existing.Group, so
+	// PVE validation proceeds with the stored group — no need to re-supply it.
 	updateData := map[string]interface{}{
-		// group must be present so PVE validation (GetGroup, GetPermissions) can proceed.
-		"group": "vault-vm-admins",
-		"ttl":   1800,
-		// user_prefix, realm, max_ttl intentionally omitted.
+		"ttl": 1800,
+		// group, user_prefix, realm, max_ttl intentionally omitted.
 	}
 	resp, err = updateRole(ctx, b, storage, "testrole", updateData)
 	if err != nil {
@@ -1061,6 +1061,12 @@ func TestRoleWrite_PartialUpdate(t *testing.T) {
 	// ttl SHOULD have been updated.
 	if readResp.Data["ttl"] != 1800 {
 		t.Errorf("ttl = %v; want 1800 (should be updated)", readResp.Data["ttl"])
+	}
+
+	// group must NOT be cleared — merge-on-update must retain the stored group.
+	if readResp.Data["group"] != "vault-vm-admins" {
+		t.Errorf("group = %v; want vault-vm-admins (must retain original when omitted from update)",
+			readResp.Data["group"])
 	}
 
 	// user_prefix must NOT be reset to the schema default "vault".
