@@ -22,13 +22,13 @@ This secrets engine implements Vault's dynamic secrets pattern for Proxmox VE. E
    - Returns `token_id` and `token_secret` (shown only once, non-reproducible)
 
 2. **Renew**:
-   - Extends Vault lease TTL up to the effective `max_ttl`
-   - Updates Proxmox-side user `expire` timestamp to match the new lease expiry (defense-in-depth backstop)
+   - Extends Vault lease TTL up to the effective `max_ttl` (measured from the original issue time)
+   - Issues `PUT /access/users/{userid}` re-sending `expire`+`groups`+`enable`+`append=1` **together** — PVE's `PUT /access/users` is full-replace, so an expire-only PUT would wipe the user's group membership and strip its privileges (confirmed PVE 9.2.10). The target group is read from the lease's internal data, and a read-back confirms membership survived. Both directions are now confirmed on PVE 9.2.10: the full-replace wipe by Probe 7; the preserve path (re-sending groups retains membership) confirmed by Probe RENEWAL-PRESERVE (17 Aug 2026 — groups `["vault-test-grp"]` read back, expire advanced 1786986804→1786990429). The runtime read-back remains as defense-in-depth.
 
 3. **Revoke**:
    - Single `DELETE /access/users/{userid}` call
    - Cascades to automatically remove the user's token(s), group memberships, and ACL entries
-   - Idempotent (404 treated as success)
+   - Idempotent (PVE returns HTTP 500 + body `"no such user"` for a missing user, NOT 404; the engine keys idempotency on that body string — confirmed PVE 9.2.10)
 
 ### Security Design
 
@@ -42,7 +42,7 @@ This secrets engine implements Vault's dynamic secrets pattern for Proxmox VE. E
 
 | Path | Operations | Description |
 |------|-----------|-------------|
-| `<mount>/config` | POST, GET, DELETE | Configure Proxmox connection (address, admin token, TLS, default TTLs); GET returns `address`, `tls_skip_verify`, `ca_cert`, `default_ttl`, `default_max_ttl`, `token_id`; `token_secret` never returned; DELETE clears stored credentials (MUST refuse if active leases exist OR require explicit `force=true` flag — outstanding leases become non-revocable) |
+| `<mount>/config` | POST, GET, DELETE | Configure Proxmox connection (address, admin token, TLS, default TTLs); GET returns `address`, `tls_skip_verify`, `ca_cert`, `default_ttl`, `default_max_ttl`, `token_id`; `token_secret` never returned; DELETE requires `force=true` — outstanding leases become non-revocable and non-renewable (renewal also loads config to reach PVE, so it fails immediately too; revoke them first) |
 | `<mount>/roles/:name` | POST, GET, LIST, DELETE | Define credential roles with group name, TTLs, and user prefix; DELETE does not revoke outstanding leases |
 | `<mount>/creds/:role` | GET | Issue a new dynamic credential (returns `pve_userid`, `token_id`, `token_secret`) |
 | `<mount>/rotate-root` | — | **Out of scope for v1** — root token rotation is manual (documented as create new token → update config → delete old token) |
@@ -143,13 +143,14 @@ role values with config defaults as fallbacks:
 role_ttl     = role.ttl     or config.default_ttl
 role_max_ttl = role.max_ttl or config.default_max_ttl
 eff_max_ttl  = min(role_max_ttl, Vault mount/system max TTL)
-eff_ttl      = min(requested TTL or role_ttl, eff_max_ttl)
+eff_ttl      = min(role_ttl, eff_max_ttl)          # no requested TTL at issuance
 ```
 
 Key points:
 - `config.default_ttl` and `config.default_max_ttl` are **fallback values** used only when the role does not define its own `ttl` or `max_ttl`.
-- The requested TTL (if provided at issue time) is capped by `eff_max_ttl`, not by `role_ttl` — the TTL governs the default/initial lease duration, while max_ttl is the hard ceiling.
+- **There is no issuance-time requested TTL**: `<mount>/creds/:role` declares no `ttl` field (matching the database and terraform secrets engines). A requested `increment` only applies on lease RENEWAL (`req.Secret.Increment`), capped at `eff_max_ttl` measured from the original issue time.
 - Vault's mount/system maximum TTL remains the absolute hard ceiling.
+- **Unlimited (zero) TTL is refused at issuance**: if the role and config resolve to no finite TTL, `vault read <mount>/creds/:role` returns an error. The Proxmox-side `expire` backstop requires a finite lease; a never-expiring user would disable it. Set a non-zero `ttl`/`max_ttl` on the role or a config default.
 
 **On lease renewal**:
 - Lease TTL extends up to the effective `max_ttl` captured at issue time
@@ -171,13 +172,13 @@ Key points:
 - Mocked Proxmox API client for isolated path handler testing
 - Input validation, TTL computation, error mapping
 - Compensation paths (orphaned user cleanup on mid-provisioning failure)
-- Idempotent deletion (404 treated as success)
+- Idempotent deletion (body `"no such user"` on HTTP 500 treated as success, not a 404 status)
 - Userid sanitization (character set and length limit validation)
 
 ### Acceptance Tests
 - Environment gating: `VAULT_ACC=1` (HashiCorp convention)
-- Full lifecycle: pre-create a PVE group bound to a test role → issue credential → verify scoped permissions work (via `GET /access/permissions`) and out-of-scope actions fail → renew lease → revoke and confirm cleanup
-- Authorization contract canary: assert the confirmed PVE 9.2.10 behavior the design depends on: (a) direct `PUT /access/acl` of an unheld role by the admin token returns 403; (b) group-membership add succeeds and confers the group's role(s); (c) a token whose owning USER has an `expire` in the past is rejected at authentication (401); (d) after a renewal (`PUT /access/users/{userid}` with `expire` only), the issued token still holds the group's roles (effective privileges unchanged)
+- Full lifecycle: pre-create a PVE group bound to a test role → issue credential → **verify scoped permissions work via a BEHAVIORAL call** (use the issued privsep=0 token against a group-role-gated endpoint, e.g. `GET /cluster/resources?type=vm`, expect HTTP 200) and out-of-scope actions fail → renew lease → revoke and confirm cleanup. **The token's bare `GET /access/permissions` reflects only the authenticating principal and is NOT evidence of the synthetic user's group-derived privileges** (Probe 6); the `?userid=` server-side dump is optional and requires a temporary `Sys.Audit` grant on the admin token.
+- Authorization contract canary: assert the confirmed PVE 9.2.10 behavior the design depends on: (a) direct `PUT /access/acl` of an unheld role by the admin token returns 403; (b) group-membership add succeeds and confers the group's role(s); (c) a token whose owning USER has an `expire` in the past is rejected at authentication (401); (d) after a renewal (`PUT /access/users/{userid}` re-sending `expire`+`groups`+`enable`+`append=1` — full-replace), the issued token still holds the group's roles; a read-back confirms `groups` is preserved. A control (expire-only PUT on a throwaway user) leaves `groups:[]`, guarding against a regression to expire-only renewal (Probe 7).
 - Failure injection: simulate mid-provisioning failures, test idempotent revocation, test insufficient root token privileges
 - Concurrent issuance: verify suffix-collision retry handling under load
 - WAL rollback: simulate process death mid-provision and verify orphan sweep
