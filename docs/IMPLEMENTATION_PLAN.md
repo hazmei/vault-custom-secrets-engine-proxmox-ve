@@ -8,6 +8,7 @@ This is a greenfield Go implementation of the Proxmox VE dynamic-secrets engine 
 
 These design choices are baked into the implementation and are **not open for revision** during initial implementation:
 
+- **Go version**: `go 1.25.7` (bumped to satisfy `vault/sdk v0.25.1`'s minimum; was 1.23 in the original plan). CI must use Go **≥ 1.25.7**.
 - **Go module path**: `github.com/hazmei/vault-plugin-secrets-proxmox`
 - **DELETE `<mount>/config` guard**: ALWAYS requires `force=true` query parameter. The engine does NOT track active leases (no reliable SDK lease-count API; a counter would drift on crash/failover). Outstanding leases become non-revocable and non-renewable on config delete — renewal also loads config to reach PVE, so it fails immediately too; operators must revoke leases first, then delete config.
 - **userid-collision retry bound**: 5 attempts maximum, then surface as internal error.
@@ -64,15 +65,15 @@ vault-plugin-secrets-proxmox/
 ```go
 module github.com/hazmei/vault-plugin-secrets-proxmox
 
-go 1.23
+go 1.25.7  // resolved: bumped from 1.23 to satisfy vault/sdk v0.25.1 minimum
 
 require (
-	github.com/hashicorp/vault/sdk v0.13.0
-	github.com/hashicorp/go-hclog v1.6.2
+	github.com/hashicorp/vault/sdk v0.25.1
+	github.com/hashicorp/go-hclog v1.6.3
 )
 ```
 
-Pin `vault/sdk` to the latest stable version at time of creation (adjust as needed). Use Go 1.23 or later for modern toolchain.
+The versions above reflect what `go get` resolved at bootstrap time (sdk v0.25.1, go-hclog v1.6.3, go directive 1.25.7). Run `go mod tidy` after any `go get` to keep go.sum consistent.
 
 ### `.gitignore`
 
@@ -190,7 +191,7 @@ CI workflow — do not mix the two.
 
 ### `cmd/vault-plugin-secrets-proxmox/main.go`
 
-Plugin entry point. Calls `plugin.ServeMultiplex` (or `plugin.Serve` if multiplexing not needed) with `BackendFactoryFunc: proxmox.Factory`.
+Plugin entry point. Calls `plugin.ServeMultiplex` (multiplexed gRPC, recommended for Vault v1.12+; **do NOT set `TLSProviderFunc`** — Vault v5+ AutoMTLS handles TLS without it) with `BackendFactoryFunc: proxmox.Factory`.
 
 **Key functions**:
 - `main()` — sets up logging, calls plugin serve.
@@ -1026,7 +1027,7 @@ annotations elsewhere. No code deliverable — this phase gated the design.
 ### Phase 1 — Bootstrap + Proxmox Client + Config Path
 
 **Tasks**:
-- [ ] Create `go.mod` (module path `github.com/hazmei/vault-plugin-secrets-proxmox`, go 1.23, require `vault/sdk` + `go-hclog`)
+- [ ] Create `go.mod` (module path `github.com/hazmei/vault-plugin-secrets-proxmox`, go 1.25.7 — bumped from 1.23 to satisfy sdk v0.25.1 minimum, require `vault/sdk v0.25.1` + `go-hclog v1.6.3`)
 - [ ] Create `.gitignore` (Go + Vault plugin artifacts)
 - [ ] Create `Makefile` (build/test/testacc/fmt/lint/tidy targets)
 - [ ] Create `.golangci.yml` (v2 schema — see Bootstrap Files)
