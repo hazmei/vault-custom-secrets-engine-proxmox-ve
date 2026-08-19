@@ -309,8 +309,8 @@ func (b *backend) roleWrite(ctx context.Context, req *logical.Request, d *framew
 	if realm == "" {
 		realm = "pve"
 	}
-	if err := validateRealmComponent(realm); err != nil {
-		return logical.ErrorResponse("invalid realm: %s", err), nil
+	if realmErr := validateRealmComponent(realm); realmErr != nil {
+		return logical.ErrorResponse("invalid realm: %s", realmErr), nil
 	}
 
 	// Default user_prefix if not provided.
@@ -319,16 +319,16 @@ func (b *backend) roleWrite(ctx context.Context, req *logical.Request, d *framew
 	}
 
 	// Step 3: Validate user_prefix and role name charset.
-	if err := validateUserComponent(userPrefix); err != nil {
-		return logical.ErrorResponse("invalid user_prefix: %s", err), nil
+	if prefixErr := validateUserComponent(userPrefix); prefixErr != nil {
+		return logical.ErrorResponse("invalid user_prefix: %s", prefixErr), nil
 	}
-	if err := validateUserComponent(name); err != nil {
-		return logical.ErrorResponse("invalid role name: %s", err), nil
+	if nameErr := validateUserComponent(name); nameErr != nil {
+		return logical.ErrorResponse("invalid role name: %s", nameErr), nil
 	}
 
 	// Step 4: Validate userid length budget.
-	if err := validateLengthBudget(userPrefix, name, realm); err != nil {
-		return logical.ErrorResponse("%s", err), nil
+	if budgetErr := validateLengthBudget(userPrefix, name, realm); budgetErr != nil {
+		return logical.ErrorResponse("%s", budgetErr), nil
 	}
 
 	// Step 5: Load config and build PVE client.
@@ -348,14 +348,14 @@ func (b *backend) roleWrite(ctx context.Context, req *logical.Request, d *framew
 	// Step 6: Verify group exists on the Proxmox cluster.
 	// GetGroup returns ErrGroupNotFound (HTTP 500 + body "does not exist") for
 	// missing groups. PVE never returns 404. DR-2 uses ErrGroupNotFound specifically.
-	if err := client.GetGroup(ctx, group); err != nil {
-		if errors.Is(err, pveapi.ErrGroupNotFound) {
+	if groupErr := client.GetGroup(ctx, group); groupErr != nil {
+		if errors.Is(groupErr, pveapi.ErrGroupNotFound) {
 			return logical.ErrorResponse("group %q does not exist on Proxmox cluster; create it out-of-band before defining this role", group), nil
 		}
-		if errors.Is(err, pveapi.ErrForbidden) {
-			return logical.ErrorResponse("PVE returned 403 checking group %q — admin token may lack Sys.Audit at /access/groups; %s", group, err), nil
+		if errors.Is(groupErr, pveapi.ErrForbidden) {
+			return logical.ErrorResponse("PVE returned 403 checking group %q — admin token may lack Sys.Audit at /access/groups; %s", group, groupErr), nil
 		}
-		return nil, fmt.Errorf("proxmox: GetGroup %q: %w", group, err)
+		return nil, fmt.Errorf("proxmox: GetGroup %q: %w", group, groupErr)
 	}
 
 	// Step 7: Confirm Realm.AllocateUser at /access/realm/<realm> via permissions ancestor-walk.

@@ -980,8 +980,8 @@ func TestRoleWriteReadDeleteRoundTrip(t *testing.T) {
 	}
 
 	// Delete.
-	if _, err := deleteRole(ctx, b, storage, "testrole"); err != nil {
-		t.Fatalf("delete: %v", err)
+	if _, deleteErr := deleteRole(ctx, b, storage, "testrole"); deleteErr != nil {
+		t.Fatalf("delete: %v", deleteErr)
 	}
 
 	// Read after delete → nil.
