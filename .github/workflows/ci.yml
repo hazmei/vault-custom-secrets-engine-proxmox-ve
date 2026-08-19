@@ -48,4 +48,7 @@ jobs:
           go-version-file: go.mod
       - uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
         with:
-          version: v2.12.2   # keep in sync with Makefile GOLANGCI_LINT_VERSION; floor: action downloads a pre-built binary that must be built with Go >= this module's language version (go 1.25.7); v2.12.2 satisfies that.
+          # keep in sync with Makefile GOLANGCI_LINT_VERSION.
+          # Floor: the action downloads a pre-built binary that must be built with
+          # Go >= this module's language version (go 1.25.7); v2.12.2 satisfies that.
+          version: v2.12.2
