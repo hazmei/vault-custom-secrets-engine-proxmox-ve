@@ -822,6 +822,91 @@ VM.Replicate, VM.Snapshot, VM.Snapshot.Rollback  (User.Modify + Realm.AllocateUs
 
 ---
 
+### Probe COMMENT — `comment` round-trip and survival across full-replace renewal PUT
+
+**Maps to:** WAL nonce-ownership scheme (`walRollbackUser` comment==nonce check) and the operator
+note added in commit 1bb86cc ("do not edit the `comment` field on `vault-*` users").
+**Answers review threads P1 and P2** (PR #5): P2 asked whether PVE persists `comment`
+byte-for-byte through POST/GET; P1 hypothesised the full-replace renewal PUT would wipe
+`comment` (analogous to how Probe 7 showed expire-only PUT wipes `groups`).
+
+**Purpose:**
+- **(a)** Confirm `comment` round-trips byte-for-byte: a value written on `POST /access/users`
+  is returned unchanged on `GET /access/users/{id}` (validates `walRollbackUser`'s
+  `comment == nonce` comparison).
+- **(b)** Confirm whether the full-replace renewal `PUT /access/users/{id}` (carrying
+  `expire`+`groups`+`enable`+`append=1`, comment **omitted**) clears `comment` or leaves it
+  intact (determines whether the `vault-wal:` marker survives the whole account lifetime).
+
+```bash
+# ============ WORKSTATION — requires PVE_ADDR, AUTH, TESTGROUP from Part C ============
+SUFFIX=$(head -c5 /dev/urandom | base32 | tr '[:upper:]' '[:lower:]' | tr -d '=' | head -c8)
+USERID="probe-cmt-${SUFFIX}@pve"
+echo "USERID=$USERID"
+
+# COMMENT-1: CREATE with comment set to a WAL-nonce-style value
+pve -X POST "$PVE_ADDR/api2/json/access/users" \
+    --data-urlencode "userid=${USERID}" \
+    --data-urlencode "groups=${TESTGROUP}" \
+    --data-urlencode "enable=1" \
+    --data-urlencode "expire=$(($(date +%s) + 3600))" \
+    --data-urlencode "comment=vault-wal:PROBECOMMENT12345"
+
+# COMMENT-2: READ-BACK immediately — does comment round-trip byte-for-byte? (answers P2)
+pve "$PVE_ADDR/api2/json/access/users/${USERID}"
+
+# COMMENT-3: FULL-REPLACE renewal PUT — expire+groups+enable+append=1, comment OMITTED
+pve -X PUT "$PVE_ADDR/api2/json/access/users/${USERID}" \
+    --data-urlencode "expire=$(($(date +%s) + 7200))" \
+    --data-urlencode "groups=${TESTGROUP}" \
+    --data-urlencode "enable=1" \
+    --data-urlencode "append=1"
+
+# COMMENT-4: READ-BACK after renewal PUT — is comment preserved or wiped? (answers P1)
+pve "$PVE_ADDR/api2/json/access/users/${USERID}"
+
+# COMMENT-5: TEARDOWN
+pve -X DELETE "$PVE_ADDR/api2/json/access/users/${USERID}"
+```
+
+**Plan assumes:**
+- (a) P2 hypothesis: PVE persists `comment` byte-for-byte through POST → GET. If yes,
+  `walRollbackUser`'s ownership comparison is reliable.
+- (b) P1 hypothesis: full-replace PUT MIGHT wipe `comment` (same mechanism that wipes `groups`
+  on expire-only PUT, Probe 7). If yes, the `vault-wal:` marker would be lost on first renewal
+  and `UpdateUserRequest` would need to re-send `comment`. If no, the marker is durable for
+  the whole account lifetime with no code change.
+
+| Field | Value |
+|---|---|
+| Date run | 19 Aug 2026 |
+| USERID | `probe-cmt-*@pve` |
+| COMMENT-1 POST create — HTTP status | 200, data:null |
+| COMMENT-2 read-back comment field — value | `"vault-wal:PROBECOMMENT12345"` (byte-for-byte match) |
+| COMMENT-2 read-back groups field | `["vault-test-grp"]` |
+| COMMENT-2 expire | 1787108586 |
+| COMMENT-3 renewal PUT (comment omitted) — HTTP status | 200, data:null |
+| COMMENT-4 read-back comment after renewal — value | `"vault-wal:PROBECOMMENT12345"` (PRESERVED — unchanged) |
+| COMMENT-4 read-back groups after renewal | `["vault-test-grp"]` |
+| COMMENT-4 expire after renewal (advanced?) | 1787112186 (advanced from 1787108586 → 1787112186) |
+| COMMENT-5 DELETE — HTTP status | 200 |
+| **VERDICT P2 — comment round-trips byte-for-byte (Y/N)** | **Y — CONFIRMED on PVE 9.2.10** |
+| **VERDICT P1 — renewal PUT clears comment (Y/N)** | **N — CONFIRMED (scoped): the engine's renewal PUT (expire+groups+enable+append=1, comment omitted) leaves comment intact on PVE 9.2.10. The `vault-wal:` marker SURVIVES renewal.** |
+| Scope caveat | COMMENT-3 used `append=1`. This run does **NOT** separate "comment is exempt from full-replace in general" from "append=1 preserved it" — a PUT without `append=1` was not exercised. Because `UpdateUser` always sends `append=1`, the scoped result is sufficient for the engine's needs. General full-replace semantics for `comment` (without `append=1`) are **not tested and not relied upon**. |
+| Notes | The engine's `UpdateUser` correctly omits `comment` and sends `append=1` on every renewal — the `vault-wal:` marker persists for the entire account lifetime (creation through all renewals). No code change needed. Validates the WAL nonce-ownership scheme end-to-end. |
+
+**Raw evidence:**
+
+```text
+// COMMENT-2 read-back (immediately after POST):
+{"data":{"comment":"vault-wal:PROBECOMMENT12345","enable":1,"expire":1787108586,"groups":["vault-test-grp"],"tokens":null}}
+
+// COMMENT-4 read-back (after full-replace renewal PUT, comment omitted):
+{"data":{"comment":"vault-wal:PROBECOMMENT12345","enable":1,"expire":1787112186,"groups":["vault-test-grp"],"tokens":null}}
+```
+
+---
+
 ### Probe RENEWAL-PRESERVE — Renewal PUT preserves group membership when groups re-sent
 
 **Maps to:** M2 wording fix. The full-replace wipe is confirmed (Probe 7, `groups:[]` after
@@ -928,6 +1013,7 @@ engine depends on, its confirmation status, and the code area affected.
 | CLEAN | Group membership confers role at creation + survives renewal (both oracles) | Synthetic user in group holds PVEVMAdmin; token inherits via privsep=0; survives renewal | Group-add BROKEN via groups= (silent drop) | path_creds.go / secret_token.go / pveapi | Superseded by GROUPADD; 5-A was root@pam confound |
 | GROUPADD | Correct group-membership API + read-back assertion | groups= is single-CSV pve-groupid-list, user-side only, silently drops unresolvable w/ HTTP 200; verify via read-back | Y — CONFIRMED (single-call works; read-back via users.groups or groups.members) | pveapi CreateUser + GetUser; creds read-back; renewal re-send | Renewal re-sends expire+groups+enable+append=1; store group in InternalData; read-back assert on issue |
 | RENEWAL-PRESERVE | Renewal PUT re-sending groups preserves membership | `groups` field unchanged (present) after PUT expire+groups+enable+append=1 on a confirmed-member user | Y — CONFIRMED (renewal re-sending groups preserves membership; Probe RENEWAL-PRESERVE) | secret_token.go renew / read-back assert | Wording promoted to confirmed across AGENTS/README/ARCHITECTURE |
+| COMMENT | `comment` round-trips byte-for-byte through POST/GET (P2) AND the engine's renewal PUT (append=1, comment omitted) leaves comment intact (P1) | (a) GET returns comment byte-for-byte; (b) renewal PUT (expire+groups+enable+append=1, comment omitted) does NOT clear comment | Y — BOTH CONFIRMED on PVE 9.2.10 (Probe COMMENT, 19 Aug 2026). Renewal PUT (append=1, comment omitted) preserves comment — CONFIRMED; general full-replace semantics for comment NOT tested (no append=0 run) and not relied upon. The `vault-wal:` marker is durable for the full account lifetime under the engine's actual call shape. | pveapi walRollbackUser (ownership check); operator note in ARCHITECTURE.md | Validates WAL nonce-ownership scheme end-to-end. No code change needed. UpdateUser correctly omits comment and always sends append=1. |
 
 ## Spike Conclusion
 
@@ -956,7 +1042,12 @@ Summary of load-bearing findings that MUST shape the implementation:
    `expire`+`groups`+`enable`+`append=1` PRESERVES group membership (expire advanced from
    1786986804 → 1786990429; groups field intact). Renewal MUST re-send these fields together.
    Store the target group in lease InternalData (renewal must not depend on the role still
-   existing).
+   existing). **Probe COMMENT (19 Aug 2026):** the engine's renewal PUT (expire+groups+enable+append=1,
+   comment omitted) leaves `comment` intact — the `vault-wal:` nonce marker survives the whole account
+   lifetime under the engine's actual call shape. `UpdateUser` correctly omits `comment` and always
+   sends `append=1`; no code change needed. **Scope note:** COMMENT-3 used `append=1`; this run does
+   NOT establish general full-replace semantics for `comment` (a PUT without `append=1` was not tested).
+   The engine only sends `append=1` on renewal, so the scoped result is sufficient.
 
 5. **Permissions tree:** `GET /access/permissions` returns a propagate-flag map; `?path=` and
    `?userid=` resolve server-side. Config-time validation reads the admin token's OWN perms

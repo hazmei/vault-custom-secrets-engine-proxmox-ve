@@ -266,6 +266,8 @@ idempotency expectations. The credential (token secret) is returned
 Proxmox's own "token shown once" behavior and Vault dynamic secrets
 semantics.
 
+**HA/Standby forwarding**: the `PathOperation` sets `ForwardPerformanceStandby: true` and `ForwardPerformanceSecondary: true`. Issuance calls PVE (`CreateUser`, `CreateToken`) **before** any Vault storage write; if a standby node executed this path locally it would make the PVE calls and then forward only the storage write to the active node — producing an orphaned PVE user with no WAL entry and no lease. Forwarding the entire request to the active node before execution is the only correct fix.
+
 Response:
 ```json
 {
@@ -561,6 +563,26 @@ completes) has no surviving WAL entry because step 5 is only reached after
 step 4 (`framework.DeleteWAL`) succeeds. If step 4 fails, issuance errors
 out and the just-created user is cleaned up (best-effort delete), so
 WALRollback never faces a live returned credential.
+
+**Operator note — do not edit the `comment` field on `vault-*` synthetic users**:
+The engine writes a per-issuance `vault-wal:`-prefixed nonce into the PVE user's
+`comment` field at creation time and uses it during WAL-based crash recovery to
+verify ownership before deleting. **Confirmed PVE 9.2.10 (PVE_PROBES.md Probe
+COMMENT, 19 Aug 2026):** `comment` round-trips byte-for-byte through
+`POST /access/users` → `GET /access/users/{id}`, so the ownership comparison in
+`walRollbackUser` is reliable. Crucially, the engine's renewal `PUT /access/users/{id}`
+(expire+groups+enable+`append=1`, `comment` omitted — confirmed PVE 9.2.10, Probe COMMENT,
+19 Aug 2026) leaves `comment` intact. Because `UpdateUser` always sends `append=1`, the
+`vault-wal:` marker **survives all renewals** in practice (`UpdateUser` correctly omits
+`comment`; no code change is needed). Note: the COMMENT probe used `append=1` throughout —
+general full-replace semantics for `comment` (a PUT without `append=1`) were not tested and
+are not relied upon by the engine.
+Editing or clearing the `comment` field on any `vault-*` user in the PVE UI causes
+`walRollbackUser` to treat the user as a foreign account and skip automatic cleanup
+— because the marker persists through every renewal, this risk applies for the **full
+lease lifetime**, not just at issuance. The user leaks as a dead account until
+manually removed (the PVE `expire` backstop still prevents authentication after the
+original lease TTL).
 
 **Accepted risk**: one narrow window is NOT covered — a crash between the
 successful `DeleteWAL` (step 4) and Vault core persisting the returned

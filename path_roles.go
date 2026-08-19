@@ -1,15 +1,17 @@
 // Package proxmox — roles path: <mount>/roles/:name (POST/GET/LIST/DELETE).
 //
 // POST: Validate TTLs, realm charset, userid length budget, group existence
-//       via GetGroup (ErrGroupNotFound from HTTP 500 + body "does not exist"),
-//       Realm.AllocateUser via GetPermissions ancestor-walk, and per-group-path
-//       User.Modify check to detect --propagate 0 misconfiguration.
+//
+//	via GetGroup (ErrGroupNotFound from HTTP 500 + body "does not exist"),
+//	Realm.AllocateUser via GetPermissions ancestor-walk, and per-group-path
+//	User.Modify check to detect --propagate 0 misconfiguration.
 //
 // GET:    Return role fields.
 // LIST:   List role names under roles/.
 // DELETE: Delete role entry (does NOT revoke outstanding leases — already-issued
-//         credentials remain valid until their lease expires or is explicitly
-//         revoked; renew/revoke rely on pve_userid in lease InternalData).
+//
+//	credentials remain valid until their lease expires or is explicitly
+//	revoked; renew/revoke rely on pve_userid in lease InternalData).
 //
 // TTL helpers:
 //   - (*proxmoxRole).ttls(cfg) — fallback chain for issuance/renewal TTL inputs.
@@ -64,8 +66,6 @@ type proxmoxRole struct {
 // collapse TTL to 0 when role values are unset. This function only sets ttl/maxTTL
 // to the config default when the role value is 0 (unset). The actual capping
 // against system/mount limits is framework.CalculateTTL's responsibility.
-//
-//nolint:unused // consumed by path_creds.go in Phase 3
 func (r *proxmoxRole) ttls(cfg *proxmoxConfig) (ttl, maxTTL time.Duration) {
 	ttl = time.Duration(r.TTL) * time.Second
 	if ttl == 0 {
@@ -87,8 +87,6 @@ func (r *proxmoxRole) ttls(cfg *proxmoxConfig) (ttl, maxTTL time.Duration) {
 //   - (A, B)       → min(A,B) (both set — use stricter limit)
 //
 // Used by path_creds.go to compute effective_max_ttl stored in lease InternalData.
-//
-//nolint:unused // consumed by path_creds.go in Phase 3
 func cappedMaxTTL(roleMax, sysMax time.Duration) time.Duration {
 	switch {
 	case roleMax == 0:
@@ -217,7 +215,7 @@ func (b *backend) roleExistenceCheck(ctx context.Context, req *logical.Request, 
 //  5. Load config and build PVE client.
 //  6. GetGroup: verify group exists (ErrGroupNotFound from HTTP 500 + "does not exist").
 //  7. GetPermissions: confirm Realm.AllocateUser at /access/realm/<realm>.
-//  7b. GetPermissions: confirm User.Modify is effective at per-group path
+//     7b. GetPermissions: confirm User.Modify is effective at per-group path
 //     /access/groups/<group> (catches --propagate 0 misconfiguration).
 //  8. Store role to roles/<name>.
 func (b *backend) roleWrite(ctx context.Context, req *logical.Request, d *framework.FieldData) (*logical.Response, error) {
@@ -311,8 +309,8 @@ func (b *backend) roleWrite(ctx context.Context, req *logical.Request, d *framew
 	if realm == "" {
 		realm = "pve"
 	}
-	if err := validateRealmComponent(realm); err != nil {
-		return logical.ErrorResponse("invalid realm: %s", err), nil
+	if realmErr := validateRealmComponent(realm); realmErr != nil {
+		return logical.ErrorResponse("invalid realm: %s", realmErr), nil
 	}
 
 	// Default user_prefix if not provided.
@@ -321,16 +319,16 @@ func (b *backend) roleWrite(ctx context.Context, req *logical.Request, d *framew
 	}
 
 	// Step 3: Validate user_prefix and role name charset.
-	if err := validateUserComponent(userPrefix); err != nil {
-		return logical.ErrorResponse("invalid user_prefix: %s", err), nil
+	if prefixErr := validateUserComponent(userPrefix); prefixErr != nil {
+		return logical.ErrorResponse("invalid user_prefix: %s", prefixErr), nil
 	}
-	if err := validateUserComponent(name); err != nil {
-		return logical.ErrorResponse("invalid role name: %s", err), nil
+	if nameErr := validateUserComponent(name); nameErr != nil {
+		return logical.ErrorResponse("invalid role name: %s", nameErr), nil
 	}
 
 	// Step 4: Validate userid length budget.
-	if err := validateLengthBudget(userPrefix, name, realm); err != nil {
-		return logical.ErrorResponse("%s", err), nil
+	if budgetErr := validateLengthBudget(userPrefix, name, realm); budgetErr != nil {
+		return logical.ErrorResponse("%s", budgetErr), nil
 	}
 
 	// Step 5: Load config and build PVE client.
@@ -350,14 +348,14 @@ func (b *backend) roleWrite(ctx context.Context, req *logical.Request, d *framew
 	// Step 6: Verify group exists on the Proxmox cluster.
 	// GetGroup returns ErrGroupNotFound (HTTP 500 + body "does not exist") for
 	// missing groups. PVE never returns 404. DR-2 uses ErrGroupNotFound specifically.
-	if err := client.GetGroup(ctx, group); err != nil {
-		if errors.Is(err, pveapi.ErrGroupNotFound) {
+	if groupErr := client.GetGroup(ctx, group); groupErr != nil {
+		if errors.Is(groupErr, pveapi.ErrGroupNotFound) {
 			return logical.ErrorResponse("group %q does not exist on Proxmox cluster; create it out-of-band before defining this role", group), nil
 		}
-		if errors.Is(err, pveapi.ErrForbidden) {
-			return logical.ErrorResponse("PVE returned 403 checking group %q — admin token may lack Sys.Audit at /access/groups; %s", group, err), nil
+		if errors.Is(groupErr, pveapi.ErrForbidden) {
+			return logical.ErrorResponse("PVE returned 403 checking group %q — admin token may lack Sys.Audit at /access/groups; %s", group, groupErr), nil
 		}
-		return nil, fmt.Errorf("proxmox: GetGroup %q: %w", group, err)
+		return nil, fmt.Errorf("proxmox: GetGroup %q: %w", group, groupErr)
 	}
 
 	// Step 7: Confirm Realm.AllocateUser at /access/realm/<realm> via permissions ancestor-walk.

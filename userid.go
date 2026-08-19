@@ -134,7 +134,9 @@ func validateRealmComponent(realm string) error {
 // 64-character limit (confirmed PVE 9.2.10, commit cf651ab).
 //
 // Budget:  len(prefix) + 1 + len(role) + 1 + 8 + 1 + len(realm)
-//           prefix        -    role       -   random  @   realm
+//
+//	prefix        -    role       -   random  @   realm
+//
 // Must be <= 64.
 //
 // Call AFTER realm defaulting (so the effective realm length is used) but

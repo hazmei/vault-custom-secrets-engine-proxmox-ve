@@ -350,6 +350,9 @@ func (c *httpClient) CreateUser(ctx context.Context, req CreateUserRequest) erro
 	} else {
 		form.Set("enable", "0")
 	}
+	if req.Comment != "" {
+		form.Set("comment", req.Comment)
+	}
 
 	_, _, err := c.doRequest(ctx, http.MethodPost, "/access/users", form, false)
 	if err != nil {
@@ -376,8 +379,9 @@ func (c *httpClient) GetUser(ctx context.Context, userid string) (UserInfo, erro
 	}
 
 	info := UserInfo{
-		Enable: resp.Data.Enable != 0,
-		Expire: resp.Data.Expire,
+		Enable:  resp.Data.Enable != 0,
+		Expire:  resp.Data.Expire,
+		Comment: resp.Data.Comment,
 	}
 	if resp.Data.Groups != "" {
 		// PVE returns groups as a comma-separated string.

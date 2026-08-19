@@ -74,6 +74,11 @@ type CreateUserRequest struct {
 	Expire int64
 	// Enable should always be true for freshly created lease users.
 	Enable bool
+	// Comment is an optional free-text annotation written to PVE's user comment
+	// field. The issuance path writes the per-attempt WAL nonce here so that
+	// walRollbackUser can verify ownership before deleting (prevents deleting a
+	// foreign user that coincidentally holds the same userid).
+	Comment string
 }
 
 // UpdateUserRequest carries the parameters for PUT /access/users/{userid}.
@@ -105,6 +110,10 @@ type UserInfo struct {
 	Enable bool
 	// Expire is the Unix epoch expiry (0 means no expiry).
 	Expire int64
+	// Comment is the free-text annotation stored on the user account.
+	// The issuance path writes the per-attempt WAL nonce into this field so
+	// walRollbackUser can verify ownership (nonce match) before deleting.
+	Comment string
 }
 
 // versionResponse is the JSON shape of GET /version.
@@ -135,9 +144,10 @@ type pveErrorBody struct {
 // userResponse is the JSON shape of GET /access/users/{userid}.
 type userResponse struct {
 	Data struct {
-		Groups string `json:"groups"` // comma-separated group list
-		Enable int    `json:"enable"`
-		Expire int64  `json:"expire"`
+		Groups  string `json:"groups"` // comma-separated group list
+		Enable  int    `json:"enable"`
+		Expire  int64  `json:"expire"`
+		Comment string `json:"comment"` // free-text annotation; used for WAL nonce ownership check
 	} `json:"data"`
 }
 
