@@ -11,6 +11,7 @@ package proxmox
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -221,7 +222,7 @@ func TestConfigWrite_GetVersion401_RejectedWithAuthDiagnostic(t *testing.T) {
 	ctx := context.Background()
 	b, storage := newTestBackend(t, func(mc *pveapi.MockClient) {
 		mc.GetVersionFn = func(_ context.Context) (string, error) {
-			return "", pveapi.ErrUnauthenticated
+			return "", fmt.Errorf("wrapped: %w", pveapi.ErrUnauthenticated)
 		}
 	})
 
@@ -261,7 +262,7 @@ func TestConfigWrite_GetPermissions401_RejectedWithAuthDiagnostic(t *testing.T) 
 	ctx := context.Background()
 	b, storage := newTestBackend(t, func(mc *pveapi.MockClient) {
 		mc.GetPermissionsFn = func(_ context.Context) (pveapi.PermissionTree, error) {
-			return nil, pveapi.ErrUnauthenticated
+			return nil, fmt.Errorf("wrapped: %w", pveapi.ErrUnauthenticated)
 		}
 	})
 

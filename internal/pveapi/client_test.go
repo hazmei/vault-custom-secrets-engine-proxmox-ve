@@ -38,6 +38,45 @@ func makeTestClient(t *testing.T, serverURL, tokenID, tokenSecret string) Client
 	return client
 }
 
+type unsafeUpdateUserCase struct {
+	name       string
+	req        UpdateUserRequest
+	wantReason string
+}
+
+var unsafeUpdateUserCases = []unsafeUpdateUserCase{
+	{
+		name:       "expire zero",
+		req:        UpdateUserRequest{UserID: "vault-test@pve", Expire: 0, Groups: "grp", Enable: true, Append: true},
+		wantReason: "expire=0",
+	},
+	{
+		name:       "expire negative",
+		req:        UpdateUserRequest{UserID: "vault-test@pve", Expire: -1, Groups: "grp", Enable: true, Append: true},
+		wantReason: "expire=-1",
+	},
+	{
+		name:       "groups empty",
+		req:        UpdateUserRequest{UserID: "vault-test@pve", Expire: 999, Groups: "", Enable: true, Append: true},
+		wantReason: "groups is empty",
+	},
+	{
+		name:       "groups whitespace",
+		req:        UpdateUserRequest{UserID: "vault-test@pve", Expire: 999, Groups: "   ", Enable: true, Append: true},
+		wantReason: "groups is empty",
+	},
+	{
+		name:       "enable false",
+		req:        UpdateUserRequest{UserID: "vault-test@pve", Expire: 999, Groups: "grp", Enable: false, Append: true},
+		wantReason: "enable=false",
+	},
+	{
+		name:       "append false",
+		req:        UpdateUserRequest{UserID: "vault-test@pve", Expire: 999, Groups: "grp", Enable: true, Append: false},
+		wantReason: "append=false",
+	},
+}
+
 // TestClientAuthHeaderFormat asserts the Authorization header is sent in
 // the correct PVEAPIToken format on every request.
 func TestClientAuthHeaderFormat(t *testing.T) {
@@ -359,44 +398,7 @@ func TestClassifyPVEErrorIntegration(t *testing.T) {
 func TestUpdateUserRejectsUnsafeRequestsBeforeHTTP(t *testing.T) {
 	t.Parallel()
 
-	tests := []struct {
-		name       string
-		req        UpdateUserRequest
-		wantReason string
-	}{
-		{
-			name:       "expire zero",
-			req:        UpdateUserRequest{UserID: "vault-test@pve", Expire: 0, Groups: "grp", Enable: true, Append: true},
-			wantReason: "expire=0",
-		},
-		{
-			name:       "expire negative",
-			req:        UpdateUserRequest{UserID: "vault-test@pve", Expire: -1, Groups: "grp", Enable: true, Append: true},
-			wantReason: "expire=-1",
-		},
-		{
-			name:       "groups empty",
-			req:        UpdateUserRequest{UserID: "vault-test@pve", Expire: 999, Groups: "", Enable: true, Append: true},
-			wantReason: "groups is empty",
-		},
-		{
-			name:       "groups whitespace",
-			req:        UpdateUserRequest{UserID: "vault-test@pve", Expire: 999, Groups: "   ", Enable: true, Append: true},
-			wantReason: "groups is empty",
-		},
-		{
-			name:       "enable false",
-			req:        UpdateUserRequest{UserID: "vault-test@pve", Expire: 999, Groups: "grp", Enable: false, Append: true},
-			wantReason: "enable=false",
-		},
-		{
-			name:       "append false",
-			req:        UpdateUserRequest{UserID: "vault-test@pve", Expire: 999, Groups: "grp", Enable: true, Append: false},
-			wantReason: "append=false",
-		},
-	}
-
-	for _, tc := range tests {
+	for _, tc := range unsafeUpdateUserCases {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -435,34 +437,7 @@ func TestMockUpdateUserRejectsUnsafeRequestsBeforeLog(t *testing.T) {
 		},
 	}
 
-	tests := []struct {
-		name       string
-		req        UpdateUserRequest
-		wantReason string
-	}{
-		{
-			name:       "expire zero",
-			req:        UpdateUserRequest{UserID: "vault-test@pve", Expire: 0, Groups: "grp", Enable: true, Append: true},
-			wantReason: "expire=0",
-		},
-		{
-			name:       "groups empty",
-			req:        UpdateUserRequest{UserID: "vault-test@pve", Expire: 999, Groups: "", Enable: true, Append: true},
-			wantReason: "groups is empty",
-		},
-		{
-			name:       "enable false",
-			req:        UpdateUserRequest{UserID: "vault-test@pve", Expire: 999, Groups: "grp", Enable: false, Append: true},
-			wantReason: "enable=false",
-		},
-		{
-			name:       "append false",
-			req:        UpdateUserRequest{UserID: "vault-test@pve", Expire: 999, Groups: "grp", Enable: true, Append: false},
-			wantReason: "append=false",
-		},
-	}
-
-	for _, tc := range tests {
+	for _, tc := range unsafeUpdateUserCases {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			err := mc.UpdateUser(context.Background(), tc.req)
