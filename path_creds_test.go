@@ -155,38 +155,6 @@ func (s *failingDeleteStorage) DeleteAttempts() int {
 	return int(atomic.LoadInt32(&s.deleteCount))
 }
 
-func setupBackendWithStorageForCreds(t *testing.T, ctx context.Context, mc *pveapi.MockClient) (*backend, logical.Storage) {
-	t.Helper()
-	innerConfig := logical.TestBackendConfig()
-	innerConfig.StorageView = &logical.InmemStorage{}
-	b, err := newBackend(ctx, innerConfig)
-	if err != nil {
-		t.Fatalf("newBackend: %v", err)
-	}
-	b.newClient = func(_ *proxmoxConfig) (pveapi.Client, error) {
-		return mc, nil
-	}
-	storage := innerConfig.StorageView
-	if _, err := writeConfig(ctx, b, storage, validConfigData()); err != nil {
-		t.Fatalf("writeConfig: %v", err)
-	}
-	if _, err := writeRole(ctx, b, storage, "testrole", credRoleData()); err != nil {
-		t.Fatalf("writeRole: %v", err)
-	}
-	return b, storage
-}
-
-func newPrivilegedMockClient() *pveapi.MockClient {
-	mc := &pveapi.MockClient{}
-	mc.GetPermissionsResult = pveapi.PermissionTree{
-		"/access/groups":                 {"User.Modify": 1, "Sys.Audit": 1},
-		"/access/groups/vault-vm-admins": {"User.Modify": 1},
-		"/access/realm/pve":              {"Realm.AllocateUser": 1},
-	}
-	mc.Groups = map[string]bool{"vault-vm-admins": true}
-	return mc
-}
-
 // ── Happy path ────────────────────────────────────────────────────────────────
 
 // TestCredsRead_HappyPath verifies the full happy-path issuance:
@@ -326,8 +294,10 @@ func TestCredsRead_HappyPath(t *testing.T) {
 func TestCredsRead_PutWALFailure_BeforeCreateUser(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	mc := newPrivilegedMockClient()
-	b, storage := setupBackendWithStorageForCreds(t, ctx, mc)
+	var mc *pveapi.MockClient
+	b, storage := setupBackendForCreds(t, "testrole", credRoleData(), func(m *pveapi.MockClient) {
+		mc = m
+	})
 	failStorage := &failingPutStorage{Storage: storage, failPrefix: framework.WALPrefix}
 
 	resp, err := b.HandleRequest(ctx, &logical.Request{Operation: logical.ReadOperation, Path: "creds/testrole", Storage: failStorage})
@@ -558,11 +528,13 @@ func TestCredsRead_ErrConflict_Retry(t *testing.T) {
 func TestCredsRead_ErrConflict_DeleteWALFailure(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	mc := newPrivilegedMockClient()
-	mc.CreateUserFn = func(_ context.Context, _ pveapi.CreateUserRequest) error {
-		return fmt.Errorf("pveapi: CreateUser: %w", pveapi.ErrConflict)
-	}
-	b, storage := setupBackendWithStorageForCreds(t, ctx, mc)
+	var mc *pveapi.MockClient
+	b, storage := setupBackendForCreds(t, "testrole", credRoleData(), func(m *pveapi.MockClient) {
+		mc = m
+		m.CreateUserFn = func(_ context.Context, _ pveapi.CreateUserRequest) error {
+			return fmt.Errorf("pveapi: CreateUser: %w", pveapi.ErrConflict)
+		}
+	})
 	failStorage := &failingDeleteStorage{Storage: storage, failPrefix: framework.WALPrefix}
 
 	resp, err := b.HandleRequest(ctx, &logical.Request{Operation: logical.ReadOperation, Path: "creds/testrole", Storage: failStorage})
@@ -915,9 +887,11 @@ func TestCredsRead_TokenCreateFailure(t *testing.T) {
 func TestCredsRead_CompensationDeleteWALFailure_RetainsWAL(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	mc := newPrivilegedMockClient()
-	mc.CreateTokenError = errors.New("simulated token creation failure")
-	b, storage := setupBackendWithStorageForCreds(t, ctx, mc)
+	var mc *pveapi.MockClient
+	b, storage := setupBackendForCreds(t, "testrole", credRoleData(), func(m *pveapi.MockClient) {
+		mc = m
+		m.CreateTokenError = errors.New("simulated token creation failure")
+	})
 	failStorage := &failingDeleteStorage{Storage: storage, failPrefix: framework.WALPrefix}
 
 	resp, err := b.HandleRequest(ctx, &logical.Request{Operation: logical.ReadOperation, Path: "creds/testrole", Storage: failStorage})

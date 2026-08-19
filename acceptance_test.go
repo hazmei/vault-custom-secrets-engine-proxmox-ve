@@ -179,9 +179,44 @@ func TestAccInsufficientPrivileges(t *testing.T) {
 	if resp == nil || !resp.IsError() {
 		t.Fatal("expected insufficient PVE token to be rejected by config validation")
 	}
-	if !strings.Contains(strings.ToLower(resp.Error().Error()), "privilege") && !strings.Contains(strings.ToLower(resp.Error().Error()), "permission") {
+	if !isAccInsufficientPrivilegeError(resp.Error().Error()) {
 		t.Fatalf("expected clear privilege/permission validation error, got: %s", resp.Error())
 	}
+}
+
+func TestAccInsufficientPrivilegeErrorFragments(t *testing.T) {
+	cases := []string{
+		"admin token lacks User.Modify at /access/groups (or an ancestor with propagate=1)",
+		"admin token lacks Sys.Audit at /access/groups (or an ancestor with propagate=1)",
+		"admin token validation returned empty permission tree",
+		"GET /access/permissions returned HTTP 403",
+	}
+	for _, tc := range cases {
+		if !isAccInsufficientPrivilegeError(tc) {
+			t.Fatalf("isAccInsufficientPrivilegeError(%q) = false; want true", tc)
+		}
+	}
+}
+
+func isAccInsufficientPrivilegeError(message string) bool {
+	text := strings.ToLower(message)
+	fragments := []string{
+		"lacks user.modify",
+		"lacks sys.audit",
+		"permission tree",
+		"http 403",
+		"status=403",
+		"403",
+		"lacks required privileges",
+		"privilege",
+		"permission",
+	}
+	for _, fragment := range fragments {
+		if strings.Contains(text, fragment) {
+			return true
+		}
+	}
+	return false
 }
 
 func TestAccWALRollback(t *testing.T) {
@@ -340,6 +375,11 @@ func requireAccEnv(t *testing.T) accEnv {
 	if err != nil {
 		t.Fatalf("PVE_TLS_SKIP_VERIFY must parse as bool: %v", err)
 	}
+	behaviorPath := envDefault(accBehaviorPathEnv, accDefaultBehavior)
+	behaviorMarker := os.Getenv("PVE_BEHAVIORAL_MARKER")
+	if err := validateAccBehaviorEnv(os.Getenv(accBehaviorPathEnv), behaviorPath, behaviorMarker); err != nil {
+		t.Fatal(err)
+	}
 	return accEnv{
 		Address:                 os.Getenv("PVE_ADDR"),
 		TokenID:                 os.Getenv("PVE_TOKEN_ID"),
@@ -347,9 +387,9 @@ func requireAccEnv(t *testing.T) accEnv {
 		Group:                   os.Getenv("PVE_TEST_GROUP"),
 		CACert:                  os.Getenv("PVE_CA_CERT"),
 		TLSSkipVerify:           skipVerify,
-		BehaviorPath:            envDefault(accBehaviorPathEnv, accDefaultBehavior),
+		BehaviorPath:            behaviorPath,
 		BehaviorMethod:          strings.ToUpper(envDefault("PVE_BEHAVIORAL_METHOD", http.MethodGet)),
-		BehaviorMarker:          os.Getenv("PVE_BEHAVIORAL_MARKER"),
+		BehaviorMarker:          behaviorMarker,
 		NegativePath:            os.Getenv("PVE_NEGATIVE_AUTH_PATH"),
 		NegativeMethod:          strings.ToUpper(envDefault("PVE_NEGATIVE_AUTH_METHOD", http.MethodGet)),
 		ACLCanaryPath:           os.Getenv("PVE_ACL_CANARY_PATH"),
@@ -358,6 +398,29 @@ func requireAccEnv(t *testing.T) accEnv {
 		InsufficientTokenID:     os.Getenv("PVE_INSUFFICIENT_TOKEN_ID"),
 		InsufficientTokenSecret: os.Getenv("PVE_INSUFFICIENT_TOKEN_SECRET"),
 	}
+}
+
+func TestValidateAccBehaviorEnvRequiresMarkerForCustomPath(t *testing.T) {
+	err := validateAccBehaviorEnv("/nodes", "/nodes", "")
+	if err == nil {
+		t.Fatal("expected custom PVE_BEHAVIORAL_PATH without marker to fail")
+	}
+	if !strings.Contains(err.Error(), "PVE_BEHAVIORAL_MARKER") || !strings.Contains(err.Error(), "TestAccLifecycle") {
+		t.Fatalf("validation error = %q; want marker and lifecycle context", err.Error())
+	}
+}
+
+func TestValidateAccBehaviorEnvAllowsDefaultSmokeWithoutMarker(t *testing.T) {
+	if err := validateAccBehaviorEnv("", accDefaultBehavior, ""); err != nil {
+		t.Fatalf("default behavior without marker should remain an auth smoke test: %v", err)
+	}
+}
+
+func validateAccBehaviorEnv(rawPath, behaviorPath, behaviorMarker string) error {
+	if rawPath != "" && behaviorPath != accDefaultBehavior && behaviorMarker == "" {
+		return fmt.Errorf("%s=%q requires PVE_BEHAVIORAL_MARKER so TestAccLifecycle cannot skip after credential issuance", accBehaviorPathEnv, behaviorPath)
+	}
+	return nil
 }
 
 func accConcurrentWorkers(t *testing.T) int {
@@ -554,10 +617,14 @@ func deleteAccUser(t *testing.T, ctx context.Context, client pveapi.Client, user
 		if errors.Is(err, pveapi.ErrUserNotFound) {
 			return
 		}
-		lastErr = err
+		if err == nil {
+			lastErr = fmt.Errorf("user %q still exists after DeleteUser returned success", userid)
+		} else {
+			lastErr = err
+		}
 		time.Sleep(time.Duration(attempt+1) * 200 * time.Millisecond)
 	}
-	t.Fatalf("cleanup failed to confirm user %q deleted: %v", userid, lastErr)
+	t.Errorf("cleanup failed to confirm user %q deleted: %v", userid, lastErr)
 }
 
 func assertAccUserInGroup(t *testing.T, ctx context.Context, client pveapi.Client, userid, group string) {
@@ -629,7 +696,7 @@ func newAccHTTPClient(t *testing.T, env accEnv) *accHTTPClient {
 
 func assertAccPositiveBehavior(t *testing.T, ctx context.Context, env accEnv, tokenID, tokenSecret string) {
 	t.Helper()
-	status, body := assertAccTokenStatus(t, ctx, env, tokenID, tokenSecret, env.BehaviorMethod, env.BehaviorPath, http.StatusOK)
+	_, body := assertAccTokenStatus(t, ctx, env, tokenID, tokenSecret, env.BehaviorMethod, env.BehaviorPath, http.StatusOK)
 	if env.BehaviorMarker == "" {
 		if env.BehaviorPath == accDefaultBehavior {
 			t.Logf("positive behavior marker not configured; %s %s is auth smoke only, not proof of group-derived privilege", env.BehaviorMethod, env.BehaviorPath)
@@ -637,7 +704,7 @@ func assertAccPositiveBehavior(t *testing.T, ctx context.Context, env accEnv, to
 		}
 		t.Skipf("configured positive behavior endpoint %s %s requires PVE_BEHAVIORAL_MARKER so HTTP 200 is not treated as proof", env.BehaviorMethod, env.BehaviorPath)
 	}
-	if status == http.StatusOK && !strings.Contains(string(body), env.BehaviorMarker) {
+	if !strings.Contains(string(body), env.BehaviorMarker) {
 		t.Fatalf("positive behavior endpoint %s %s response did not contain PVE_BEHAVIORAL_MARKER %q; body=%s", env.BehaviorMethod, env.BehaviorPath, env.BehaviorMarker, redactBody(body))
 	}
 }
