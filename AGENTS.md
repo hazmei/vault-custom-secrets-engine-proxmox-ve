@@ -4,9 +4,9 @@ Instructions for AI coding agents working on this Vault secrets engine plugin.
 
 ## Project State
 
-- **Greenfield / design phase.** `docs/ARCHITECTURE.md` is the source of truth — READ IT before implementing anything.
-- No Go code, no `go.mod`, no build/test/lint/CI config, and no `.gitignore` exist yet. Bootstrap these before generating artifacts. Add a Go `.gitignore` before creating build artifacts.
-- Target: Proxmox VE 9.2.10. This is a Vault secrets engine plugin using `hashicorp/vault/sdk`.
+- **Active implementation** through Phase 3 (dynamic creds issuance + lease renewal/revocation). `docs/ARCHITECTURE.md` and `docs/IMPLEMENTATION_PLAN.md` are the authoritative design — READ THEM before extending.
+- Go module (`go.mod`), `.gitignore`, and source exist: `backend.go`, `path_config.go`, `path_roles.go`, `path_creds.go`, `secret_token.go`, `wal.go`, `internal/pveapi/*`, with unit tests throughout.
+- Target: Proxmox VE 9.2.10, using `hashicorp/vault/sdk`.
 
 ## Critical Gotchas (Agents Get These Wrong)
 
@@ -19,6 +19,10 @@ Instructions for AI coding agents working on this Vault secrets engine plugin.
 - **`creds/:role` is a Vault ReadOperation that MUTATES state** (provisions a new PVE user+token per call). Standard dynamic-secrets convention; don't "fix" it to a write.
 
 - **Revocation is idempotent, but keyed on the BODY STRING, not status.** PVE returns HTTP 500 + body `"no such user"` for a DELETE of a nonexistent user (NOT 404 — confirmed PVE 9.2.10, PVE_PROBES.md Probe 3). Treat body `"no such user"` as success.
+
+- **WAL crash-recovery rollback is NONCE-gated, NOT body-string-gated (distinct from revoke).** Each issuance attempt generates `nonce = walCommentPrefix + random` (`walCommentPrefix = "vault-wal:"`), stored in BOTH the WAL entry (`walUser.Nonce`) AND the PVE user's `comment` field (`CreateUserRequest.Comment`). `walRollbackUser` verifies ownership before deleting: `GetUser` first → `ErrUserNotFound` → nil; `comment == nonce` → our orphan → `DeleteUser`; comment mismatch/empty → `Error` log + return nil (DROP the WAL entry WITHOUT deleting the foreign user — this closes the stale-WAL foreign-user-deletion class, incl. the crash-in-window case); transient `GetUser` error → return err (retry). The revoke path (`secretTokenRevoke`) is separate and still keys idempotency purely on body `"no such user"`.
+
+- **PVE `comment` round-trips byte-for-byte (PVE_PROBES.md Probe COMMENT, confirmed 9.2.10)** and survives the engine's renewal PUT (`append=1`, comment omitted — confirmed 19 Aug 2026). The WAL nonce marker relies on this. Operators MUST NOT hand-edit the `comment` field on `vault-*` users — it defeats WAL-based cleanup (`walRollbackUser` will treat the user as foreign and skip deletion). Note: only the `append=1` renewal shape was probed; general full-replace semantics for `comment` (a PUT without `append=1`) were not tested and are not relied upon.
 
 - **PVE's error contract is body-string, not status-code.** Duplicate user → HTTP **500** body `"already exists"` (in `message`); missing user/group (GET/DELETE) → HTTP **500** body `"no such user"`/`"does not exist"` (in `message`); duplicate tokenid → HTTP **400** with the string `"Token already exists"` in **`errors.tokenid`, NOT `message`** (`message` is just `"Parameter verification failed."` — PVE_PROBES.md Probe 6b). Map errors on the **RAW FULL decoded body** (the `message` string AND all values under the `errors` object), NOT on the `message` field alone, and NOT on 404/409. Only 403 (permission denied) is a genuine status to branch on.
 
@@ -42,16 +46,24 @@ See `docs/ARCHITECTURE.md` for full detail.
 ## Credential Lifecycle (Order Matters)
 
 **Create:**
-1. `POST /access/users` (userid `{user_prefix}-{role}-{random}@{realm}`, no password, `groups=<role.group>` to add the synthetic user to the operator-pre-created PVE group at creation time, `expire=<lease_expiry_unix>`)
+1. `POST /access/users` (userid `{user_prefix}-{role}-{random}@{realm}`, no password, `groups=<role.group>` to add the synthetic user to the operator-pre-created PVE group at creation time, `expire=<lease_end_unix + 60>` (60s grace, const `expireGraceSecs`, absorbs Vault↔PVE clock drift), `comment=<nonce>` where `nonce = walCommentPrefix + random` — ownership marker for WAL rollback). Per-lease tokenid is the fixed const `leaseTokenID="lease"` (scoped per unique userid; no cross-lease collision).
 2. `GET /access/users/{userid}` — READ-BACK assert `groups` contains `<role.group>` (PVE silently drops unresolvable groups with HTTP 200 on modify/append; on create, PVE instead REJECTS with HTTP 500 `"no such group"` — the read-back assertion covers both paths) before minting token.
 3. `POST .../token/{tokenid}` with `privsep=0`
 
+**Renew:**
+1. Extract `pve_userid`+`group`+`effective_max_ttl`+`role_name`+`expire` from InternalData.
+2. Compute new TTL via `framework.CalculateTTL` (role.ttl via `role_name` if the role exists, else the lease's current TTL; positive requested increment wins; capped at `effective_max_ttl`).
+3. Pre-update `GetUser`: REFUSE renewal if the user is disabled (`Enable == false`) — do NOT silently re-enable (an operator may have disabled it for incident response). TOCTOU window noted; no conditional-update PVE API exists.
+4. `PUT /access/users/{userid}` full-replace: `expire`+`groups`+`enable`+`append=1`.
+5. Read-back `GetUser`: HARD-fail if the group is missing; soft `Warn` if `len(groups) != 1`.
+6. Rewrite `expire` in InternalData; return the updated Secret.
+
+(There is no standalone PVE user-update path; renewal reuses the full-replace PUT.)
+
 **Revoke:**
-Single `DELETE /access/users/{userid}` — cascades to token(s) + group memberships + ACL. Idempotency keys on body `"no such user"` (HTTP 500), not 404. Store `pve_userid` AND `group` in lease internalData (group needed for full-replace renewal).
+Single `DELETE /access/users/{userid}` — cascades to token(s) + group memberships + ACL. Idempotency keys on body `"no such user"` (HTTP 500), not 404. Store the full lease InternalData set: `pve_userid`, `group` (for full-replace renewal), `effective_max_ttl` (int64 ns; renewal ceiling), `role_name` (renewal TTL fallback), and `expire` (Unix epoch; rewritten on each renewal). `role_name` is optional on pre-existing leases (absent → renewal falls back to the lease's current TTL).
 
-**No update operation.**
-
-**Mid-create failure:** Best-effort delete the orphaned user (only one post-user step now: token creation). Userid collision (HTTP 500 body "already exists", not 409) → For each suffix attempt: `walID, _ := framework.PutWAL(ctx, storage, kind, walUser{UserID: userid})` (PutWAL RETURNS an id) → attempt `POST /access/users` → on ErrConflict (body "already exists"), call `framework.DeleteWAL(ctx, storage, walID)` with THAT id (the SDK keys WALs by the returned id, NOT by userid), generate a new random suffix (8-character base32, ~40 bits entropy), and loop (bounded retry). On success, proceed to token creation, then DeleteWAL(walID), then return Secret. ALL work (including WAL delete) happens BEFORE returning the Secret. **WAL cleanup discipline**: after a mid-create failure, only DeleteWAL if the compensating DeleteUser returned nil or ErrNotFound; if DeleteUser fails transiently, LEAVE the WAL entry and return the error so walRollback retries (never orphan a user with no WAL entry). Token conflict (HTTP 400 with "Token already exists" in `errors.tokenid`, not 409) → not expected (each lease has a unique fresh userid, and token ids are scoped per-user; if it occurs, treat it exactly like any other CreateToken error — best-effort DeleteUser, then DeleteWAL ONLY if DeleteUser returned nil or ErrNotFound; if DeleteUser fails transiently, leave the WAL entry for walRollback to retry). Surface as internal error.
+**Mid-create failure:** Best-effort delete the orphaned user (only one post-user step now: token creation). Userid collision (HTTP 500 body "already exists", not 409) → For each suffix attempt: `walID, _ := framework.PutWAL(ctx, storage, kind, walUser{UserID: userid, Nonce: nonce})` (PutWAL RETURNS an id) → attempt `POST /access/users` → on ErrConflict (body "already exists"), call `framework.DeleteWAL(ctx, storage, walID)` with THAT id (the SDK keys WALs by the returned id, NOT by userid); if `DeleteWAL` itself FAILS, HARD-RETURN (abort issuance, surface the error) — safe because the nonce/comment ownership check prevents `walRollback` from deleting the foreign colliding user. On `DeleteWAL` success, generate a new random suffix (8-character base32, ~40 bits entropy), and loop (bounded, `maxCollisionRetries = 5`). On success, proceed to token creation, then DeleteWAL(walID), then return Secret. ALL work (including WAL delete) happens BEFORE returning the Secret. **WAL cleanup discipline**: after a mid-create failure, only DeleteWAL if the compensating DeleteUser returned nil or ErrNotFound; if DeleteUser fails transiently, LEAVE the WAL entry and return the error so walRollback retries (never orphan a user with no WAL entry). Token conflict (HTTP 400 with "Token already exists" in `errors.tokenid`, not 409) → not expected (each lease has a unique fresh userid, and token ids are scoped per-user; if it occurs, treat it exactly like any other CreateToken error — best-effort DeleteUser, then DeleteWAL ONLY if DeleteUser returned nil or ErrNotFound; if DeleteUser fails transiently, leave the WAL entry for walRollback to retry). Surface as internal error.
 
 ## Admin (Root) Token Privileges
 
@@ -87,14 +99,17 @@ The admin token never needs to hold the delegated roles — those are bound to o
 - Computed via `framework.CalculateTTL` (Locked Decision #8) — **NOT** a hand-rolled `min()`, which mishandles unset-vs-zero (an unset value of 0 would collapse the effective TTL to 0 rather than falling back).
 - There is no issuance-time requested TTL (`creds/:role` declares no `ttl` field); the requested `increment` applies only on lease renewal.
 - `effective_max_ttl` is captured in lease internalData at issue time and governs renewals.
+- **Renewal-time `backendTTL` (no explicit increment):** `role.ttl` (loaded via `role_name`) if the role still exists; else `req.Secret.TTL` (the lease's CURRENT TTL) — NOT the mount default — so deleted-role or pre-`role_name` leases renew coherently. A positive requested increment overrides via `CalculateTTL`.
 
 ## Testing Convention
 
 - **Acceptance tests:** Prefix `TestAcc*`, gated by `VAULT_ACC=1` (HashiCorp convention), run against a containerized/dev Proxmox — gated CI job, not every PR.
-- **Unit tests** use a mocked Proxmox API client.
-- Once code exists: `go build ./...`, `go test ./...`, `VAULT_ACC=1 go test ./... -run TestAcc`, `golangci-lint run` (none defined yet — establish them).
+- **Unit tests** use a mocked PVE client (`internal/pveapi/mock.go`).
+- Run: `go build ./...`, `go test ./...`, `VAULT_ACC=1 go test ./... -run TestAcc` (acceptance, gated), `golangci-lint run`.
 
 ## Docs
 
 - `docs/ARCHITECTURE.md` — full design (paths, storage schema, lifecycle, error/compensation, TTLs). Authoritative.
+- `docs/IMPLEMENTATION_PLAN.md` — phased implementation tasks and locked decisions.
+- `docs/PVE_PROBES.md` — PVE behavior probe evidence (confirmed on PVE 9.2.10).
 - `README.md` — project overview and usage examples.
