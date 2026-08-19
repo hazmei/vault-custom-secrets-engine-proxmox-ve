@@ -213,7 +213,7 @@ func readResponseBody(body io.Reader) ([]byte, error) {
 		return nil, err
 	}
 	if len(data) > maxResponseBodyBytes {
-		return nil, fmt.Errorf("response body too large: exceeds %d bytes", maxResponseBodyBytes)
+		return nil, fmt.Errorf("%w: exceeds %d bytes", ErrResponseTooLarge, maxResponseBodyBytes)
 	}
 	return data, nil
 }

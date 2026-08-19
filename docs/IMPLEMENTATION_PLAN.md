@@ -373,7 +373,7 @@ type UserInfo struct {
 - HTTP client configured with `tls_skip_verify` or `ca_cert`.
 - Auth header: `Authorization: PVEAPIToken=<token_id>=<token_secret>` (where `token_id` is already in `<user>@<realm>!<tokenid>` format from config).
 - Base URL: append `/api2/json` to the configured address as given (do not prepend a scheme; the configured `address` already includes the scheme, e.g. `https://pve.example.com:8006`).
-- **Error mapping is BODY-STRING based for PVE business errors, with HTTP 401/403 handled as genuine statuses first** (confirmed PVE 9.2.10, PVE_PROBES.md Probes 2–6b). PVE returns HTTP 500 (and 400 for token conflict) with an error body for conditions REST would code 404/409. **The match must run against the RAW FULL BODY, not just the `message` field**: the duplicate-tokenid string `"Token already exists"` lives in `errors.tokenid`, NOT in `message` (Probe 6b: `{"message":"Parameter verification failed.\n","data":null,"errors":{"tokenid":"Token already exists."}}`). A helper `classifyPVEError(status int, body []byte) error` checks HTTP 401/403 before body-string classification, then searches the entire decoded body — the top-level `message` string AND every value under the `errors` object — for the following substrings (case-insensitive, tolerant of trailing `\n` and embedded quoted ids). Implementation: decode into `struct{ Message string; Errors map[string]string }`, then concatenate `Message` + all `Errors` values into one haystack (or simply substring-scan the raw `[]byte`), and match:
+- **Error mapping is BODY-STRING based for PVE business errors, with HTTP 401/403 handled as genuine statuses before body-string classification** (confirmed PVE 9.2.10, PVE_PROBES.md Probes 2–6b). PVE returns HTTP 500 (and 400 for token conflict) with an error body for conditions REST would code 404/409. **The match must run against the complete bounded body, not just the `message` field**: the duplicate-tokenid string `"Token already exists"` lives in `errors.tokenid`, NOT in `message` (Probe 6b: `{"message":"Parameter verification failed.\n","data":null,"errors":{"tokenid":"Token already exists."}}`). The client first reads the body with N+1 truncation detection (`maxResponseBodyBytes+1`) and returns `ErrResponseTooLarge` before JSON parsing or business-error classification if the cap is exceeded. Only complete bounded bodies reach `classifyPVEError(status int, body []byte) error`, which checks HTTP 401/403 before body-string matching, then searches the decoded body — the top-level `message` string AND every value under the `errors` object — for the following substrings (case-insensitive, tolerant of trailing `\n` and embedded quoted ids). Implementation: decode into `struct{ Message string; Errors map[string]string }`, then concatenate `Message` + all `Errors` values into one haystack, falling back to raw-body matching only for malformed/plain-text responses or empty structured fields, and match:
   - HTTP 401 (any body, including empty) → `ErrUnauthenticated` (genuine status; check before body-string classification)
   - HTTP 403 (any) → `ErrForbidden` (403 IS a real status)
   - body contains `"already exists"` (user create, HTTP 500) → `ErrConflict`
@@ -382,7 +382,7 @@ type UserInfo struct {
   - body contains `"does not exist"` (GET group, HTTP 500) → `ErrGroupNotFound`
   - body contains `"no such group"` (create user with nonexistent group, HTTP 500) → `ErrGroupNotFound`
   - everything else → wrapped error carrying status + endpoint (redact body for token endpoints).
-  Do NOT branch on 404/409 — PVE never returns them for these conditions. Vault core already retries revoke/renew on any returned error, so no separate retryable type is needed (see `errors.go`).
+  Do NOT branch on 404/409 — PVE never returns them for these conditions. Oversized responses deliberately fail closed as `ErrResponseTooLarge`: for example, an oversized HTTP 500 DELETE response that contains `"no such user"` must not become `ErrUserNotFound`/idempotent revocation success unless the full body fits inside the cap. Vault core already retries revoke/renew on any returned error, so no separate retryable type is needed (see `errors.go`).
 
 **Form-encoding rules (both are silent-failure traps)**:
 - `privsep` MUST be serialized as the literal `0` on `POST /access/users/{userid}/token/{tokenid}` — never omitted. A Go `bool` written with a "skip zero value" encoder drops the field, and PVE then defaults to `privsep=1`, yielding a token with an empty ACL and zero effective permissions. Build the form with explicit `url.Values{"privsep": {"0"}}`-style writes, not struct-tag omitempty encoding.
@@ -432,6 +432,7 @@ var ErrGroupNotFound = errors.New("pveapi: group not found") // body "does not e
 var ErrConflict      = errors.New("pveapi: conflict")        // body "already exists" (HTTP 500) / "Token already exists" (HTTP 400)
 var ErrUnauthenticated = errors.New("pveapi: unauthenticated") // HTTP 401 (genuine status; expired/revoked/invalid token)
 var ErrForbidden     = errors.New("pveapi: forbidden")       // HTTP 403 (genuine status)
+var ErrResponseTooLarge = errors.New("pveapi: response body too large") // response exceeds 1 MiB cap before parsing/classification
 ```
 
 No `RetryableError` type: nothing consumes it. Issuance errors go straight back to the
@@ -1194,7 +1195,7 @@ rejected or structurally impossible before it reaches the wire.
 #### DR-4 — Response body size cap (DoS hardening)
 
 **Status**: ✅ COMPLETE — `internal/pveapi/client.go` reads at most 1 MiB + 1 byte and
-returns a size-limit error before attempting PVE error classification or JSON parsing.
+returns typed `ErrResponseTooLarge` before attempting PVE error classification or JSON parsing.
 
 **What**: `io.ReadAll(resp.Body)` in `client.go` `doRequest` (or equivalent) has no byte limit.
 A misbehaving, misconfigured, or compromised PVE endpoint (or a MITM proxy) could return an
@@ -1207,10 +1208,13 @@ client implementation is otherwise stable to avoid churn on the test helpers.
 **Where**: `internal/pveapi/client.go` — the response-body read in `doRequest` (or wherever
 `resp.Body` is consumed before being passed to `classifyPVEError`).
 
-**Acceptance Criterion**: The response body reader is wrapped with
-`http.MaxBytesReader(w, resp.Body, maxBodyBytes)` or `io.LimitReader(resp.Body, maxBodyBytes)`
-(cap ~1 MB); a unit test using `httptest.NewServer` that returns a multi-MB body confirms the
-client returns a size-limit error rather than reading the whole payload.
+**Acceptance Criterion**: The response body reader performs an N+1 bounded read
+(`maxResponseBodyBytes+1`, cap ~1 MiB) so cap-1 and exactly-cap responses are accepted, while
+cap+1 returns typed `ErrResponseTooLarge`. Do not use a naive
+`io.LimitReader(resp.Body, maxBodyBytes)` that silently truncates without detecting overflow.
+Unit tests cover the boundary sizes and confirm an oversized HTTP 500 DELETE body containing
+`"no such user"` fails before business-error classification rather than returning
+`ErrUserNotFound`.
 
 ---
 

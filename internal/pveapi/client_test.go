@@ -520,11 +520,84 @@ func TestClientRejectsOversizedResponse(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected oversized response error, got nil")
 	}
-	if !strings.Contains(err.Error(), "response body too large") {
-		t.Errorf("error should mention response-size limit; got %q", err.Error())
+	if !errors.Is(err, ErrResponseTooLarge) {
+		t.Errorf("error = %v; want errors.Is(ErrResponseTooLarge)", err)
 	}
 	if strings.Contains(err.Error(), oversizedSentinel) {
 		t.Errorf("error should not include oversized body content; got %q", err.Error())
+	}
+}
+
+// TestReadResponseBodyBoundarySizes pins the N+1 cap check: cap-1 and cap
+// bytes are accepted, while cap+1 returns the typed response-size sentinel.
+func TestReadResponseBodyBoundarySizes(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		size    int
+		wantErr bool
+	}{
+		{name: "cap minus one", size: maxResponseBodyBytes - 1, wantErr: false},
+		{name: "exactly cap", size: maxResponseBodyBytes, wantErr: false},
+		{name: "cap plus one", size: maxResponseBodyBytes + 1, wantErr: true},
+	}
+
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			body, err := readResponseBody(strings.NewReader(strings.Repeat("a", tc.size)))
+			if tc.wantErr {
+				if err == nil {
+					t.Fatal("expected response-size error, got nil")
+				}
+				if !errors.Is(err, ErrResponseTooLarge) {
+					t.Fatalf("error = %v; want errors.Is(ErrResponseTooLarge)", err)
+				}
+				if body != nil {
+					t.Fatalf("body length = %d; want nil body", len(body))
+				}
+				return
+			}
+
+			if err != nil {
+				t.Fatalf("readResponseBody returned unexpected error: %v", err)
+			}
+			if len(body) != tc.size {
+				t.Fatalf("body length = %d; want %d", len(body), tc.size)
+			}
+		})
+	}
+}
+
+// TestOversizedDeleteUserFailsBeforeBusinessClassification verifies the cap is
+// fail-closed: even a DELETE response containing PVE's idempotent
+// "no such user" body-string is not mapped to ErrUserNotFound unless the full
+// response fits inside the bound.
+func TestOversizedDeleteUserFailsBeforeBusinessClassification(t *testing.T) {
+	t.Parallel()
+
+	message := `{"data":null,"message":"no such user ('x@pve')\n","padding":"`
+	oversizedBody := message + strings.Repeat("a", maxResponseBodyBytes-len(message)+1) + `"}`
+
+	ts := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(oversizedBody)) //nolint:errcheck // httptest handler — write error not actionable
+	}))
+	defer ts.Close()
+
+	client := makeTestClient(t, ts.URL, "admin@pve!tok", "secret")
+	err := client.DeleteUser(context.Background(), "x@pve")
+	if err == nil {
+		t.Fatal("expected oversized response error, got nil")
+	}
+	if !errors.Is(err, ErrResponseTooLarge) {
+		t.Fatalf("error = %v; want errors.Is(ErrResponseTooLarge)", err)
+	}
+	if errors.Is(err, ErrUserNotFound) {
+		t.Fatalf("oversized delete response was classified as ErrUserNotFound: %v", err)
 	}
 }
 
