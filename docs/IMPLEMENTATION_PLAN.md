@@ -338,7 +338,7 @@ type Client interface {
     GetGroup(ctx, group string) error  // ErrGroupNotFound mapped from 500 + body "does not exist"
     CreateUser(ctx, req CreateUserRequest) error  // ErrConflict from 500 + body "already exists"
     GetUser(ctx, userid string) (UserInfo, error)  // NEW: read-back; ErrUserNotFound from 500 + body "no such user"
-    CreateToken(ctx, userid, tokenid string, privsep bool) (string, error)  // returns token secret; ErrConflict from 400 + body "Token already exists"
+    CreateToken(ctx, userid, tokenid string) (string, error)  // always sends privsep=0; returns token secret; ErrConflict from 400 + body "Token already exists"
     UpdateUser(ctx, req UpdateUserRequest) error  // RENAMED; full-replace, re-sends groups
     DeleteUser(ctx, userid string) error  // ErrUserNotFound from 500 + body "no such user" (idempotent)
 }
@@ -690,18 +690,12 @@ Every attempt therefore has to keep its own `walID`.
        - If framework.DeleteWAL(ctx, req.Storage, walID) fails: return error (abort issuance; nonce-gated rollback will not delete the foreign colliding user)
        - continue loop (try new suffix)
     g. If other error (non-Conflict):
-       // PVE may have committed the user before the response failed (timeout/5xx).
-       // Best-effort delete, then conditionally drop the WAL — same discipline as
-       // the CreateToken error path (steps 8–9). Do NOT change the ErrConflict
-       // collision-retry path above (step 6e), which correctly DeleteWALs and loops.
-       - delErr := DeleteUser(userid) [best-effort]
-       - if delErr == nil OR errors.Is(delErr, pveapi.ErrUserNotFound):
-             // User is gone (or was never committed) — safe to release the WAL entry.
-             framework.DeleteWAL(ctx, req.Storage, walID) [best-effort]
-       - else:
-             // DeleteUser failed transiently — LEAVE the WAL entry so walRollback
-             // retries the cleanup. Do NOT DeleteWAL here (would orphan the user).
-       - return error (wrap delErr if non-nil/non-ErrUserNotFound so the operator sees the cleanup failure)
+       // PVE may or may not have committed the user before the response failed
+       // (timeout/5xx). Leave the WAL entry in place and return the CreateUser
+       // error; walRollback will later GetUser(userid), drop the WAL if the user
+       // was never committed (ErrUserNotFound), or delete it only if the live
+       // comment still equals nonce. Do NOT inline DeleteUser here.
+       - return error (WAL retained for rollback)
    h. If success:
       READ-BACK ASSERT (PVE silently drops unresolvable group ids with HTTP 200 on modify/append; on create, PVE instead REJECTS with HTTP 500 "no such group" — the read-back assertion covers both paths):
              - info, err := GetUser(userid)
@@ -723,7 +717,7 @@ Every attempt therefore has to keep its own `walID`.
              - if info.Comment != nonce: add a warning (non-fatal): WAL crash-recovery cleanup for this user may be disabled because the PVE comment did not preserve the nonce; direct revoke is unaffected.
        - break loop (keep walID for steps 8–9)
 7. If loop exhausted (5 attempts all ErrConflict): return internal error "userid collision after 5 retries"
-8. tokenSecret, err := CreateToken(userid, "lease", privsep=false)  // wire form value "0"
+8. tokenSecret, err := CreateToken(userid, "lease")  // client always sends wire form value privsep=0
    - If ErrConflict (mapped from HTTP 400 + body "Token already exists" — NOT a 409):
        // Not expected: each lease has a unique fresh userid, and token ids are scoped
        // per-user. A conflict here is on OUR OWN freshly-created user — it does NOT
@@ -1272,7 +1266,7 @@ and asserts the parsed `PermissionTree` matches the expected structure. No live 
 
 **Tasks**:
 - [x] Implement `wal.go` (walTypeUser constant `"user"`, walUser struct with JSON/mapstructure keys `user_id` and `nonce`, walRollback decoding `map[string]interface{}`, GetUser ownership check requiring `comment == nonce`, DeleteUser ErrUserNotFound idempotency, accepted-risk header comment)
-- [x] Implement `path_creds.go` (handleCredsRead full issuance: load role+config, `framework.CalculateTTL`, expire = lease end + 60s grace (refuse if unlimited per expire=0 policy), retry loop with per-attempt `nonce := walCommentPrefix + randomSuffix()`, `walID, err := PutWAL(..., walUser{UserID: userid, Nonce: nonce})` → CreateUser with `Comment: nonce` → on ErrConflict (body "already exists") `DeleteWAL(ctx, storage, walID)` + retry, read-back assert group membership and warn on comment/nonce mismatch, CreateToken with tokenid `lease` and privsep=false, on token-fail cleanup user+WAL, on DeleteWAL-fail cleanup user + return error, build Secret with internalData including group)
+- [x] Implement `path_creds.go` (handleCredsRead full issuance: load role+config, `framework.CalculateTTL`, expire = lease end + 60s grace (refuse if unlimited per expire=0 policy), retry loop with per-attempt `nonce := walCommentPrefix + randomSuffix()`, `walID, err := PutWAL(..., walUser{UserID: userid, Nonce: nonce})` → CreateUser with `Comment: nonce` → on ErrConflict (body "already exists") `DeleteWAL(ctx, storage, walID)` + retry, read-back assert group membership and warn on comment/nonce mismatch, CreateToken with tokenid `lease` using the client-enforced `privsep=0`, on token-fail cleanup user+WAL, on DeleteWAL-fail cleanup user + return error, build Secret with internalData including group)
 - [x] Implement `secret_token.go` (secretToken definition with Fields and non-nil Renew/Revoke callbacks; full implementation completed in Phase 4)
 - [x] Wire WAL into backend: set `backend.WALRollback = b.walRollback`, `backend.WALRollbackMinAge = 5 * time.Minute`
 - [x] Unit tests: `path_creds_test.go` (full issuance flow with mock client: success, ErrConflict retry with per-attempt WAL id, group read-back-failure injection, token-fail cleanup, DeleteWAL-fail → error+cleanup via failing-storage wrapper, collision exhaustion, expire grace applied; issuance REFUSED when effective TTL resolves to 0 (unlimited) per Locked Decision #9)

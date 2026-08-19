@@ -295,7 +295,8 @@ The response `user_id` field and `token_id` use the realm configured in the role
    `enable=1`, no `password` (token-only auth, no interactive login
    needed), `groups=<role.group>` (add the synthetic user to the
    operator-pre-created PVE group at creation time), and
-   `expire=<lease_expiry_unix>` as a Proxmox-side backstop, plus
+   `expire=<lease_expiry_unix + 60>` as a Proxmox-side backstop with
+   a 60-second grace for Vault↔PVE clock drift, plus
    `comment=<nonce>` where `nonce` is `vault-wal:<8-character-random>`
    and is also stored in the WAL payload for ownership verification
 2. `POST /access/users/{userid}/token/{tokenid}` — fixed `tokenid`
@@ -535,7 +536,8 @@ Vault's Write-Ahead Log (WAL) pattern:
    string — written for EACH userid creation attempt (including retries on ErrConflict
    suffix collision). Keep the returned id for the matching DeleteWAL.
 2. `POST /access/users` — create the synthetic PVE user (with
-   `groups=<role.group>`, `expire=<lease_expiry_unix>`, `comment=<nonce>`)
+   `groups=<role.group>`, `expire=<lease_expiry_unix + 60>`,
+   `comment=<nonce>`)
 3. `GET /access/users/{userid}` — assert group membership is present before minting the token;
    warn (non-fatal) if `comment != nonce` because WAL rollback cleanup may be disabled for
    this user, while direct revoke remains unaffected.
