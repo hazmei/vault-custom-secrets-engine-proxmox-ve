@@ -8,6 +8,7 @@ GO_FILES := $(shell find . -name '*.go' -not -path './vendor/*')
 # even on Go 1.25.7. v2.12.2's go.mod requires go >= 1.25.0, so `go run` selects a >=1.25
 # toolchain (observed: "switching to go1.25.13") and the resulting binary clears golangci-lint's
 # build-version guard for this module.
+# keep in sync with .github/workflows/ci.yml (golangci-lint-action version input)
 GOLANGCI_LINT_VERSION ?= v2.12.2
 
 .PHONY: build
