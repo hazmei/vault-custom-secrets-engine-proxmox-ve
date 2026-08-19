@@ -570,11 +570,13 @@ The engine writes a per-issuance `vault-wal:`-prefixed nonce into the PVE user's
 verify ownership before deleting. **Confirmed PVE 9.2.10 (PVE_PROBES.md Probe
 COMMENT, 19 Aug 2026):** `comment` round-trips byte-for-byte through
 `POST /access/users` → `GET /access/users/{id}`, so the ownership comparison in
-`walRollbackUser` is reliable. Crucially, `comment` is **NOT in PVE's full-replace
-field set** — the full-replace renewal `PUT /access/users/{id}` (which wipes
-`groups` when omitted, Probe 7) leaves `comment` intact when it is omitted. The
-`vault-wal:` marker therefore **survives the entire account lifetime, including all
-renewals** (`UpdateUser` correctly omits `comment`; no code change is needed).
+`walRollbackUser` is reliable. Crucially, the engine's renewal `PUT /access/users/{id}`
+(expire+groups+enable+`append=1`, `comment` omitted — confirmed PVE 9.2.10, Probe COMMENT,
+19 Aug 2026) leaves `comment` intact. Because `UpdateUser` always sends `append=1`, the
+`vault-wal:` marker **survives all renewals** in practice (`UpdateUser` correctly omits
+`comment`; no code change is needed). Note: the COMMENT probe used `append=1` throughout —
+general full-replace semantics for `comment` (a PUT without `append=1`) were not tested and
+are not relied upon by the engine.
 Editing or clearing the `comment` field on any `vault-*` user in the PVE UI causes
 `walRollbackUser` to treat the user as a foreign account and skip automatic cleanup
 — because the marker persists through every renewal, this risk applies for the **full
