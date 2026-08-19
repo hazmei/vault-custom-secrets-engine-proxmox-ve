@@ -7,7 +7,7 @@
 //     (the Client interface mandates privsep=0 in the real client; the mock
 //     records the call for assertion).
 //   - CreateUser groups=<role.group>, expire=<leaseExpiry+expireGraceSecs grace>,
-//     and Comment=nonce verified.
+//     Comment has walCommentPrefix, and Comment==walUser.Nonce (ownership invariant).
 //   - ErrConflict retry: first CreateUser returns ErrConflict, second succeeds →
 //     new suffix used AND DeleteWAL called with the FIRST attempt's WAL id.
 //   - Group read-back failure: GetUser returns groups NOT containing role.group →
@@ -20,6 +20,8 @@
 //     bounded retries then internal error.
 //   - Expire grace: +expireGraceSecs grace applied to expire sent to CreateUser.
 //   - Issuance REFUSED when effective TTL = 0 → error returned, NO PVE calls.
+//   - WAL nonce invariant: walUser.Nonce == CreateUserRequest.Comment, both
+//     carrying walCommentPrefix, asserted via GetWAL on a surviving-WAL path.
 package proxmox
 
 import (
@@ -250,6 +252,10 @@ func TestCredsRead_HappyPath(t *testing.T) {
 	// C1: CreateUser.Comment must be non-empty (the WAL nonce for ownership verification).
 	if createReq.Comment == "" {
 		t.Error("CreateUser Comment must be non-empty (WAL nonce for ownership verification)")
+	}
+	// M1: CreateUser.Comment must have the walCommentPrefix (ownership marker format).
+	if !strings.HasPrefix(createReq.Comment, walCommentPrefix) {
+		t.Errorf("CreateUser Comment = %q; want %s prefix (walCommentPrefix)", createReq.Comment, walCommentPrefix)
 	}
 
 	// WAL must be cleaned up on the success path (no wal/ entries remain).
@@ -1162,5 +1168,120 @@ func TestCredsRead_InternalData_RoundTrip(t *testing.T) {
 	}
 	if _, ok := intData["expire"]; !ok {
 		t.Error("InternalData expire missing")
+	}
+}
+
+// ── M1: WAL nonce == CreateUser Comment invariant ─────────────────────────────
+
+// TestCredsRead_WALNonce_EqualsCreateUserComment pins the nonce↔comment
+// ownership invariant: walUser.Nonce (stored in the WAL entry) must equal
+// CreateUserRequest.Comment (sent to PVE at creation time).
+//
+// Test path chosen for WAL survival:
+//   - CreateUser succeeds (captures createReq.Comment)
+//   - GetUser read-back succeeds (default mock returns stored user)
+//   - CreateToken fails → cleanupUser called
+//   - DeleteUser fails transiently → WAL entry is RETAINED (WAL discipline:
+//     never orphan a user without a WAL entry)
+//
+// After the failed issuance, exactly one WAL entry must remain. We read it
+// back via framework.GetWAL and assert entry.Data["nonce"] == capturedComment.
+func TestCredsRead_WALNonce_EqualsCreateUserComment(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	var capturedComment string
+	var usersMu sync.Mutex
+
+	b, storage := newTestBackend(t, func(mc *pveapi.MockClient) {
+		mc.GetPermissionsResult = pveapi.PermissionTree{
+			"/access/groups":                 {"User.Modify": 1, "Sys.Audit": 1},
+			"/access/groups/vault-vm-admins": {"User.Modify": 1},
+			"/access/realm/pve":              {"Realm.AllocateUser": 1},
+		}
+		mc.Groups = map[string]bool{"vault-vm-admins": true}
+
+		// CreateUser: capture the Comment (the nonce) and store the user for
+		// GetUser read-back (group membership assertion must pass).
+		mc.CreateUserFn = func(_ context.Context, req pveapi.CreateUserRequest) error {
+			capturedComment = req.Comment
+			usersMu.Lock()
+			defer usersMu.Unlock()
+			if mc.Users == nil {
+				mc.Users = make(map[string]pveapi.UserInfo)
+			}
+			mc.Users[req.UserID] = pveapi.UserInfo{
+				Groups:  []string{"vault-vm-admins"},
+				Enable:  req.Enable,
+				Expire:  req.Expire,
+				Comment: req.Comment, // preserve for GetUser read-back comment check
+			}
+			return nil
+		}
+
+		// CreateToken fails: triggers cleanupUser.
+		mc.CreateTokenError = errors.New("simulated token creation failure")
+
+		// DeleteUser fails transiently: WAL entry is RETAINED per WAL discipline
+		// (never DeleteWAL if DeleteUser fails transiently).
+		mc.DeleteUserFn = func(_ context.Context, _ string) error {
+			return errors.New("simulated transient delete failure")
+		}
+	})
+	if _, err := writeConfig(ctx, b, storage, validConfigData()); err != nil {
+		t.Fatalf("writeConfig: %v", err)
+	}
+	if _, err := writeRole(ctx, b, storage, "testrole", credRoleData()); err != nil {
+		t.Fatalf("writeRole: %v", err)
+	}
+
+	resp, err := readCreds(ctx, b, storage, "testrole")
+	// Must fail (CreateToken error).
+	if err == nil && (resp == nil || !resp.IsError()) {
+		t.Fatal("expected error when CreateToken fails; got success")
+	}
+
+	// CreateUser must have been called and comment must be non-empty.
+	if capturedComment == "" {
+		t.Fatal("CreateUserFn was not called or captured an empty comment; cannot assert WAL nonce invariant")
+	}
+
+	// The WAL entry must have survived (DeleteUser failed transiently).
+	walIDs, listErr := framework.ListWAL(ctx, storage)
+	if listErr != nil {
+		t.Fatalf("framework.ListWAL: %v", listErr)
+	}
+	if len(walIDs) != 1 {
+		t.Fatalf("expected 1 surviving WAL entry; got %d — cannot assert nonce invariant", len(walIDs))
+	}
+
+	// Read back the WAL entry and assert the nonce equals the captured comment.
+	// WALEntry.Data is JSON-decoded into interface{} → map[string]interface{}.
+	walEntry, getErr := framework.GetWAL(ctx, storage, walIDs[0])
+	if getErr != nil {
+		t.Fatalf("framework.GetWAL(%q): %v", walIDs[0], getErr)
+	}
+	if walEntry == nil {
+		t.Fatalf("framework.GetWAL returned nil for id %q", walIDs[0])
+	}
+
+	dataMap, ok := walEntry.Data.(map[string]interface{})
+	if !ok {
+		t.Fatalf("WALEntry.Data type = %T; want map[string]interface{}", walEntry.Data)
+	}
+	storedNonce, ok := dataMap["nonce"].(string)
+	if !ok {
+		t.Fatalf("WALEntry.Data[\"nonce\"] type = %T; want string", dataMap["nonce"])
+	}
+
+	// Core invariant: WAL nonce == CreateUserRequest.Comment (both carry the same
+	// prefixed string so walRollbackUser's ownership comparison is a simple equality).
+	if storedNonce != capturedComment {
+		t.Errorf("WAL nonce invariant violated: walUser.Nonce = %q; CreateUserRequest.Comment = %q; they must be equal",
+			storedNonce, capturedComment)
+	}
+	// Also verify the prefix is present (M1 prefix check on the stored nonce).
+	if !strings.HasPrefix(storedNonce, walCommentPrefix) {
+		t.Errorf("walUser.Nonce = %q; want %s prefix (walCommentPrefix)", storedNonce, walCommentPrefix)
 	}
 }

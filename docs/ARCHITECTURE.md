@@ -564,6 +564,15 @@ step 4 (`framework.DeleteWAL`) succeeds. If step 4 fails, issuance errors
 out and the just-created user is cleaned up (best-effort delete), so
 WALRollback never faces a live returned credential.
 
+**Operator note — do not edit the `comment` field on `vault-*` synthetic users**:
+The engine writes a per-issuance nonce into the PVE user's `comment` field at
+creation time and uses it during WAL-based crash recovery to verify ownership
+before deleting. Editing or clearing the `comment` field on any `vault-*` user
+in the PVE UI causes `walRollbackUser` to treat the user as a foreign account
+and skip automatic cleanup — the user leaks as a dead account until manually
+removed (the PVE `expire` backstop still prevents authentication after the
+original lease TTL).
+
 **Accepted risk**: one narrow window is NOT covered — a crash between the
 successful `DeleteWAL` (step 4) and Vault core persisting the returned
 Secret/lease (after step 5 returns). In that window the WAL entry is already

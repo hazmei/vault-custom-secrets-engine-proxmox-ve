@@ -36,10 +36,28 @@ import (
 	"github.com/mitchellh/mapstructure"
 )
 
-// walTypeUser is the WAL kind written when a synthetic PVE user has been
-// created but the overall credential issuance has not yet completed.
-// walRollback uses this kind to identify user-cleanup entries.
-const walTypeUser = "user"
+const (
+	// walTypeUser is the WAL kind written when a synthetic PVE user has been
+	// created but the overall credential issuance has not yet completed.
+	// walRollback uses this kind to identify user-cleanup entries.
+	walTypeUser = "user"
+
+	// walCommentPrefix is prepended to the random nonce written into both the
+	// WAL entry (walUser.Nonce) and the PVE user's comment field at creation
+	// time. The prefix makes the marker self-documenting when operators browse
+	// the Proxmox VE UI or API — they see "vault-wal:<random>" rather than a
+	// bare random string. Both the WAL nonce and the PVE comment carry the
+	// full prefixed value so walRollbackUser's ownership comparison remains a
+	// simple string equality check with no stripping required.
+	//
+	// WARNING: Operators must not edit the comment field on vault-* synthetic
+	// users in the PVE UI. The engine uses this field as an ownership marker
+	// for WAL-based crash recovery. Editing or clearing the comment causes
+	// walRollbackUser to treat the user as a foreign/pre-existing account and
+	// skip automatic cleanup — the user will leak as a dead account until
+	// manually removed (the PVE expire backstop still prevents authentication).
+	walCommentPrefix = "vault-wal:"
+)
 
 // walUser is the payload stored in a WAL entry of kind walTypeUser.
 // It contains enough information to delete the orphaned PVE user if the
@@ -98,7 +116,8 @@ func (b *backend) walRollback(ctx context.Context, req *logical.Request, kind st
 //  1. GetUser: if ErrUserNotFound → already gone, return nil.
 //  2. Compare user's comment to WAL Nonce:
 //     - match → our orphan → DeleteUser.
-//     - mismatch or empty comment → foreign user → log Warn, return nil (drop WAL).
+//     - mismatch or empty comment → foreign user or ownership lost → log Error
+//     (terminal: WAL is dropped, user leaks until manual removal), return nil.
 //  3. GetUser transient error → return error (framework retries).
 func (b *backend) walRollbackUser(ctx context.Context, req *logical.Request, data interface{}) error {
 	// WALEntry.Data is JSON-decoded into interface{}, which arrives here as
@@ -141,7 +160,9 @@ func (b *backend) walRollbackUser(ctx context.Context, req *logical.Request, dat
 	// If the nonce is absent (old WAL entries written before this change) or the
 	// comment does not match, this is a foreign user — do NOT delete it.
 	if entry.Nonce == "" || info.Comment != entry.Nonce {
-		b.Logger().Warn("walRollback: user comment does not match WAL nonce; not our user, dropping WAL without deleting",
+		b.Logger().Error(
+			"walRollback: user comment does not match WAL nonce; treating as foreign user and dropping WAL WITHOUT delete — "+
+				"if this user was ours (comment altered or dropped on create) it will leak as a dead user until manually removed",
 			"userid", entry.UserID,
 			"wal_nonce", entry.Nonce,
 			"user_comment", info.Comment,

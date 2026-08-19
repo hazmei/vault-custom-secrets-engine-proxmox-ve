@@ -8,7 +8,7 @@
 //   - Bounded retry loop with per-attempt WAL + nonce:
 //     generate nonce → PutWAL{UserID,Nonce} → CreateUser{Comment=nonce} →
 //     on ErrConflict → DeleteWAL(walID) + retry.
-//   - Read-back GetUser: assert group membership.
+//   - Read-back GetUser: assert group membership; soft-check comment==nonce.
 //   - CreateToken with privsep=0 (MANDATORY).
 //   - On success: DeleteWAL(walID) before returning Secret.
 //   - On DeleteWAL failure: best-effort DeleteUser then return error.
@@ -49,15 +49,6 @@ const (
 	// token. Scoped per-user (each lease gets a unique userid), so there is
 	// no collision risk between leases.
 	leaseTokenID = "lease"
-
-	// walCommentPrefix is prepended to the random nonce written into both the
-	// WAL entry (walUser.Nonce) and the PVE user's comment field at creation
-	// time. The prefix makes the marker self-documenting when operators browse
-	// the Proxmox VE UI or API — they see "vault-wal:<random>" rather than a
-	// bare random string. Both the WAL nonce and the PVE comment carry the
-	// full prefixed value so walRollbackUser's ownership comparison remains a
-	// simple string equality check with no stripping required.
-	walCommentPrefix = "vault-wal:"
 )
 
 // pathCreds returns the framework.Path for <mount>/creds/:role.
@@ -166,6 +157,7 @@ func (b *backend) handleCredsRead(ctx context.Context, req *logical.Request, d *
 	var (
 		userid string
 		walID  string
+		nonce  string // hoisted so post-loop read-back can check comment==nonce
 	)
 
 	for attempt := 0; attempt < maxCollisionRetries; attempt++ {
@@ -189,7 +181,7 @@ func (b *backend) handleCredsRead(ctx context.Context, req *logical.Request, d *
 		if nonceErr != nil {
 			return nil, fmt.Errorf("proxmox: creds/%s: generate nonce: %w", roleName, nonceErr)
 		}
-		nonce := walCommentPrefix + rawNonce
+		nonce = walCommentPrefix + rawNonce
 
 		// Step 4a: Write WAL before CreateUser. Capture the RETURNED id (random UUID).
 		// This id is used for DeleteWAL — it is NOT the userid.
@@ -274,6 +266,22 @@ func (b *backend) handleCredsRead(ctx context.Context, req *logical.Request, d *
 			"proxmox: creds/%s: group read-back assertion failed: user %q not in group %q (groups: %v); "+
 				"verify the group exists and the admin token has User.Modify at /access/groups/<group> with propagate=1",
 			roleName, userid, role.Group, info.Groups,
+		)
+	}
+
+	// M2: Soft-check that the comment survived the CreateUser round-trip.
+	// PVE could truncate or drop the comment field (as it can silently drop
+	// groups); if it does, walRollbackUser will mis-identify the user as
+	// foreign and skip automatic cleanup — the user leaks until the PVE
+	// expire backstop fires. We do NOT fail issuance here (the credential
+	// is otherwise valid), but we emit a Warn so operators are alerted.
+	// Only crash-recovery (walRollback) is degraded; the normal revocation
+	// path is unaffected.
+	if info.Comment != nonce {
+		b.Logger().Warn("creds: user comment does not match WAL nonce after create; walRollback cleanup will not be able to verify ownership",
+			"userid", userid,
+			"expected", nonce,
+			"actual", info.Comment,
 		)
 	}
 
