@@ -565,12 +565,21 @@ out and the just-created user is cleaned up (best-effort delete), so
 WALRollback never faces a live returned credential.
 
 **Operator note — do not edit the `comment` field on `vault-*` synthetic users**:
-The engine writes a per-issuance nonce into the PVE user's `comment` field at
-creation time and uses it during WAL-based crash recovery to verify ownership
-before deleting. Editing or clearing the `comment` field on any `vault-*` user
-in the PVE UI causes `walRollbackUser` to treat the user as a foreign account
-and skip automatic cleanup — the user leaks as a dead account until manually
-removed (the PVE `expire` backstop still prevents authentication after the
+The engine writes a per-issuance `vault-wal:`-prefixed nonce into the PVE user's
+`comment` field at creation time and uses it during WAL-based crash recovery to
+verify ownership before deleting. **Confirmed PVE 9.2.10 (PVE_PROBES.md Probe
+COMMENT, 19 Aug 2026):** `comment` round-trips byte-for-byte through
+`POST /access/users` → `GET /access/users/{id}`, so the ownership comparison in
+`walRollbackUser` is reliable. Crucially, `comment` is **NOT in PVE's full-replace
+field set** — the full-replace renewal `PUT /access/users/{id}` (which wipes
+`groups` when omitted, Probe 7) leaves `comment` intact when it is omitted. The
+`vault-wal:` marker therefore **survives the entire account lifetime, including all
+renewals** (`UpdateUser` correctly omits `comment`; no code change is needed).
+Editing or clearing the `comment` field on any `vault-*` user in the PVE UI causes
+`walRollbackUser` to treat the user as a foreign account and skip automatic cleanup
+— because the marker persists through every renewal, this risk applies for the **full
+lease lifetime**, not just at issuance. The user leaks as a dead account until
+manually removed (the PVE `expire` backstop still prevents authentication after the
 original lease TTL).
 
 **Accepted risk**: one narrow window is NOT covered — a crash between the
