@@ -10,7 +10,7 @@ This secrets engine implements Vault's dynamic secrets pattern for Proxmox VE. E
 
 ## Project Status
 
-⚠️ **Architecture/Design Phase** — This is currently a greenfield project with a complete architecture design but no implementation yet. The design document provides detailed specifications for credential lifecycle, API interactions, error handling, and testing strategy. Implementation is planned.
+🚧 **Active implementation** — Core plugin code, unit tests, and gated live acceptance tests are present. The current focus is hardening dynamic credential issuance, renewal/revocation, WAL rollback safety, and Proxmox VE 9.2.10 acceptance coverage before a v1 release.
 
 ## How It Works
 
@@ -23,6 +23,7 @@ This secrets engine implements Vault's dynamic secrets pattern for Proxmox VE. E
 
 2. **Renew**:
    - Extends Vault lease TTL up to the effective `max_ttl` (measured from the original issue time)
+   - Refuses renewal if the PVE user was disabled out-of-band, preserving that operator kill switch
    - Issues `PUT /access/users/{userid}` re-sending `expire`+`groups`+`enable`+`append=1` **together** — PVE's `PUT /access/users` is full-replace, so an expire-only PUT would wipe the user's group membership and strip its privileges (confirmed PVE 9.2.10). The target group is read from the lease's internal data, and a read-back confirms membership survived. Both directions are now confirmed on PVE 9.2.10: the full-replace wipe by Probe 7; the preserve path (re-sending groups retains membership) confirmed by Probe RENEWAL-PRESERVE (17 Aug 2026 — groups `["vault-test-grp"]` read back, expire advanced 1786986804→1786990429). The runtime read-back remains as defense-in-depth.
 
 3. **Revoke**:
@@ -177,12 +178,10 @@ Key points:
 
 ### Acceptance Tests
 - Environment gating: `VAULT_ACC=1` (HashiCorp convention)
-- Full lifecycle: pre-create a PVE group bound to a test role → issue credential → **verify scoped permissions work via a BEHAVIORAL call** (use the issued privsep=0 token against a group-role-gated endpoint, e.g. `GET /cluster/resources?type=vm`, expect HTTP 200) and out-of-scope actions fail → renew lease → revoke and confirm cleanup. **The token's bare `GET /access/permissions` reflects only the authenticating principal and is NOT evidence of the synthetic user's group-derived privileges** (Probe 6); the `?userid=` server-side dump is optional and requires a temporary `Sys.Audit` grant on the admin token.
-- Authorization contract canary: assert the confirmed PVE 9.2.10 behavior the design depends on: (a) direct `PUT /access/acl` of an unheld role by the admin token returns 403; (b) group-membership add succeeds and confers the group's role(s); (c) a token whose owning USER has an `expire` in the past is rejected at authentication (401); (d) after a renewal (`PUT /access/users/{userid}` re-sending `expire`+`groups`+`enable`+`append=1` — full-replace), the issued token still holds the group's roles; a read-back confirms `groups` is preserved. A control (expire-only PUT on a throwaway user) leaves `groups:[]`, guarding against a regression to expire-only renewal (Probe 7).
-- Failure injection: simulate mid-provisioning failures, test idempotent revocation, test insufficient root token privileges
-- Concurrent issuance: verify suffix-collision retry handling under load
-- WAL rollback: simulate process death mid-provision and verify orphan sweep
-- Cluster failure modes: test behavior under Proxmox quorum loss and ACL lock contention
+- Full lifecycle: pre-create a PVE group bound to a test role → issue credential → run a configured positive token endpoint → renew lease → revoke and confirm cleanup.
+- Authorization contract canary: exercises only safely configured live assertions. Optional subtests cover direct `PUT /access/acl` anti-privilege-escalation (configured unheld role must return 403), positive behavioral authorization with a required response marker, and negative authorization with expected 403. Unconfigured live-only subtests skip with explicit prerequisites rather than assuming full-admin or cluster-specific endpoints.
+- Failure coverage: idempotent revocation, WAL rollback, delete-config guard, configurable concurrent issuance, and optional insufficient-privilege config validation in `TestAccInsufficientPrivileges`.
+- Unit tests cover deterministic mid-provisioning and WAL failure paths. The live acceptance suite does not currently inject network failures, quorum loss, or ACL lock contention.
 - Run against containerized or dev Proxmox VE instance with test admin token
 - CI integration: gated job (manual trigger or nightly) due to live credentials requirement
 
@@ -207,13 +206,40 @@ export PVE_TEST_GROUP="vault-test-grp"
 `PVE_TEST_GROUP` must already exist. The admin token must pass the engine's
 normal config and role validation: `User.Modify` at `/access/groups` with
 propagation to `/access/groups/<PVE_TEST_GROUP>`, `Sys.Audit` at
-`/access/groups`, and `Realm.AllocateUser` at `/access/realm/pve`. The group
-must be bound out-of-band to privileges that allow the behavioral check endpoint
-to return HTTP 200 for an issued token. By default that endpoint is
-`/cluster/resources?type=vm`; override it when needed:
+`/access/groups`, and `Realm.AllocateUser` at `/access/realm/pve`.
+
+By default the positive token check uses `GET /version` as authentication smoke
+only. To prove group-derived privilege, configure an endpoint protected by the
+test group's role and a response marker that must appear in the body; bare HTTP
+200 is not treated as proof:
 
 ```bash
 export PVE_BEHAVIORAL_PATH="/cluster/resources?type=vm"
+export PVE_BEHAVIORAL_METHOD="GET"
+export PVE_BEHAVIORAL_MARKER='"type":"qemu"'
+```
+
+Optional negative authorization check:
+
+```bash
+export PVE_NEGATIVE_AUTH_PATH="/nodes/pve/qemu/100/config"
+export PVE_NEGATIVE_AUTH_METHOD="GET"
+```
+
+Optional direct ACL anti-privilege-escalation canary. Use only with a
+non-full-admin token and a role the token does not hold at the target path; the
+test expects `PUT /access/acl` to return 403:
+
+```bash
+export PVE_ACL_CANARY_PATH="/vms/200"
+export PVE_ACL_CANARY_UNHELD_ROLE="PVEVMAdmin"
+export PVE_ACL_CANARY_TARGET_USER="some-test-user@pve"
+```
+
+Optional concurrent issuance load (validated range 1–10; default 5):
+
+```bash
+export PVE_CONCURRENT_WORKERS=5
 ```
 
 Optional TLS settings:

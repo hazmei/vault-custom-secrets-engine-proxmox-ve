@@ -340,8 +340,12 @@ so revoke doesn't need to re-derive it.
 ### Lease Renewal
 
 Vault-side lease renewal extends the lease TTL up to the effective
-`max_ttl` captured at issuance time (see TTL Precedence below). Renewal
-also issues `PUT /access/users/{userid}` re-sending `expire`+`groups`+`enable`+`append=1` together. Note that `enable=1` re-enables a user an operator disabled out-of-band, so disabling the PVE user is NOT a sticky kill-switch across renewal — to terminate a lease, revoke it in Vault (which deletes the user). **Revocation is the only supported kill path; out-of-band PVE user disable is not sticky across renewal.**
+`max_ttl` captured at issuance time (see TTL Precedence below). Before
+updating the PVE user, renewal reads the user and refuses renewal if the user
+has been disabled out-of-band. This preserves PVE user disable as an operator
+incident-response control; renewal does not silently re-enable disabled lease
+users. For enabled users, renewal issues `PUT /access/users/{userid}`
+re-sending `expire`+`groups`+`enable`+`append=1` together.
 **Confirmed on PVE 9.2.10 (PVE_PROBES.md Probe 7): `PUT /access/users` is FULL-REPLACE.**
 An expire-only PUT WIPES the `groups` array (observed `groups:[]`), stripping the credential's
 effective privileges. Renewal therefore MUST re-send the target group. The full-replace wipe

@@ -27,9 +27,11 @@ const (
 	accDefaultTTL       = 300
 	accDefaultMaxTTL    = 900
 	accBehaviorPathEnv  = "PVE_BEHAVIORAL_PATH"
-	accDefaultBehavior  = "/cluster/resources?type=vm"
+	accDefaultBehavior  = "/version"
 	accTestTimeout      = 2 * time.Minute
 	accPastExpireBuffer = 60
+	accDefaultWorkers   = 5
+	accMaxWorkers       = 10
 )
 
 type accEnv struct {
@@ -40,6 +42,13 @@ type accEnv struct {
 	CACert                  string
 	TLSSkipVerify           bool
 	BehaviorPath            string
+	BehaviorMethod          string
+	BehaviorMarker          string
+	NegativePath            string
+	NegativeMethod          string
+	ACLCanaryPath           string
+	ACLCanaryRole           string
+	ACLCanaryTargetUser     string
 	InsufficientTokenID     string
 	InsufficientTokenSecret string
 }
@@ -65,9 +74,9 @@ func TestAccLifecycle(t *testing.T) {
 	writeAccRole(t, ctx, h)
 	issued := issueAccCreds(t, ctx, h)
 
-	defer deleteAccUser(t, ctx, h.Client, issued.UserID)
+	registerAccUserCleanup(t, h.Client, issued.UserID)
 
-	assertAccTokenStatus(t, ctx, h.Env, issued.TokenID, issued.TokenSecret, h.Env.BehaviorPath, http.StatusOK)
+	assertAccPositiveBehavior(t, ctx, h.Env, issued.TokenID, issued.TokenSecret)
 
 	renewed := renewAccSecret(t, ctx, h, issued.Secret, 120*time.Second)
 	if renewed.Secret == nil || renewed.Secret.TTL <= 0 {
@@ -88,15 +97,23 @@ func TestAccAuthorizationContractCanary(t *testing.T) {
 	writeAccConfig(t, ctx, h)
 	writeAccRole(t, ctx, h)
 	issued := issueAccCreds(t, ctx, h)
-	defer deleteAccUser(t, ctx, h.Client, issued.UserID)
+	registerAccUserCleanup(t, h.Client, issued.UserID)
 
-	assertAccTokenStatus(t, ctx, h.Env, issued.TokenID, issued.TokenSecret, h.Env.BehaviorPath, http.StatusOK)
+	t.Run("direct ACL anti-privilege-escalation", func(t *testing.T) {
+		assertAccAntiPrivilegeEscalation(t, ctx, h.Env)
+	})
+	t.Run("positive behavioral endpoint", func(t *testing.T) {
+		assertAccPositiveBehavior(t, ctx, h.Env, issued.TokenID, issued.TokenSecret)
+	})
+	t.Run("negative authorization endpoint", func(t *testing.T) {
+		assertAccNegativeAuthorization(t, ctx, h.Env, issued.TokenID, issued.TokenSecret)
+	})
 
 	pastExpire := time.Now().Unix() - accPastExpireBuffer
 	if err := h.Client.UpdateUser(ctx, pveapi.UpdateUserRequest{UserID: issued.UserID, Expire: pastExpire, Groups: h.Env.Group, Enable: true, Append: true}); err != nil {
 		t.Fatalf("expire issued user in the past: %v", err)
 	}
-	assertAccTokenStatus(t, ctx, h.Env, issued.TokenID, issued.TokenSecret, "/version", http.StatusUnauthorized)
+	assertAccTokenStatus(t, ctx, h.Env, issued.TokenID, issued.TokenSecret, http.MethodGet, "/version", http.StatusUnauthorized)
 
 	futureExpire := time.Now().Add(10 * time.Minute).Unix()
 	if err := h.Client.UpdateUser(ctx, pveapi.UpdateUserRequest{UserID: issued.UserID, Expire: futureExpire, Groups: h.Env.Group, Enable: true, Append: true}); err != nil {
@@ -105,11 +122,11 @@ func TestAccAuthorizationContractCanary(t *testing.T) {
 	issued.Secret.IssueTime = time.Now().Add(-30 * time.Second)
 	renewAccSecret(t, ctx, h, issued.Secret, 120*time.Second)
 	assertAccUserInGroup(t, ctx, h.Client, issued.UserID, h.Env.Group)
-	assertAccTokenStatus(t, ctx, h.Env, issued.TokenID, issued.TokenSecret, h.Env.BehaviorPath, http.StatusOK)
+	assertAccPositiveBehavior(t, ctx, h.Env, issued.TokenID, issued.TokenSecret)
 
 	controlUser := accUserID(t, "fullreplace")
 	createAccUser(t, ctx, h.Client, controlUser, h.Env.Group, futureExpire, walCommentPrefix+"fullreplace")
-	defer deleteAccUser(t, ctx, h.Client, controlUser)
+	registerAccUserCleanup(t, h.Client, controlUser)
 	raw := newAccHTTPClient(t, h.Env)
 	form := url.Values{"expire": {strconv.FormatInt(time.Now().Add(20*time.Minute).Unix(), 10)}}
 	status, body, err := raw.do(ctx, http.MethodPut, "/access/users/"+url.PathEscape(controlUser), h.Env.TokenID, h.Env.TokenSecret, form)
@@ -138,14 +155,22 @@ func TestAccFailureInjection(t *testing.T) {
 	if _, err := h.Backend.secretTokenRevoke(ctx, req, nil); err != nil {
 		t.Fatalf("missing-user revoke should be idempotent: %v", err)
 	}
+}
+
+func TestAccInsufficientPrivileges(t *testing.T) {
+	h := newAccHarness(t)
+	ctx, cancel := context.WithTimeout(context.Background(), accTestTimeout)
+	defer cancel()
 
 	if h.Env.InsufficientTokenID == "" || h.Env.InsufficientTokenSecret == "" {
-		t.Skip("optional insufficient-privilege check skipped: set PVE_INSUFFICIENT_TOKEN_ID and PVE_INSUFFICIENT_TOKEN_SECRET")
+		t.Skip("optional insufficient-privilege test skipped: set PVE_INSUFFICIENT_TOKEN_ID and PVE_INSUFFICIENT_TOKEN_SECRET")
 	}
 
 	insufficient := h.Env
 	insufficient.TokenID = h.Env.InsufficientTokenID
 	insufficient.TokenSecret = h.Env.InsufficientTokenSecret
+	assertAccTokenStatus(t, ctx, insufficient, insufficient.TokenID, insufficient.TokenSecret, http.MethodGet, "/version", http.StatusOK)
+
 	b, storage := newAccBackend(t)
 	resp, err := writeAccConfigWithEnv(ctx, b, storage, insufficient)
 	if err != nil {
@@ -153,6 +178,9 @@ func TestAccFailureInjection(t *testing.T) {
 	}
 	if resp == nil || !resp.IsError() {
 		t.Fatal("expected insufficient PVE token to be rejected by config validation")
+	}
+	if !strings.Contains(strings.ToLower(resp.Error().Error()), "privilege") && !strings.Contains(strings.ToLower(resp.Error().Error()), "permission") {
+		t.Fatalf("expected clear privilege/permission validation error, got: %s", resp.Error())
 	}
 }
 
@@ -165,7 +193,7 @@ func TestAccWALRollback(t *testing.T) {
 	userid := accUserID(t, "wal")
 	nonce := walCommentPrefix + "acceptance"
 	createAccUser(t, ctx, h.Client, userid, h.Env.Group, time.Now().Add(10*time.Minute).Unix(), nonce)
-	defer deleteAccUser(t, ctx, h.Client, userid)
+	registerAccUserCleanup(t, h.Client, userid)
 
 	walID, err := framework.PutWAL(ctx, h.Storage, walTypeUser, walUser{UserID: userid, Nonce: nonce})
 	if err != nil {
@@ -196,7 +224,7 @@ func TestAccConcurrentIssuance(t *testing.T) {
 	writeAccConfig(t, ctx, h)
 	writeAccRole(t, ctx, h)
 
-	const workers = 5
+	workers := accConcurrentWorkers(t)
 	var wg sync.WaitGroup
 	results := make(chan accIssuedCred, workers)
 	errs := make(chan error, workers)
@@ -220,6 +248,7 @@ func TestAccConcurrentIssuance(t *testing.T) {
 	var issued []accIssuedCred
 	for res := range results {
 		issued = append(issued, res)
+		registerAccUserCleanup(t, h.Client, res.UserID)
 		if _, ok := seen[res.UserID]; ok {
 			t.Fatalf("duplicate userid issued concurrently: %s", res.UserID)
 		}
@@ -319,9 +348,26 @@ func requireAccEnv(t *testing.T) accEnv {
 		CACert:                  os.Getenv("PVE_CA_CERT"),
 		TLSSkipVerify:           skipVerify,
 		BehaviorPath:            envDefault(accBehaviorPathEnv, accDefaultBehavior),
+		BehaviorMethod:          strings.ToUpper(envDefault("PVE_BEHAVIORAL_METHOD", http.MethodGet)),
+		BehaviorMarker:          os.Getenv("PVE_BEHAVIORAL_MARKER"),
+		NegativePath:            os.Getenv("PVE_NEGATIVE_AUTH_PATH"),
+		NegativeMethod:          strings.ToUpper(envDefault("PVE_NEGATIVE_AUTH_METHOD", http.MethodGet)),
+		ACLCanaryPath:           os.Getenv("PVE_ACL_CANARY_PATH"),
+		ACLCanaryRole:           os.Getenv("PVE_ACL_CANARY_UNHELD_ROLE"),
+		ACLCanaryTargetUser:     os.Getenv("PVE_ACL_CANARY_TARGET_USER"),
 		InsufficientTokenID:     os.Getenv("PVE_INSUFFICIENT_TOKEN_ID"),
 		InsufficientTokenSecret: os.Getenv("PVE_INSUFFICIENT_TOKEN_SECRET"),
 	}
+}
+
+func accConcurrentWorkers(t *testing.T) int {
+	t.Helper()
+	raw := envDefault("PVE_CONCURRENT_WORKERS", strconv.Itoa(accDefaultWorkers))
+	workers, err := strconv.Atoi(raw)
+	if err != nil || workers < 1 || workers > accMaxWorkers {
+		t.Fatalf("PVE_CONCURRENT_WORKERS must be an integer in [1,%d], got %q", accMaxWorkers, raw)
+	}
+	return workers
 }
 
 func requiredMissing(names ...string) []string {
@@ -483,14 +529,35 @@ func createAccUser(t *testing.T, ctx context.Context, client pveapi.Client, user
 	assertAccUserInGroup(t, ctx, client, userid, group)
 }
 
-func deleteAccUser(t *testing.T, ctx context.Context, client pveapi.Client, userid string) {
+func registerAccUserCleanup(t *testing.T, client pveapi.Client, userid string) {
 	t.Helper()
 	if userid == "" {
 		return
 	}
-	if err := client.DeleteUser(ctx, userid); err != nil && !errors.Is(err, pveapi.ErrUserNotFound) {
-		t.Logf("cleanup DeleteUser(%q) failed: %v", userid, err)
+	t.Cleanup(func() {
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		deleteAccUser(t, cleanupCtx, client, userid)
+	})
+}
+
+func deleteAccUser(t *testing.T, ctx context.Context, client pveapi.Client, userid string) {
+	t.Helper()
+	var lastErr error
+	for attempt := 0; attempt < 3; attempt++ {
+		if err := client.DeleteUser(ctx, userid); err != nil && !errors.Is(err, pveapi.ErrUserNotFound) {
+			lastErr = err
+			time.Sleep(time.Duration(attempt+1) * 200 * time.Millisecond)
+			continue
+		}
+		_, err := client.GetUser(ctx, userid)
+		if errors.Is(err, pveapi.ErrUserNotFound) {
+			return
+		}
+		lastErr = err
+		time.Sleep(time.Duration(attempt+1) * 200 * time.Millisecond)
 	}
+	t.Fatalf("cleanup failed to confirm user %q deleted: %v", userid, lastErr)
 }
 
 func assertAccUserInGroup(t *testing.T, ctx context.Context, client pveapi.Client, userid, group string) {
@@ -560,16 +627,84 @@ func newAccHTTPClient(t *testing.T, env accEnv) *accHTTPClient {
 	}
 }
 
-func assertAccTokenStatus(t *testing.T, ctx context.Context, env accEnv, tokenID, tokenSecret, path string, want int) {
+func assertAccPositiveBehavior(t *testing.T, ctx context.Context, env accEnv, tokenID, tokenSecret string) {
+	t.Helper()
+	status, body := assertAccTokenStatus(t, ctx, env, tokenID, tokenSecret, env.BehaviorMethod, env.BehaviorPath, http.StatusOK)
+	if env.BehaviorMarker == "" {
+		if env.BehaviorPath == accDefaultBehavior {
+			t.Logf("positive behavior marker not configured; %s %s is auth smoke only, not proof of group-derived privilege", env.BehaviorMethod, env.BehaviorPath)
+			return
+		}
+		t.Skipf("configured positive behavior endpoint %s %s requires PVE_BEHAVIORAL_MARKER so HTTP 200 is not treated as proof", env.BehaviorMethod, env.BehaviorPath)
+	}
+	if status == http.StatusOK && !strings.Contains(string(body), env.BehaviorMarker) {
+		t.Fatalf("positive behavior endpoint %s %s response did not contain PVE_BEHAVIORAL_MARKER %q; body=%s", env.BehaviorMethod, env.BehaviorPath, env.BehaviorMarker, redactBody(body))
+	}
+}
+
+func assertAccNegativeAuthorization(t *testing.T, ctx context.Context, env accEnv, tokenID, tokenSecret string) {
+	t.Helper()
+	if env.NegativePath == "" {
+		t.Skip("negative authorization endpoint skipped: set PVE_NEGATIVE_AUTH_PATH and optionally PVE_NEGATIVE_AUTH_METHOD")
+	}
+	assertAccTokenStatus(t, ctx, env, tokenID, tokenSecret, env.NegativeMethod, env.NegativePath, http.StatusForbidden)
+}
+
+func assertAccAntiPrivilegeEscalation(t *testing.T, ctx context.Context, env accEnv) {
+	t.Helper()
+	missing := []string{}
+	if env.ACLCanaryPath == "" {
+		missing = append(missing, "PVE_ACL_CANARY_PATH")
+	}
+	if env.ACLCanaryRole == "" {
+		missing = append(missing, "PVE_ACL_CANARY_UNHELD_ROLE")
+	}
+	if env.ACLCanaryTargetUser == "" {
+		missing = append(missing, "PVE_ACL_CANARY_TARGET_USER")
+	}
+	if len(missing) > 0 {
+		t.Skipf("direct ACL anti-privilege-escalation canary skipped: configure %s for a non-full-admin token and an unheld role", strings.Join(missing, ", "))
+	}
+	client := newAccHTTPClient(t, env)
+	form := url.Values{
+		"path":      {env.ACLCanaryPath},
+		"users":     {env.ACLCanaryTargetUser},
+		"roles":     {env.ACLCanaryRole},
+		"propagate": {"1"},
+	}
+	status, body, err := client.do(ctx, http.MethodPut, "/access/acl", env.TokenID, env.TokenSecret, form)
+	if err != nil {
+		t.Fatalf("direct ACL canary request failed: %v", err)
+	}
+	if status >= 200 && status < 300 {
+		deleteForm := url.Values{
+			"path":      {env.ACLCanaryPath},
+			"users":     {env.ACLCanaryTargetUser},
+			"roles":     {env.ACLCanaryRole},
+			"propagate": {"1"},
+			"delete":    {"1"},
+		}
+		cleanupStatus, cleanupBody, cleanupErr := client.do(ctx, http.MethodPut, "/access/acl", env.TokenID, env.TokenSecret, deleteForm)
+		if cleanupErr != nil || cleanupStatus < 200 || cleanupStatus >= 300 {
+			t.Fatalf("direct ACL canary unexpectedly succeeded and cleanup failed: status=%d cleanup_status=%d cleanup_err=%v body=%s cleanup_body=%s", status, cleanupStatus, cleanupErr, redactBody(body), redactBody(cleanupBody))
+		}
+	}
+	if status != http.StatusForbidden {
+		t.Fatalf("direct ACL canary status=%d; want 403 for unheld role with non-full-admin token body=%s", status, redactBody(body))
+	}
+}
+
+func assertAccTokenStatus(t *testing.T, ctx context.Context, env accEnv, tokenID, tokenSecret, method, path string, want int) (int, []byte) {
 	t.Helper()
 	client := newAccHTTPClient(t, env)
-	status, body, err := client.do(ctx, http.MethodGet, path, tokenID, tokenSecret, nil)
+	status, body, err := client.do(ctx, method, path, tokenID, tokenSecret, nil)
 	if err != nil {
-		t.Fatalf("behavioral token request %s: %v", path, err)
+		t.Fatalf("token request %s %s: %v", method, path, err)
 	}
 	if status != want {
-		t.Fatalf("behavioral token request %s status=%d; want %d body=%s", path, status, want, redactBody(body))
+		t.Fatalf("token request %s %s status=%d; want %d body=%s", method, path, status, want, redactBody(body))
 	}
+	return status, body
 }
 
 func (c *accHTTPClient) do(ctx context.Context, method, path, tokenID, tokenSecret string, form url.Values) (int, []byte, error) {
