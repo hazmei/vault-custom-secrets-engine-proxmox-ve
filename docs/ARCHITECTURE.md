@@ -275,15 +275,16 @@ Response:
   "lease_duration": 3600,
   "renewable": true,
   "data": {
-    "pve_userid": "vault-myrole-a1b2c3@pve",
+    "user_id": "vault-myrole-a1b2c3@pve",
     "token_id": "vault-myrole-a1b2c3@pve!lease",
     "token_secret": "1b3f5e2a-....-uuid"
   }
 }
 ```
 
-The `pve_userid` and `token_id` use the realm configured in the role
-(default `@pve`).
+The response `user_id` field and `token_id` use the realm configured in the role
+(default `@pve`). The lease's private `InternalData` stores the same userid under
+`pve_userid` for renew/revoke callbacks; that internal key is not a response field.
 
 ## Implementation Notes
 
@@ -433,7 +434,8 @@ used at renew/revoke time):
 - `role_name` — the role this credential was issued from (fixed at issue
   time)
 - `effective_max_ttl` — the computed maximum TTL captured at issue time
-  (fixed: governs renewals for the life of the lease)
+  as an `int64` nanosecond duration (fixed: governs renewals for the life of
+  the lease)
 
 **WAL payload** (one entry per in-flight issuance attempt under Vault's `wal/` prefix):
 - kind: `"user"`
@@ -509,6 +511,11 @@ and confirm the swap.
   `CreateToken` error: best-effort `DeleteUser`, then `DeleteWAL` ONLY if `DeleteUser`
   returned `nil` or `ErrUserNotFound`; if `DeleteUser` fails transiently, LEAVE the WAL entry
   for walRollback to retry. Surface as internal error.
+- `401` from Proxmox → `ErrUnauthenticated` before any body-string
+  classification. This usually means the configured admin token is expired,
+  revoked, or invalid; config, role-write, issuance, renewal, and revocation
+  call sites wrap it with an operator-facing diagnostic while preserving
+  `errors.Is(err, ErrUnauthenticated)`.
 - `403` on config validation → surface clearly; required privileges
   should be checked at `POST <mount>/config` time via the
   privilege-bearing call (`GET /access/permissions` parsed as a tree for
@@ -554,8 +561,10 @@ new suffix.
 behind if Vault crashes or fails over between user creation and lease
 registration):
 
-1. For each WAL entry (kind `"user"`, payload keys `user_id` and `nonce`), read the PVE user
-   with `GET /access/users/{userid}`.
+1. For each WAL entry (kind `"user"`, payload keys `user_id` and `nonce`), validate that
+   `user_id` is present and non-empty; if it is missing, return an error so Vault retains the
+   malformed WAL entry and retries/alerts instead of dropping an unknown cleanup target. Then
+   read the PVE user with `GET /access/users/{userid}`.
 2. If the user is absent, return success. PVE returns HTTP 500 + body `"no such user"` (NOT 404,
    Probe 3); this is idempotent success for an already-swept WAL orphan.
 3. If the user exists, compare the live PVE `comment` to the WAL `nonce`. Delete the user only
@@ -586,10 +595,14 @@ existing user.
   deleted.
 
 This ensures that nonce-owned users created but not fully leased are eventually swept,
-preventing ordinary orphaned Proxmox identities from accumulating. If the WAL nonce is absent
-or no longer matches the PVE `comment`, rollback intentionally skips deletion and drops the WAL
-entry; that safety behavior may leave a dead account for manual cleanup rather than risk deleting
-a foreign user.
+preventing ordinary orphaned Proxmox identities from accumulating. A WAL entry missing
+`user_id` is malformed in a way the engine cannot safely interpret, so rollback returns an
+error and Vault retries/alerts until an operator repairs or removes the bad WAL entry. If the
+WAL nonce is empty or no longer matches the PVE `comment`, rollback intentionally skips
+deletion and drops the WAL entry; that safety behavior may leave a dead account for manual
+cleanup rather than risk deleting a foreign user. Operators should inspect PVE `vault-*` users
+whose `comment` does not match a `vault-wal:` marker and delete only accounts confirmed to be
+engine-created and no longer backed by an active Vault lease.
 
 **Implementation note**: Vault's WAL minimum-age threshold (rollback skips
 entries younger than the configured age) is a first-line guard against
