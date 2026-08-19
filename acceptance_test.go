@@ -701,6 +701,7 @@ func assertAccPositiveBehavior(t *testing.T, ctx context.Context, env accEnv, to
 			t.Logf("positive behavior marker not configured; %s %s is auth smoke only, not proof of group-derived privilege", env.BehaviorMethod, env.BehaviorPath)
 			return
 		}
+		t.Fatalf("unreachable acceptance behavior state: %s=%q is custom but PVE_BEHAVIORAL_MARKER is empty; requireAccEnv should have rejected custom behavior paths without a marker", accBehaviorPathEnv, env.BehaviorPath)
 	}
 	if !strings.Contains(string(body), env.BehaviorMarker) {
 		t.Fatalf("positive behavior endpoint %s %s response did not contain PVE_BEHAVIORAL_MARKER %q; body=%s", env.BehaviorMethod, env.BehaviorPath, env.BehaviorMarker, redactBody(body))
