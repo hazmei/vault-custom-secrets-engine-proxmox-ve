@@ -838,3 +838,84 @@ func TestSecretTokenRevoke_TransientError(t *testing.T) {
 		t.Errorf("expected error to wrap transientErr; got: %v", err)
 	}
 }
+
+// TestSecretTokenRenew_UnauthenticatedUpdateDiagnostic verifies DR-1 renewal
+// diagnostics while preserving errors.Is for the unauthenticated sentinel.
+func TestSecretTokenRenew_UnauthenticatedUpdateDiagnostic(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	const (
+		userid          = "vault-myrole-unauth-renew@pve"
+		group           = "vault-vm-admins"
+		effectiveMaxTTL = 86400 * time.Second
+	)
+
+	getCallCount := 0
+	b, storage := setupBackendForRenew(t, userid, group, true, func(mc *pveapi.MockClient) {
+		mc.GetUserFn = func(_ context.Context, _ string) (pveapi.UserInfo, error) {
+			getCallCount++
+			return pveapi.UserInfo{Groups: []string{group}, Enable: true}, nil
+		}
+		mc.UpdateUserFn = func(_ context.Context, _ pveapi.UpdateUserRequest) error {
+			return fmt.Errorf("pveapi: UpdateUser: %w", pveapi.ErrUnauthenticated)
+		}
+	})
+
+	req := makeRenewRequest(storage, standardRenewInternalData(effectiveMaxTTL), time.Now().Add(-30*time.Minute), 3600*time.Second)
+	resp, err := b.secretTokenRenew(ctx, req, nil)
+	if err == nil {
+		t.Fatal("expected unauthenticated renewal error, got nil")
+	}
+	if resp != nil && resp.Secret != nil {
+		t.Error("resp.Secret must be nil on renewal failure")
+	}
+	if !errors.Is(err, pveapi.ErrUnauthenticated) {
+		t.Fatalf("expected errors.Is ErrUnauthenticated; got %v", err)
+	}
+	if !strings.Contains(err.Error(), "admin token unauthenticated") || !strings.Contains(err.Error(), "check config credentials") {
+		t.Errorf("error missing admin-token diagnostic: %q", err.Error())
+	}
+	if getCallCount != 1 {
+		t.Errorf("GetUser call count = %d; want 1 pre-update call", getCallCount)
+	}
+}
+
+// TestSecretTokenRevoke_UnauthenticatedDiagnostic verifies DR-1 revocation
+// diagnostics while preserving errors.Is for Vault retry/error handling.
+func TestSecretTokenRevoke_UnauthenticatedDiagnostic(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	const userid = "vault-myrole-unauth-revoke@pve"
+
+	b, storage := newTestBackend(t, func(mc *pveapi.MockClient) {
+		mc.DeleteUserFn = func(_ context.Context, _ string) error {
+			return fmt.Errorf("pveapi: DeleteUser: %w", pveapi.ErrUnauthenticated)
+		}
+	})
+	if _, err := writeConfig(ctx, b, storage, validConfigData()); err != nil {
+		t.Fatalf("writeConfig: %v", err)
+	}
+
+	internalData := map[string]interface{}{
+		"pve_userid":        userid,
+		"group":             "vault-vm-admins",
+		"effective_max_ttl": int64(86400 * time.Second),
+	}
+	req := makeRevokeRequest(storage, internalData)
+
+	resp, err := b.secretTokenRevoke(ctx, req, nil)
+	if err == nil {
+		t.Fatal("expected unauthenticated revoke error, got nil")
+	}
+	if resp != nil {
+		t.Errorf("expected nil response on revoke error; got: %v", resp)
+	}
+	if !errors.Is(err, pveapi.ErrUnauthenticated) {
+		t.Fatalf("expected errors.Is ErrUnauthenticated; got %v", err)
+	}
+	if !strings.Contains(err.Error(), "admin token unauthenticated") || !strings.Contains(err.Error(), "check config credentials") {
+		t.Errorf("error missing admin-token diagnostic: %q", err.Error())
+	}
+}

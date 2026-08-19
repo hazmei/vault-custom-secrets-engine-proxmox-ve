@@ -231,7 +231,7 @@ func (b *backend) handleCredsRead(ctx context.Context, req *logical.Request, d *
 
 		// Step 4c: Non-conflict error from CreateUser — leave WAL for rollback.
 		// Do NOT DeleteWAL — walRollback will retry.
-		return nil, fmt.Errorf("proxmox: creds/%s: CreateUser %q: %w", roleName, userid, createErr)
+		return nil, wrapAdminUnauthenticated(fmt.Errorf("proxmox: creds/%s: CreateUser %q: %w", roleName, userid, createErr))
 	}
 
 	// Collision exhaustion check: if walID is empty, all attempts collided and
@@ -253,7 +253,7 @@ func (b *backend) handleCredsRead(ctx context.Context, req *logical.Request, d *
 			b.Logger().Error("creds: compensation failed after GetUser failure; WAL left for walRollback",
 				"userid", userid, "walID", walID, "cleanup_error", cleanErr)
 		}
-		return nil, fmt.Errorf("proxmox: creds/%s: GetUser read-back %q: %w", roleName, userid, err)
+		return nil, wrapAdminUnauthenticated(fmt.Errorf("proxmox: creds/%s: GetUser read-back %q: %w", roleName, userid, err))
 	}
 	if !containsGroup(info.Groups, role.Group) {
 		b.Logger().Warn("creds: group read-back assertion failed; cleaning up",
@@ -293,7 +293,7 @@ func (b *backend) handleCredsRead(ctx context.Context, req *logical.Request, d *
 			b.Logger().Error("creds: compensation failed after CreateToken failure; WAL left for walRollback",
 				"userid", userid, "walID", walID, "cleanup_error", cleanErr)
 		}
-		return nil, fmt.Errorf("proxmox: creds/%s: CreateToken for %q: %w", roleName, userid, err)
+		return nil, wrapAdminUnauthenticated(fmt.Errorf("proxmox: creds/%s: CreateToken for %q: %w", roleName, userid, err))
 	}
 
 	// Step 7: SUCCESS — DeleteWAL before returning the Secret.
@@ -384,4 +384,13 @@ func (b *backend) cleanupUser(ctx context.Context, storage logical.Storage, user
 	b.Logger().Warn("cleanupUser: DeleteUser failed; WAL left for rollback",
 		"userid", userid, "walID", walID, "error", deleteErr)
 	return deleteErr
+}
+
+// wrapAdminUnauthenticated adds an operator-facing diagnostic for expired,
+// revoked, or invalid PVE admin tokens while preserving errors.Is matching.
+func wrapAdminUnauthenticated(err error) error {
+	if err == nil || !errors.Is(err, pveapi.ErrUnauthenticated) {
+		return err
+	}
+	return fmt.Errorf("admin token unauthenticated — check config credentials: %w", err)
 }

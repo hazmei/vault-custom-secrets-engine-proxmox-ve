@@ -66,7 +66,25 @@ func TestClassifyPVEError(t *testing.T) {
 			body:   []byte(`{"data":null,"message":"no such user ('vault-test@pve')\n"}`),
 			want:   ErrUserNotFound,
 		},
-		// ── ErrForbidden cases ────────────────────────────────────────────
+		// ── Genuine status-code cases ─────────────────────────────────────
+		{
+			name:   "401 empty body → ErrUnauthenticated",
+			status: 401,
+			body:   []byte{},
+			want:   ErrUnauthenticated,
+		},
+		{
+			name:   "401 nonempty body → ErrUnauthenticated",
+			status: 401,
+			body:   []byte(`{"message":"authentication failed"}`),
+			want:   ErrUnauthenticated,
+		},
+		{
+			name:   "401 with misleading business-error phrase → ErrUnauthenticated",
+			status: 401,
+			body:   []byte(`{"message":"no such user, but token authentication failed first"}`),
+			want:   ErrUnauthenticated,
+		},
 		{
 			name:   "403 permission denied (genuine status)",
 			status: 403,
@@ -310,19 +328,36 @@ func TestClassifyPVEErrorStatusGate400StillWorks(t *testing.T) {
 	}
 }
 
-// TestSentinelDistinctness asserts the DR-2 sentinel-distinctness invariant:
+// TestSentinelDistinctness asserts the typed sentinel-distinctness invariant:
 //
-//   - errors.Is(ErrGroupNotFound, ErrUserNotFound) must be FALSE
+//   - no sentinel should satisfy any other sentinel via errors.Is
 //
-// This property is what makes DR-2 meaningful: revocation call sites can key on
-// ErrUserNotFound to treat a missing-user delete as success, while group-not-found
-// (ErrGroupNotFound) surfaces as a hard role-write failure rather than silently
-// resolving to the wrong branch.
+// This property is what makes the branch-specific handling meaningful:
+// revocation can treat ErrUserNotFound as success, role-write can surface
+// ErrGroupNotFound cleanly, and authentication/authorization failures remain
+// operationally distinct.
 func TestSentinelDistinctness(t *testing.T) {
 	t.Parallel()
 
-	// ErrGroupNotFound is a DISTINCT sentinel — must NOT satisfy ErrUserNotFound.
-	if errors.Is(ErrGroupNotFound, ErrUserNotFound) {
-		t.Error("errors.Is(ErrGroupNotFound, ErrUserNotFound) must be FALSE: distinct sentinels must not overlap")
+	sentinels := []struct {
+		name string
+		err  error
+	}{
+		{name: "ErrUserNotFound", err: ErrUserNotFound},
+		{name: "ErrGroupNotFound", err: ErrGroupNotFound},
+		{name: "ErrConflict", err: ErrConflict},
+		{name: "ErrForbidden", err: ErrForbidden},
+		{name: "ErrUnauthenticated", err: ErrUnauthenticated},
+	}
+
+	for _, left := range sentinels {
+		for _, right := range sentinels {
+			if left.name == right.name {
+				continue
+			}
+			if errors.Is(left.err, right.err) {
+				t.Errorf("errors.Is(%s, %s) must be FALSE: distinct sentinels must not overlap", left.name, right.name)
+			}
+		}
 	}
 }

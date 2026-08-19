@@ -152,6 +152,9 @@ func (b *backend) configWrite(ctx context.Context, req *logical.Request, d *fram
 	// Step 3: reachability + TLS check.
 	var versionErr error
 	if _, versionErr = client.GetVersion(ctx); versionErr != nil {
+		if errors.Is(versionErr, pveapi.ErrUnauthenticated) {
+			return logical.ErrorResponse("PVE /version returned 401 — admin token is unauthenticated; check config token_id/token_secret"), nil
+		}
 		if errors.Is(versionErr, pveapi.ErrForbidden) {
 			return logical.ErrorResponse("PVE /version returned 403 — check address and token credentials"), nil
 		}
@@ -161,6 +164,9 @@ func (b *backend) configWrite(ctx context.Context, req *logical.Request, d *fram
 	// Step 4: privilege check via permission tree with ancestor-walk.
 	tree, err := client.GetPermissions(ctx)
 	if err != nil {
+		if errors.Is(err, pveapi.ErrUnauthenticated) {
+			return logical.ErrorResponse("PVE returned 401 on GET /access/permissions — admin token is unauthenticated; check config token_id/token_secret"), nil
+		}
 		if errors.Is(err, pveapi.ErrForbidden) {
 			return logical.ErrorResponse("PVE returned 403 on GET /access/permissions — token lacks required privileges"), nil
 		}

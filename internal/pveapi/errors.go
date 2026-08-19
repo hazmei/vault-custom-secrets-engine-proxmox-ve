@@ -2,9 +2,9 @@
 //
 // Error handling follows the PVE 9.2.10 error contract: PVE returns HTTP 500
 // (and 400 for token conflicts) with a body containing a message string and/or
-// an errors object — NOT 404/409 REST semantics. Error classification is
-// body-string based, not status-code based (confirmed PVE 9.2.10, PVE_PROBES.md
-// Probes 2–6b). Only HTTP 403 is a genuine status to branch on.
+// an errors object — NOT 404/409 REST semantics. Business-error classification
+// is body-string based (confirmed PVE 9.2.10, PVE_PROBES.md Probes 2–6b),
+// with HTTP 401 and 403 handled as genuine statuses to branch on.
 //
 // DR-2: ErrNotFound was split into ErrUserNotFound and ErrGroupNotFound so
 // that call sites can distinguish between a missing user (revocation idempotency
@@ -15,8 +15,9 @@ package pveapi
 
 import "errors"
 
-// Sentinel errors returned by the PVE client.
-// Mapped by BODY STRING, not HTTP status code (confirmed PVE 9.2.10).
+// Sentinel errors returned by the PVE client. Business errors are mapped by
+// body string; authentication and authorization failures are mapped by genuine
+// HTTP 401/403 status codes (confirmed PVE 9.2.10).
 var (
 	// ErrUserNotFound is returned when the PVE response body contains
 	// "no such user" (HTTP 500, e.g. GET/DELETE /access/users/{userid}).
@@ -43,4 +44,10 @@ var (
 	// ErrForbidden is returned on HTTP 403 (this IS a genuine status code
 	// in the PVE API — permission denied is always 403, never 500+body).
 	ErrForbidden = errors.New("pveapi: forbidden")
+
+	// ErrUnauthenticated is returned on HTTP 401 regardless of response body.
+	// PVE returns 401 (often with an empty body) when the admin token is expired,
+	// revoked, or otherwise invalid. This is operationally distinct from 403:
+	// the token is not authenticated, not merely missing a privilege.
+	ErrUnauthenticated = errors.New("pveapi: unauthenticated")
 )

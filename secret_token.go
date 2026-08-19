@@ -173,7 +173,7 @@ func (b *backend) secretTokenRenew(ctx context.Context, req *logical.Request, _ 
 	// but does not eliminate the window; no conditional-update PVE API exists.
 	preInfo, preErr := client.GetUser(ctx, userid)
 	if preErr != nil {
-		return nil, fmt.Errorf("proxmox: renew: pre-update GetUser %q: %w", userid, preErr)
+		return nil, wrapAdminUnauthenticated(fmt.Errorf("proxmox: renew: pre-update GetUser %q: %w", userid, preErr))
 	}
 	if !preInfo.Enable {
 		return nil, fmt.Errorf(
@@ -191,13 +191,13 @@ func (b *backend) secretTokenRenew(ctx context.Context, req *logical.Request, _ 
 		Enable: true,
 		Append: true, // MANDATORY on renewal — omitting defaults to replace (append=0)
 	}); updateErr != nil {
-		return nil, fmt.Errorf("proxmox: renew: UpdateUser %q: %w", userid, updateErr)
+		return nil, wrapAdminUnauthenticated(fmt.Errorf("proxmox: renew: UpdateUser %q: %w", userid, updateErr))
 	}
 
 	// Step 7: post-update read-back — assert group membership survived the full-replace PUT.
 	info, err := client.GetUser(ctx, userid)
 	if err != nil {
-		return nil, fmt.Errorf("proxmox: renew: GetUser %q read-back: %w", userid, err)
+		return nil, wrapAdminUnauthenticated(fmt.Errorf("proxmox: renew: GetUser %q read-back: %w", userid, err))
 	}
 	if !containsGroup(info.Groups, group) {
 		return nil, fmt.Errorf("proxmox: renew: group read-back assertion failed: user %q not in group %q after UpdateUser (groups: %v)", userid, group, info.Groups)
@@ -248,7 +248,7 @@ func (b *backend) secretTokenRevoke(ctx context.Context, req *logical.Request, _
 	}
 
 	// Any other error: return it so Vault retries revocation.
-	return nil, fmt.Errorf("proxmox: revoke: DeleteUser %q: %w", userid, err)
+	return nil, wrapAdminUnauthenticated(fmt.Errorf("proxmox: revoke: DeleteUser %q: %w", userid, err))
 }
 
 // extractLeaseInternalData reads the required keys from InternalData.

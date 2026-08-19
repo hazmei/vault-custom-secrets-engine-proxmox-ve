@@ -38,6 +38,45 @@ func makeTestClient(t *testing.T, serverURL, tokenID, tokenSecret string) Client
 	return client
 }
 
+type unsafeUpdateUserCase struct {
+	name       string
+	req        UpdateUserRequest
+	wantReason string
+}
+
+var unsafeUpdateUserCases = []unsafeUpdateUserCase{
+	{
+		name:       "expire zero",
+		req:        UpdateUserRequest{UserID: "vault-test@pve", Expire: 0, Groups: "grp", Enable: true, Append: true},
+		wantReason: "expire=0",
+	},
+	{
+		name:       "expire negative",
+		req:        UpdateUserRequest{UserID: "vault-test@pve", Expire: -1, Groups: "grp", Enable: true, Append: true},
+		wantReason: "expire=-1",
+	},
+	{
+		name:       "groups empty",
+		req:        UpdateUserRequest{UserID: "vault-test@pve", Expire: 999, Groups: "", Enable: true, Append: true},
+		wantReason: "groups is empty",
+	},
+	{
+		name:       "groups whitespace",
+		req:        UpdateUserRequest{UserID: "vault-test@pve", Expire: 999, Groups: "   ", Enable: true, Append: true},
+		wantReason: "groups is empty",
+	},
+	{
+		name:       "enable false",
+		req:        UpdateUserRequest{UserID: "vault-test@pve", Expire: 999, Groups: "grp", Enable: false, Append: true},
+		wantReason: "enable=false",
+	},
+	{
+		name:       "append false",
+		req:        UpdateUserRequest{UserID: "vault-test@pve", Expire: 999, Groups: "grp", Enable: true, Append: false},
+		wantReason: "append=false",
+	},
+}
+
 // TestClientAuthHeaderFormat asserts the Authorization header is sent in
 // the correct PVEAPIToken format on every request.
 func TestClientAuthHeaderFormat(t *testing.T) {
@@ -309,6 +348,13 @@ func TestClassifyPVEErrorIntegration(t *testing.T) {
 			method:     http.MethodGet,
 			wantErr:    ErrForbidden,
 		},
+		{
+			name:       "unauthenticated via GetPermissions",
+			statusCode: 401,
+			body:       `{"message":"no such user, but token auth failed first"}`,
+			method:     http.MethodGet,
+			wantErr:    ErrUnauthenticated,
+		},
 	}
 
 	for _, tc := range tests {
@@ -341,6 +387,68 @@ func TestClassifyPVEErrorIntegration(t *testing.T) {
 			}
 			if !errors.Is(err, tc.wantErr) {
 				t.Errorf("got error %v; want errors.Is(%v)", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+// TestUpdateUserRejectsUnsafeRequestsBeforeHTTP verifies the renewal safety
+// guard: unsafe expire, groups, enable, or append values must fail before any
+// HTTP request is sent.
+func TestUpdateUserRejectsUnsafeRequestsBeforeHTTP(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range unsafeUpdateUserCases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			requestCount := 0
+			ts := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				requestCount++
+				_ = json.NewEncoder(w).Encode(map[string]interface{}{"data": nil}) //nolint:errcheck // httptest handler
+			}))
+			defer ts.Close()
+
+			client := makeTestClient(t, ts.URL, "admin@pve!tok", "secret")
+			err := client.UpdateUser(context.Background(), tc.req)
+			if err == nil {
+				t.Fatal("expected validation error, got nil")
+			}
+			if !strings.Contains(err.Error(), tc.wantReason) {
+				t.Errorf("validation error should mention %q; got %q", tc.wantReason, err.Error())
+			}
+			if requestCount != 0 {
+				t.Errorf("server saw %d requests; want 0", requestCount)
+			}
+		})
+	}
+}
+
+// TestMockUpdateUserRejectsUnsafeRequestsBeforeLog verifies the mock enforces
+// the same UpdateUserRequest validation before recording a call or invoking hooks.
+func TestMockUpdateUserRejectsUnsafeRequestsBeforeLog(t *testing.T) {
+	t.Parallel()
+
+	mc := &MockClient{
+		UpdateUserFn: func(context.Context, UpdateUserRequest) error {
+			t.Fatal("UpdateUserFn must not be called for invalid requests")
+			return nil
+		},
+	}
+
+	for _, tc := range unsafeUpdateUserCases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			err := mc.UpdateUser(context.Background(), tc.req)
+			if err == nil {
+				t.Fatal("expected validation error, got nil")
+			}
+			if !strings.Contains(err.Error(), tc.wantReason) {
+				t.Errorf("validation error should mention %q; got %q", tc.wantReason, err.Error())
+			}
+			if len(mc.CallLog) != 0 {
+				t.Errorf("mock logged %d calls; want 0", len(mc.CallLog))
 			}
 		})
 	}
