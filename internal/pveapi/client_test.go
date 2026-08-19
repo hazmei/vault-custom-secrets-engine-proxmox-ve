@@ -479,6 +479,55 @@ func TestClientBaseURLPathConstruction(t *testing.T) {
 	}
 }
 
+// TestClientAcceptsNormalSizedResponse verifies ordinary small PVE JSON
+// responses remain readable with the response-size guard in place.
+func TestClientAcceptsNormalSizedResponse(t *testing.T) {
+	t.Parallel()
+
+	ts := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{ //nolint:errcheck // httptest handler — write error not actionable
+			"data": map[string]interface{}{"version": "9.2.10"},
+		})
+	}))
+	defer ts.Close()
+
+	client := makeTestClient(t, ts.URL, "admin@pve!tok", "secret")
+	version, err := client.GetVersion(context.Background())
+	if err != nil {
+		t.Fatalf("GetVersion: %v", err)
+	}
+	if version != "9.2.10" {
+		t.Errorf("version = %q; want %q", version, "9.2.10")
+	}
+}
+
+// TestClientRejectsOversizedResponse verifies a malicious or broken endpoint
+// cannot force the client to read an unbounded response body into memory.
+func TestClientRejectsOversizedResponse(t *testing.T) {
+	t.Parallel()
+
+	const oversizedSentinel = "oversized-body-sentinel"
+
+	ts := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		tooLargeBody := strings.Repeat(oversizedSentinel, maxResponseBodyBytes/len(oversizedSentinel)+2)
+		_, _ = w.Write([]byte(tooLargeBody)) //nolint:errcheck // httptest handler — write error not actionable
+	}))
+	defer ts.Close()
+
+	client := makeTestClient(t, ts.URL, "admin@pve!tok", "secret")
+	_, err := client.GetVersion(context.Background())
+	if err == nil {
+		t.Fatal("expected oversized response error, got nil")
+	}
+	if !strings.Contains(err.Error(), "response body too large") {
+		t.Errorf("error should mention response-size limit; got %q", err.Error())
+	}
+	if strings.Contains(err.Error(), oversizedSentinel) {
+		t.Errorf("error should not include oversized body content; got %q", err.Error())
+	}
+}
+
 // TestCreateTokenPathEncoding asserts that userid and tokenid are path-escaped
 // in the URL (e.g. "vault-test@pve" → "vault-test%40pve").
 func TestCreateTokenPathEncoding(t *testing.T) {

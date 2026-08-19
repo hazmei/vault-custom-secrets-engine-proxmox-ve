@@ -31,6 +31,11 @@ import (
 const (
 	// httpTimeout is the default timeout for all PVE API calls.
 	httpTimeout = 30 * time.Second
+
+	// maxResponseBodyBytes bounds memory used to read a single PVE response.
+	// PVE JSON responses are small in practice; 1 MiB leaves ample headroom while
+	// preventing unbounded allocation from a compromised endpoint or proxy.
+	maxResponseBodyBytes = 1 << 20
 )
 
 // Client is the interface every call site uses. All methods that interact
@@ -181,7 +186,7 @@ func (c *httpClient) doRequest(
 	}
 	defer resp.Body.Close() //nolint:errcheck // response body close error is not actionable
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := readResponseBody(resp.Body)
 	if err != nil {
 		return nil, resp.StatusCode, fmt.Errorf("pveapi: read response body %s %s: %w", method, path, err)
 	}
@@ -198,6 +203,19 @@ func (c *httpClient) doRequest(
 	}
 
 	return body, resp.StatusCode, nil
+}
+
+// readResponseBody reads a PVE response body with a hard byte cap.
+func readResponseBody(body io.Reader) ([]byte, error) {
+	limited := io.LimitReader(body, maxResponseBodyBytes+1)
+	data, err := io.ReadAll(limited)
+	if err != nil {
+		return nil, err
+	}
+	if len(data) > maxResponseBodyBytes {
+		return nil, fmt.Errorf("response body too large: exceeds %d bytes", maxResponseBodyBytes)
+	}
+	return data, nil
 }
 
 // classifyPVEError inspects the HTTP status code and the decoded body

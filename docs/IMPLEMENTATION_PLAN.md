@@ -1193,6 +1193,9 @@ rejected or structurally impossible before it reaches the wire.
 
 #### DR-4 — Response body size cap (DoS hardening)
 
+**Status**: ✅ COMPLETE — `internal/pveapi/client.go` reads at most 1 MiB + 1 byte and
+returns a size-limit error before attempting PVE error classification or JSON parsing.
+
 **What**: `io.ReadAll(resp.Body)` in `client.go` `doRequest` (or equivalent) has no byte limit.
 A misbehaving, misconfigured, or compromised PVE endpoint (or a MITM proxy) could return an
 arbitrarily large body, causing unbounded memory allocation. PVE responses are small JSON
