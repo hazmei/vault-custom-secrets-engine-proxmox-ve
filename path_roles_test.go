@@ -14,6 +14,7 @@ package proxmox
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -549,7 +550,7 @@ func TestRoleWrite_GroupNotFound_Rejected(t *testing.T) {
 // user-facing rejection (covered by TestRoleWrite_GroupNotFound_Rejected) and
 // that the sentinel used for the GetGroup error path is ErrGroupNotFound,
 // which is DISTINCT from ErrUserNotFound. The sentinel-distinctness property
-// (errors.Is(ErrGroupNotFound, ErrNotFound) must be FALSE) lives in
+// (errors.Is(ErrGroupNotFound, ErrUserNotFound) must be FALSE) lives in
 // internal/pveapi/errors_test.go as TestSentinelDistinctness.
 //
 // This test is kept to document that the GetGroupFn injection hook still
@@ -575,6 +576,29 @@ func TestRoleWrite_GroupNotFound_UsesErrGroupNotFound(t *testing.T) {
 	// The error response must mention "does not exist" (user-facing message check).
 	if !strings.Contains(strings.ToLower(resp.Error().Error()), "does not exist") {
 		t.Errorf("expected error to mention 'does not exist'; got: %q", resp.Error())
+	}
+}
+
+func TestRoleWrite_GetGroup401_RejectedWithAuthDiagnostic(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	b, storage := setupBackendWithConfig(t, func(mc *pveapi.MockClient) {
+		mc.GetGroupFn = func(_ context.Context, _ string) error {
+			return fmt.Errorf("wrapped: %w", pveapi.ErrUnauthenticated)
+		}
+	})
+
+	resp, err := writeRole(ctx, b, storage, "myrole", validRoleData())
+	if err != nil {
+		t.Fatalf("unexpected framework error: %v", err)
+	}
+	if !resp.IsError() {
+		t.Fatal("expected error response when GetGroup returns 401")
+	}
+	errMsg := strings.ToLower(resp.Error().Error())
+	if !strings.Contains(errMsg, "401") || !strings.Contains(errMsg, "unauthenticated") {
+		t.Errorf("error should clearly mention 401 unauthenticated; got: %q", resp.Error())
 	}
 }
 
@@ -762,6 +786,36 @@ func TestRoleWrite_GetPermissions403_Rejected(t *testing.T) {
 	}
 	if !resp.IsError() {
 		t.Error("expected error response when GetPermissions returns 403")
+	}
+}
+
+func TestRoleWrite_GetPermissions401_RejectedWithAuthDiagnostic(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	var mc *pveapi.MockClient
+	b, storage := newTestBackend(t, func(mock *pveapi.MockClient) {
+		mc = mock
+		mc.GetPermissionsResult = fullPermTree("vault-vm-admins")
+		mc.Groups = map[string]bool{"vault-vm-admins": true}
+	})
+	if resp, err := writeConfig(ctx, b, storage, validConfigData()); err != nil || (resp != nil && resp.IsError()) {
+		t.Fatalf("write config: err=%v resp=%v", err, resp)
+	}
+	mc.GetPermissionsFn = func(_ context.Context) (pveapi.PermissionTree, error) {
+		return nil, fmt.Errorf("wrapped: %w", pveapi.ErrUnauthenticated)
+	}
+
+	resp, err := writeRole(ctx, b, storage, "myrole", validRoleData())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !resp.IsError() {
+		t.Fatal("expected error response when GetPermissions returns 401")
+	}
+	errMsg := strings.ToLower(resp.Error().Error())
+	if !strings.Contains(errMsg, "401") || !strings.Contains(errMsg, "unauthenticated") {
+		t.Errorf("error should clearly mention 401 unauthenticated; got: %q", resp.Error())
 	}
 }
 

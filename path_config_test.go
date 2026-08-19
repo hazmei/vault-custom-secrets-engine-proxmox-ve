@@ -216,6 +216,28 @@ func TestConfigWrite_GetVersionFails_Rejected(t *testing.T) {
 	}
 }
 
+func TestConfigWrite_GetVersion401_RejectedWithAuthDiagnostic(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	b, storage := newTestBackend(t, func(mc *pveapi.MockClient) {
+		mc.GetVersionFn = func(_ context.Context) (string, error) {
+			return "", pveapi.ErrUnauthenticated
+		}
+	})
+
+	resp, err := writeConfig(ctx, b, storage, validConfigData())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !resp.IsError() {
+		t.Fatal("expected error response when GetVersion returns 401")
+	}
+	errMsg := strings.ToLower(resp.Error().Error())
+	if !strings.Contains(errMsg, "401") || !strings.Contains(errMsg, "unauthenticated") {
+		t.Errorf("error should clearly mention 401 unauthenticated; got: %q", resp.Error())
+	}
+}
+
 func TestConfigWrite_GetPermissions403_Rejected(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -231,6 +253,28 @@ func TestConfigWrite_GetPermissions403_Rejected(t *testing.T) {
 	}
 	if !resp.IsError() {
 		t.Fatal("expected error response when GetPermissions returns 403")
+	}
+}
+
+func TestConfigWrite_GetPermissions401_RejectedWithAuthDiagnostic(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	b, storage := newTestBackend(t, func(mc *pveapi.MockClient) {
+		mc.GetPermissionsFn = func(_ context.Context) (pveapi.PermissionTree, error) {
+			return nil, pveapi.ErrUnauthenticated
+		}
+	})
+
+	resp, err := writeConfig(ctx, b, storage, validConfigData())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !resp.IsError() {
+		t.Fatal("expected error response when GetPermissions returns 401")
+	}
+	errMsg := strings.ToLower(resp.Error().Error())
+	if !strings.Contains(errMsg, "401") || !strings.Contains(errMsg, "unauthenticated") {
+		t.Errorf("error should clearly mention 401 unauthenticated; got: %q", resp.Error())
 	}
 }
 

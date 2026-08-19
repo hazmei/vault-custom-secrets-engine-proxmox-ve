@@ -352,6 +352,9 @@ func (b *backend) roleWrite(ctx context.Context, req *logical.Request, d *framew
 		if errors.Is(groupErr, pveapi.ErrGroupNotFound) {
 			return logical.ErrorResponse("group %q does not exist on Proxmox cluster; create it out-of-band before defining this role", group), nil
 		}
+		if errors.Is(groupErr, pveapi.ErrUnauthenticated) {
+			return logical.ErrorResponse("PVE returned 401 checking group %q — admin token is unauthenticated; check config token_id/token_secret", group), nil
+		}
 		if errors.Is(groupErr, pveapi.ErrForbidden) {
 			return logical.ErrorResponse("PVE returned 403 checking group %q — admin token may lack Sys.Audit at /access/groups; %s", group, groupErr), nil
 		}
@@ -361,6 +364,9 @@ func (b *backend) roleWrite(ctx context.Context, req *logical.Request, d *framew
 	// Step 7: Confirm Realm.AllocateUser at /access/realm/<realm> via permissions ancestor-walk.
 	tree, err := client.GetPermissions(ctx)
 	if err != nil {
+		if errors.Is(err, pveapi.ErrUnauthenticated) {
+			return logical.ErrorResponse("PVE returned 401 on GET /access/permissions during role-write — admin token is unauthenticated; check config token_id/token_secret"), nil
+		}
 		if errors.Is(err, pveapi.ErrForbidden) {
 			return logical.ErrorResponse("PVE returned 403 on GET /access/permissions during role-write — check admin token privileges"), nil
 		}

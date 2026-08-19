@@ -105,9 +105,16 @@ type UpdateUserRequest struct {
 }
 
 // Validate rejects unsafe UpdateUserRequest combinations before any HTTP
-// request can be constructed. Renewal must always keep the PVE user enabled
-// and send append=1; the false zero values disable the user or wipe groups.
+// request can be constructed. Renewal must always preserve the finite PVE
+// expire backstop, group membership, enabled state, and append=1 semantics;
+// unsafe zero values remove one of those protections.
 func (r UpdateUserRequest) Validate() error {
+	if r.Expire <= 0 {
+		return fmt.Errorf("pveapi: UpdateUserRequest for %q is unsafe: expire=%d would remove the lease expiry backstop", r.UserID, r.Expire)
+	}
+	if strings.TrimSpace(r.Groups) == "" {
+		return fmt.Errorf("pveapi: UpdateUserRequest for %q is unsafe: groups is empty and would wipe group membership", r.UserID)
+	}
 	if !r.Enable {
 		return fmt.Errorf("pveapi: UpdateUserRequest for %q is unsafe: enable=false would disable the lease user", r.UserID)
 	}

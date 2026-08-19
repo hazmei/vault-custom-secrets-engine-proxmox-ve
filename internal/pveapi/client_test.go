@@ -312,7 +312,7 @@ func TestClassifyPVEErrorIntegration(t *testing.T) {
 		{
 			name:       "unauthenticated via GetPermissions",
 			statusCode: 401,
-			body:       ``,
+			body:       `{"message":"no such user, but token auth failed first"}`,
 			method:     http.MethodGet,
 			wantErr:    ErrUnauthenticated,
 		},
@@ -354,21 +354,45 @@ func TestClassifyPVEErrorIntegration(t *testing.T) {
 }
 
 // TestUpdateUserRejectsUnsafeRequestsBeforeHTTP verifies the renewal safety
-// guard: Enable=false or Append=false must fail before any HTTP request is sent.
+// guard: unsafe expire, groups, enable, or append values must fail before any
+// HTTP request is sent.
 func TestUpdateUserRejectsUnsafeRequestsBeforeHTTP(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name string
-		req  UpdateUserRequest
+		name       string
+		req        UpdateUserRequest
+		wantReason string
 	}{
 		{
-			name: "enable false",
-			req:  UpdateUserRequest{UserID: "vault-test@pve", Expire: 999, Groups: "grp", Enable: false, Append: true},
+			name:       "expire zero",
+			req:        UpdateUserRequest{UserID: "vault-test@pve", Expire: 0, Groups: "grp", Enable: true, Append: true},
+			wantReason: "expire=0",
 		},
 		{
-			name: "append false",
-			req:  UpdateUserRequest{UserID: "vault-test@pve", Expire: 999, Groups: "grp", Enable: true, Append: false},
+			name:       "expire negative",
+			req:        UpdateUserRequest{UserID: "vault-test@pve", Expire: -1, Groups: "grp", Enable: true, Append: true},
+			wantReason: "expire=-1",
+		},
+		{
+			name:       "groups empty",
+			req:        UpdateUserRequest{UserID: "vault-test@pve", Expire: 999, Groups: "", Enable: true, Append: true},
+			wantReason: "groups is empty",
+		},
+		{
+			name:       "groups whitespace",
+			req:        UpdateUserRequest{UserID: "vault-test@pve", Expire: 999, Groups: "   ", Enable: true, Append: true},
+			wantReason: "groups is empty",
+		},
+		{
+			name:       "enable false",
+			req:        UpdateUserRequest{UserID: "vault-test@pve", Expire: 999, Groups: "grp", Enable: false, Append: true},
+			wantReason: "enable=false",
+		},
+		{
+			name:       "append false",
+			req:        UpdateUserRequest{UserID: "vault-test@pve", Expire: 999, Groups: "grp", Enable: true, Append: false},
+			wantReason: "append=false",
 		},
 	}
 
@@ -389,6 +413,9 @@ func TestUpdateUserRejectsUnsafeRequestsBeforeHTTP(t *testing.T) {
 			if err == nil {
 				t.Fatal("expected validation error, got nil")
 			}
+			if !strings.Contains(err.Error(), tc.wantReason) {
+				t.Errorf("validation error should mention %q; got %q", tc.wantReason, err.Error())
+			}
 			if requestCount != 0 {
 				t.Errorf("server saw %d requests; want 0", requestCount)
 			}
@@ -408,18 +435,47 @@ func TestMockUpdateUserRejectsUnsafeRequestsBeforeLog(t *testing.T) {
 		},
 	}
 
-	err := mc.UpdateUser(context.Background(), UpdateUserRequest{
-		UserID: "vault-test@pve",
-		Expire: 999,
-		Groups: "grp",
-		Enable: true,
-		Append: false,
-	})
-	if err == nil {
-		t.Fatal("expected validation error, got nil")
+	tests := []struct {
+		name       string
+		req        UpdateUserRequest
+		wantReason string
+	}{
+		{
+			name:       "expire zero",
+			req:        UpdateUserRequest{UserID: "vault-test@pve", Expire: 0, Groups: "grp", Enable: true, Append: true},
+			wantReason: "expire=0",
+		},
+		{
+			name:       "groups empty",
+			req:        UpdateUserRequest{UserID: "vault-test@pve", Expire: 999, Groups: "", Enable: true, Append: true},
+			wantReason: "groups is empty",
+		},
+		{
+			name:       "enable false",
+			req:        UpdateUserRequest{UserID: "vault-test@pve", Expire: 999, Groups: "grp", Enable: false, Append: true},
+			wantReason: "enable=false",
+		},
+		{
+			name:       "append false",
+			req:        UpdateUserRequest{UserID: "vault-test@pve", Expire: 999, Groups: "grp", Enable: true, Append: false},
+			wantReason: "append=false",
+		},
 	}
-	if len(mc.CallLog) != 0 {
-		t.Errorf("mock logged %d calls; want 0", len(mc.CallLog))
+
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			err := mc.UpdateUser(context.Background(), tc.req)
+			if err == nil {
+				t.Fatal("expected validation error, got nil")
+			}
+			if !strings.Contains(err.Error(), tc.wantReason) {
+				t.Errorf("validation error should mention %q; got %q", tc.wantReason, err.Error())
+			}
+			if len(mc.CallLog) != 0 {
+				t.Errorf("mock logged %d calls; want 0", len(mc.CallLog))
+			}
+		})
 	}
 }
 
