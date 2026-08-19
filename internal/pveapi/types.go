@@ -2,7 +2,10 @@
 // permission tree returned by GET /access/permissions.
 package pveapi
 
-import "strings"
+import (
+	"fmt"
+	"strings"
+)
 
 // PermissionTree is the shape of GET /access/permissions response data.
 // It maps ACL paths to a map of privilege-name → propagate-flag.
@@ -99,6 +102,19 @@ type UpdateUserRequest struct {
 	// Append must be true (send append=1); omitting it defaults to append=0
 	// which replaces rather than merges existing attributes.
 	Append bool
+}
+
+// Validate rejects unsafe UpdateUserRequest combinations before any HTTP
+// request can be constructed. Renewal must always keep the PVE user enabled
+// and send append=1; the false zero values disable the user or wipe groups.
+func (r UpdateUserRequest) Validate() error {
+	if !r.Enable {
+		return fmt.Errorf("pveapi: UpdateUserRequest for %q is unsafe: enable=false would disable the lease user", r.UserID)
+	}
+	if !r.Append {
+		return fmt.Errorf("pveapi: UpdateUserRequest for %q is unsafe: append=false would replace user attributes and may wipe groups", r.UserID)
+	}
+	return nil
 }
 
 // UserInfo is the response shape for GET /access/users/{userid}.

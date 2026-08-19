@@ -309,6 +309,13 @@ func TestClassifyPVEErrorIntegration(t *testing.T) {
 			method:     http.MethodGet,
 			wantErr:    ErrForbidden,
 		},
+		{
+			name:       "unauthenticated via GetPermissions",
+			statusCode: 401,
+			body:       ``,
+			method:     http.MethodGet,
+			wantErr:    ErrUnauthenticated,
+		},
 	}
 
 	for _, tc := range tests {
@@ -343,6 +350,76 @@ func TestClassifyPVEErrorIntegration(t *testing.T) {
 				t.Errorf("got error %v; want errors.Is(%v)", err, tc.wantErr)
 			}
 		})
+	}
+}
+
+// TestUpdateUserRejectsUnsafeRequestsBeforeHTTP verifies the renewal safety
+// guard: Enable=false or Append=false must fail before any HTTP request is sent.
+func TestUpdateUserRejectsUnsafeRequestsBeforeHTTP(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		req  UpdateUserRequest
+	}{
+		{
+			name: "enable false",
+			req:  UpdateUserRequest{UserID: "vault-test@pve", Expire: 999, Groups: "grp", Enable: false, Append: true},
+		},
+		{
+			name: "append false",
+			req:  UpdateUserRequest{UserID: "vault-test@pve", Expire: 999, Groups: "grp", Enable: true, Append: false},
+		},
+	}
+
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			requestCount := 0
+			ts := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				requestCount++
+				_ = json.NewEncoder(w).Encode(map[string]interface{}{"data": nil}) //nolint:errcheck // httptest handler
+			}))
+			defer ts.Close()
+
+			client := makeTestClient(t, ts.URL, "admin@pve!tok", "secret")
+			err := client.UpdateUser(context.Background(), tc.req)
+			if err == nil {
+				t.Fatal("expected validation error, got nil")
+			}
+			if requestCount != 0 {
+				t.Errorf("server saw %d requests; want 0", requestCount)
+			}
+		})
+	}
+}
+
+// TestMockUpdateUserRejectsUnsafeRequestsBeforeLog verifies the mock enforces
+// the same UpdateUserRequest validation before recording a call or invoking hooks.
+func TestMockUpdateUserRejectsUnsafeRequestsBeforeLog(t *testing.T) {
+	t.Parallel()
+
+	mc := &MockClient{
+		UpdateUserFn: func(context.Context, UpdateUserRequest) error {
+			t.Fatal("UpdateUserFn must not be called for invalid requests")
+			return nil
+		},
+	}
+
+	err := mc.UpdateUser(context.Background(), UpdateUserRequest{
+		UserID: "vault-test@pve",
+		Expire: 999,
+		Groups: "grp",
+		Enable: true,
+		Append: false,
+	})
+	if err == nil {
+		t.Fatal("expected validation error, got nil")
+	}
+	if len(mc.CallLog) != 0 {
+		t.Errorf("mock logged %d calls; want 0", len(mc.CallLog))
 	}
 }
 

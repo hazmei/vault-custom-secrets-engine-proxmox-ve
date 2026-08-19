@@ -1285,3 +1285,29 @@ func TestCredsRead_WALNonce_EqualsCreateUserComment(t *testing.T) {
 		t.Errorf("walUser.Nonce = %q; want %s prefix (walCommentPrefix)", storedNonce, walCommentPrefix)
 	}
 }
+
+// TestCredsRead_UnauthenticatedCreateUserDiagnostic verifies DR-1 issuance
+// diagnostics: an admin-token 401 sentinel is wrapped with a human-readable
+// operator hint while preserving errors.Is.
+func TestCredsRead_UnauthenticatedCreateUserDiagnostic(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	b, storage := setupBackendForCreds(t, "testrole", credRoleData(), func(mc *pveapi.MockClient) {
+		mc.CreateUserError = fmt.Errorf("pveapi: CreateUser: %w", pveapi.ErrUnauthenticated)
+	})
+
+	resp, err := readCreds(ctx, b, storage, "testrole")
+	if err == nil && (resp == nil || !resp.IsError()) {
+		t.Fatal("expected unauthenticated issuance error, got success")
+	}
+	if err == nil {
+		err = resp.Error()
+	}
+	if !errors.Is(err, pveapi.ErrUnauthenticated) {
+		t.Fatalf("expected errors.Is ErrUnauthenticated; got %v", err)
+	}
+	if !strings.Contains(err.Error(), "admin token unauthenticated") || !strings.Contains(err.Error(), "check config credentials") {
+		t.Errorf("error missing admin-token diagnostic: %q", err.Error())
+	}
+}

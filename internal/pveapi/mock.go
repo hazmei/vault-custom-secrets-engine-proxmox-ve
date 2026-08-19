@@ -242,6 +242,10 @@ func (m *MockClient) CreateToken(ctx context.Context, userid, tokenid string) (s
 
 // UpdateUser implements Client.
 func (m *MockClient) UpdateUser(ctx context.Context, req UpdateUserRequest) error {
+	if err := req.Validate(); err != nil {
+		return err
+	}
+
 	m.log("UpdateUser", req)
 	if m.UpdateUserFn != nil {
 		return m.UpdateUserFn(ctx, req)

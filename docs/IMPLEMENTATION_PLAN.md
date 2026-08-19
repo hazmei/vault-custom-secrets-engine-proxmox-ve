@@ -1085,6 +1085,10 @@ before or during the phase where its call site is introduced.
 
 #### DR-1 — `ErrUnauthenticated` (401) sentinel
 
+**Status**: Complete — implemented on `fix/dr-1-dr-3-hardening`. `ErrUnauthenticated` is mapped
+from any HTTP 401 response before body-string classification, and issuance, renewal, and
+revocation wrap it with an admin-token diagnostic while preserving `errors.Is`.
+
 **What**: Add a new typed sentinel `ErrUnauthenticated` in `internal/pveapi/errors.go` and map
 HTTP 401 to it in `classifyPVEError` (`client.go`). Currently a 401 response (e.g. from an
 expired or revoked admin token) falls through to a generic `"HTTP 401 <endpoint>"` error.
@@ -1106,6 +1110,10 @@ Unit test: `classifyPVEError(401, []byte{})` returns `ErrUnauthenticated`.
 ---
 
 #### DR-2 — Split `ErrNotFound` into `ErrUserNotFound` / `ErrGroupNotFound`
+
+**Status**: Complete — `ErrUserNotFound` and `ErrGroupNotFound` are distinct sentinels, client
+classification maps the relevant PVE body strings to the correct sentinel, and call sites key
+revocation idempotency specifically on `ErrUserNotFound`.
 
 **What**: `ErrNotFound` is currently a single sentinel overloaded across three body strings:
 `"no such user"`, `"no such group"`, and `"does not exist"`. Different call sites require
@@ -1131,6 +1139,10 @@ failure. Unit tests: table-driven body fixtures covering both sentinels.
 ---
 
 #### DR-3 — `UpdateUserRequest` misuse guard (renewal safety)
+
+**Status**: Complete — `UpdateUserRequest.Validate()` rejects unsafe `Enable=false` and
+`Append=false` requests before any HTTP request is built; the mock client applies the same
+validation before recording calls or invoking hooks.
 
 **What**: `UpdateUserRequest{Enable bool, Append bool}` has dangerous zero values: `Enable=false`
 sends `enable=0` (disabling the lease user in PVE); `Append=false` flips the PUT to a

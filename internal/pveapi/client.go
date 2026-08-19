@@ -4,10 +4,10 @@
 // Base URL: <address>/api2/json  (address already includes scheme, e.g. https://host:8006)
 //
 // Error contract: PVE 9.2.10 uses HTTP 500 and 400 with a body for conditions
-// that REST would encode as 404/409. Error classification is GATED to HTTP 400
-// and 500; all other non-2xx statuses (e.g. 502/503 from a proxy) fall through
-// to a generic "HTTP <status>" error to prevent false-positive sentinel matches.
-// Only HTTP 403 is a genuine status to branch on.
+// that REST would encode as 404/409. Body-string classification is GATED to
+// HTTP 400 and 500; all other non-2xx statuses (e.g. 502/503 from a proxy)
+// fall through to a generic "HTTP <status>" error to prevent false-positive
+// sentinel matches. HTTP 401 and HTTP 403 are genuine statuses to branch on.
 // (Confirmed PVE 9.2.10, PVE_PROBES.md Probes 2–6b.)
 //
 // Secret hygiene: token_secret (the admin credential from config, and the
@@ -209,6 +209,7 @@ func (c *httpClient) doRequest(
 //   - body "no such user"         → ErrUserNotFound  (HTTP 500)
 //   - body "does not exist"       → ErrGroupNotFound (HTTP 500, e.g. group GET)
 //   - body "no such group"        → ErrGroupNotFound (HTTP 500, user create with bad group)
+//   - HTTP 401 (any body)         → ErrUnauthenticated
 //   - HTTP 403 (any body)         → ErrForbidden
 //   - anything else               → nil (caller wraps with status+endpoint)
 //
@@ -228,6 +229,9 @@ func (c *httpClient) doRequest(
 // "no such group" map to ErrGroupNotFound. Call sites use errors.Is to
 // distinguish the two without a second body-string scan.
 func classifyPVEError(status int, body []byte) error {
+	if status == http.StatusUnauthorized {
+		return ErrUnauthenticated
+	}
 	if status == http.StatusForbidden {
 		return ErrForbidden
 	}
@@ -443,6 +447,10 @@ func (c *httpClient) CreateToken(ctx context.Context, userid, tokenid string) (s
 //   - enable: serialized as "1" (never bool/omitempty).
 //   - append: MUST be "1" on renewal PUTs; omitting defaults to replace (append=0).
 func (c *httpClient) UpdateUser(ctx context.Context, req UpdateUserRequest) error {
+	if err := req.Validate(); err != nil {
+		return err
+	}
+
 	path := "/access/users/" + url.PathEscape(req.UserID)
 
 	form := url.Values{}

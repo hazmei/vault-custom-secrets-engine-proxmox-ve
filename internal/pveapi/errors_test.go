@@ -68,6 +68,18 @@ func TestClassifyPVEError(t *testing.T) {
 		},
 		// ── ErrForbidden cases ────────────────────────────────────────────
 		{
+			name:   "401 empty body → ErrUnauthenticated",
+			status: 401,
+			body:   []byte{},
+			want:   ErrUnauthenticated,
+		},
+		{
+			name:   "401 nonempty body → ErrUnauthenticated",
+			status: 401,
+			body:   []byte(`{"message":"authentication failed"}`),
+			want:   ErrUnauthenticated,
+		},
+		{
 			name:   "403 permission denied (genuine status)",
 			status: 403,
 			body:   []byte(`{"data":null,"message":"Permission check failed (/access/groups, User.Modify)"}`),
