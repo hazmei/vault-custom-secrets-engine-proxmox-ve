@@ -186,6 +186,57 @@ Key points:
 - Run against containerized or dev Proxmox VE instance with test admin token
 - CI integration: gated job (manual trigger or nightly) due to live credentials requirement
 
+#### Acceptance Test Prerequisites
+
+The root `acceptance_test.go` suite mutates a live Proxmox VE cluster. Run it
+only against a disposable/dev cluster or a production-like cluster where
+temporary `vaultacc-*@pve` users can be safely created, expired, renewed, and
+deleted. The suite targets the PVE 9.2.10 behavior documented in
+`docs/PVE_PROBES.md`.
+
+Required environment:
+
+```bash
+export VAULT_ACC=1
+export PVE_ADDR="https://pve.example.com:8006"
+export PVE_TOKEN_ID="vault-admin@pve!tokenid"
+export PVE_TOKEN_SECRET="..."
+export PVE_TEST_GROUP="vault-test-grp"
+```
+
+`PVE_TEST_GROUP` must already exist. The admin token must pass the engine's
+normal config and role validation: `User.Modify` at `/access/groups` with
+propagation to `/access/groups/<PVE_TEST_GROUP>`, `Sys.Audit` at
+`/access/groups`, and `Realm.AllocateUser` at `/access/realm/pve`. The group
+must be bound out-of-band to privileges that allow the behavioral check endpoint
+to return HTTP 200 for an issued token. By default that endpoint is
+`/cluster/resources?type=vm`; override it when needed:
+
+```bash
+export PVE_BEHAVIORAL_PATH="/cluster/resources?type=vm"
+```
+
+Optional TLS settings:
+
+```bash
+export PVE_CA_CERT="$(cat /path/to/pve-ca.pem)"
+export PVE_TLS_SKIP_VERIFY=false
+```
+
+Optional insufficient-privilege canary. If unset, that sub-check is skipped
+clearly:
+
+```bash
+export PVE_INSUFFICIENT_TOKEN_ID="limited@pve!tokenid"
+export PVE_INSUFFICIENT_TOKEN_SECRET="..."
+```
+
+Run with:
+
+```bash
+make testacc
+```
+
 ## License
 
 This project is licensed under the Mozilla Public License 2.0 — see the [LICENSE](LICENSE) file for details.
