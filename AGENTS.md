@@ -61,7 +61,7 @@ See `docs/ARCHITECTURE.md` for full detail.
 (There is no standalone PVE user-update path; renewal reuses the full-replace PUT.)
 
 **Lease InternalData schema** (stored at issuance, read by Renew and Revoke):
-`pve_userid`, `group` (for full-replace renewal), `effective_max_ttl` (int64 ns; renewal ceiling), `role_name` (optional; renewal TTL fallback — absent on pre-issuance leases → renewal falls back to the lease's current TTL), and `expire` (Unix epoch; rewritten on each renewal).
+`pve_userid`, `group` (for full-replace renewal), `effective_max_ttl` (int64 ns; renewal ceiling), `role_name` (optional; renewal TTL fallback — absent on leases issued before c9338e0 → renewal falls back to the lease's current TTL), and `expire` (Unix epoch; rewritten on each renewal).
 
 **Revoke:**
 Single `DELETE /access/users/{userid}` — cascades to token(s) + group memberships + ACL. Only `pve_userid` is consumed (the cascade removes everything). Idempotency keys on body `"no such user"` (HTTP 500), not 404.
@@ -109,6 +109,7 @@ The admin token never needs to hold the delegated roles — those are bound to o
 - **Acceptance tests:** Prefix `TestAcc*`, gated by `VAULT_ACC=1` (HashiCorp convention), run against a containerized/dev Proxmox — gated CI job, not every PR.
 - **Unit tests** use a mocked PVE client (`internal/pveapi/mock.go`).
 - Run: `go build ./...`, `go test ./...`, `VAULT_ACC=1 go test ./... -run TestAcc` (acceptance, gated), `golangci-lint run`.
+- **CI** (`.github/workflows/ci.yml`) runs build + unit tests + golangci-lint (pinned v2.12.2) on every push/PR. The lint version is pinned in the Makefile (`GOLANGCI_LINT_VERSION`) so local and CI agree.
 
 ## Docs
 

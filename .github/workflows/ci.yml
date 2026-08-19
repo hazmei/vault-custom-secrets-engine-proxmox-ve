@@ -1,0 +1,43 @@
+# CI — enforces the green build/test/lint baseline on every push and pull request.
+# golangci-lint is pinned (see lint job) so local (make lint) and CI agree exactly.
+
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: go build ./...
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: go test ./...
+        # Unit tests only. Acceptance tests (TestAcc*) are gated by VAULT_ACC=1
+        # and require a live/containerized PVE — not run here.
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.12.2   # pre-built binary (built with Go >= 1.25.7) clears the build-version guard for this go 1.25.7 module
