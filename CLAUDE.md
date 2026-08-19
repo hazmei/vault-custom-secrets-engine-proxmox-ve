@@ -29,15 +29,18 @@ These require reading `docs/ARCHITECTURE.md` end-to-end to discover:
   base32 (~40 bits). Validate `user_prefix` and role name at **write time**, not issue time.
 
 - **WAL issuance ordering** (`docs/ARCHITECTURE.md`, WAL-Based Orphan Recovery section) —
-  `PutWAL(userid)` → `POST /access/users` → **`GET /access/users/{userid}` read-back assert
+  generate `nonce = "vault-wal:" + <8-char-random>` → `PutWAL(kind="user", {user_id, nonce})`
+  (capture returned WAL id) → `POST /access/users` with `comment=nonce` → **`GET /access/users/{userid}` read-back assert
   group membership** (PVE silently drops unresolvable group ids with HTTP 200; MUST verify
-  before minting token) → `POST .../token/{tokenid}` → `DeleteWAL` → *then* return the
+  before minting token) and warn if `comment != nonce` → `POST .../token/lease` → `DeleteWAL` → *then* return the
   Secret. Every step precedes returning the `*logical.Response`; Vault core registers the
   lease after the backend returns and there is no post-lease hook. If `DeleteWAL` fails,
   do **not** return the Secret — best-effort `DELETE` the user and error out. Implement
-  `WALRollback` to sweep orphans (body `"no such user"` on HTTP 500 = success — PVE never
-  returns 404 for a missing user, Probe 3). Note also: `PutWAL` returns a WAL id and
-  `DeleteWAL` takes that id, not the userid.
+  `WALRollback` to sweep only nonce-owned orphans: `GetUser`, require live `comment == nonce`,
+  then delete. A body `"no such user"` on HTTP 500 is idempotent success for already-gone users
+  (PVE never returns 404 for a missing user, Probe 3), but rollback ownership is nonce-gated,
+  not body-string-gated. Note also: `PutWAL` returns a WAL id and `DeleteWAL` takes that id,
+  not the userid. Do not add compatibility aliases for old WAL payload keys.
 
 - **Lease internalData fields** (`docs/ARCHITECTURE.md`, Storage Schema section) — `pve_userid` (fixed),
   `group` (fixed at issue; the target PVE group, re-sent on every full-replace renewal PUT so

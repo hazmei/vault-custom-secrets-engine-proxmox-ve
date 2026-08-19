@@ -13,8 +13,9 @@ These design choices are baked into the implementation and are **not open for re
 - **DELETE `<mount>/config` guard**: ALWAYS requires `force=true` query parameter. The engine does NOT track active leases (no reliable SDK lease-count API; a counter would drift on crash/failover). Outstanding leases become non-revocable and non-renewable on config delete — renewal also loads config to reach PVE, so it fails immediately too; operators must revoke leases first, then delete config.
 - **userid-collision retry bound**: 5 attempts maximum, then surface as internal error.
 - **Random suffix format**: 8-character lowercase base32 (Crockford-style alphabet without padding), generated from `crypto/rand` (~40 bits entropy).
-- **WAL kind name**: `"pve_user"`; `WALRollbackMinAge`: 5 minutes.
-- **Token `tokenid`**: Fixed as `vault` (every issued token has `tokenid=vault`; uniqueness comes from the per-lease unique userid).
+- **WAL kind name**: `"user"`; `WALRollbackMinAge`: 5 minutes. WAL payload keys are `user_id` and `nonce`.
+- **WAL nonce contract**: Every issuance attempt generates `nonce = "vault-wal:" + <8-character random suffix>`. The exact nonce string is stored in the WAL payload and written to the PVE user's `comment`; rollback deletes only when the live comment equals the WAL nonce. This WAL ownership check is distinct from revoke idempotency, which keys on the PVE body string `"no such user"`.
+- **Token `tokenid`**: Fixed as `lease` (every issued token has `tokenid=lease`; uniqueness comes from the per-lease unique userid).
 - **No active_lease_count counter**: The engine does NOT track a counter of active leases anywhere in storage (neither in config nor separate keys). Lease tracking is left to Vault core.
 - **TTL computation uses `framework.CalculateTTL`** (`vault/sdk/framework/lease.go`), not a hand-rolled `min()` helper. It already implements role-value → config-default → `sysView.DefaultLeaseTTL()` fallback, caps at `min(backendMaxTTL, sysView.MaxLeaseTTL())`, and caps renewals from `startTime` (the lease `IssueTime`). There is no `ttl.go`.
 - **No issuance-time requested TTL**: `<mount>/creds/:role` declares NO `ttl` field, matching the database and terraform secrets engines. The effective TTL comes from role values with config defaults as fallback; `increment` is passed to `CalculateTTL` only on renewal (from `req.Secret.Increment`).
@@ -285,7 +286,7 @@ type proxmoxRole struct {
   3. Validate `user_prefix` and role `:name` charset (see `userid.go`).
   4. Validate userid length budget: `len(user_prefix) + 1 + len(role) + 1 + 8 (random suffix) + 1 + len(realm) <= 64` (see `docs/ARCHITECTURE.md` Roles section — synthetic userid format and length budget). This runs AFTER realm defaulting so the budget uses the effective realm.
   5. Load config, build client (via `getClient`).
-  6. Call `client.GetGroup(role.Group)` — confirm group exists (GetGroup returns ErrNotFound when PVE responds HTTP 500 + body "does not exist" — NOT 404). Surface ErrNotFound as `"group <name> does not exist on Proxmox cluster"`.
+  6. Call `client.GetGroup(role.Group)` — confirm group exists (GetGroup returns ErrGroupNotFound when PVE responds HTTP 500 + body "does not exist" — NOT 404). Surface ErrGroupNotFound as `"group <name> does not exist on Proxmox cluster"`.
   7. Call `client.GetPermissions()`, parse tree, confirm `Realm.AllocateUser` at `/access/realm/<role.realm>` via ancestor-path walk.
    7b. Per-group-path check (propagate-0 detection, see PVE_PROBES.md Probe 9): confirm User.Modify is EFFECTIVE at the exact
       per-group path /access/groups/<role.Group> using HasPrivilege. This catches a --propagate 0
@@ -316,7 +317,7 @@ Secret type definition and lifecycle callbacks.
 **Key functions**:
 - `secretToken(b) *framework.Secret` — defines the `pve_token` secret type:
   - `Type: "pve_token"`
-  - `Fields: schema for pve_userid, token_id, token_secret` (data returned to user)
+  - `Fields: schema for user_id, token_id, token_secret` (data returned to user)
   - `Renew: b.secretTokenRenew`
   - `Revoke: b.secretTokenRevoke`
   InternalData additionally carries `group` (not a user-facing Field) — the Renew callback reads it to re-send `groups=` on the full-replace PUT. Ensure the issuance path writes `group` into InternalData.
@@ -334,12 +335,12 @@ PVE API client interface and real implementation.
 type Client interface {
     GetVersion(ctx) (string, error)
     GetPermissions(ctx) (PermissionTree, error)
-    GetGroup(ctx, group string) error  // ErrNotFound mapped from 500 + body "does not exist"
+    GetGroup(ctx, group string) error  // ErrGroupNotFound mapped from 500 + body "does not exist"
     CreateUser(ctx, req CreateUserRequest) error  // ErrConflict from 500 + body "already exists"
-    GetUser(ctx, userid string) (UserInfo, error)  // NEW: read-back; ErrNotFound from 500 + body "no such user"
-    CreateToken(ctx, userid, tokenid string, privsep bool) (string, error)  // returns token secret; ErrConflict from 400 + body "Token already exists"
+    GetUser(ctx, userid string) (UserInfo, error)  // NEW: read-back; ErrUserNotFound from 500 + body "no such user"
+    CreateToken(ctx, userid, tokenid string) (string, error)  // always sends privsep=0; returns token secret; ErrConflict from 400 + body "Token already exists"
     UpdateUser(ctx, req UpdateUserRequest) error  // RENAMED; full-replace, re-sends groups
-    DeleteUser(ctx, userid string) error  // ErrNotFound from 500 + body "no such user" (idempotent)
+    DeleteUser(ctx, userid string) error  // ErrUserNotFound from 500 + body "no such user" (idempotent)
 }
 
 type CreateUserRequest struct {
@@ -347,6 +348,7 @@ type CreateUserRequest struct {
     Groups string  // pve-groupid-list: ONE comma-separated field, NEVER array-repeated
     Expire int64
     Enable bool
+    Comment string // WAL ownership nonce: vault-wal:<8-char-random>
 }
 
 // NEW: renewal must re-send expire+groups+enable+append because PUT is full-replace.
@@ -363,6 +365,7 @@ type UserInfo struct {
     Groups []string
     Enable bool
     Expire int64
+    Comment string
 }
 ```
 
@@ -370,13 +373,14 @@ type UserInfo struct {
 - HTTP client configured with `tls_skip_verify` or `ca_cert`.
 - Auth header: `Authorization: PVEAPIToken=<token_id>=<token_secret>` (where `token_id` is already in `<user>@<realm>!<tokenid>` format from config).
 - Base URL: append `/api2/json` to the configured address as given (do not prepend a scheme; the configured `address` already includes the scheme, e.g. `https://pve.example.com:8006`).
-- **Error mapping is BODY-STRING based, not status-code based** (confirmed PVE 9.2.10, PVE_PROBES.md Probes 2–6b). PVE returns HTTP 500 (and 400 for token conflict) with an error body for conditions REST would code 404/409. **The match must run against the RAW FULL BODY, not just the `message` field**: the duplicate-tokenid string `"Token already exists"` lives in `errors.tokenid`, NOT in `message` (Probe 6b: `{"message":"Parameter verification failed.\n","data":null,"errors":{"tokenid":"Token already exists."}}`). A helper `classifyPVEError(status int, body []byte) error` searches the entire decoded body — the top-level `message` string AND every value under the `errors` object — for the following substrings (case-insensitive, tolerant of trailing `\n` and embedded quoted ids). Implementation: decode into `struct{ Message string; Errors map[string]string }`, then concatenate `Message` + all `Errors` values into one haystack (or simply substring-scan the raw `[]byte`), and match:
+- **Error mapping is BODY-STRING based for PVE business errors, with HTTP 401/403 handled as genuine statuses first** (confirmed PVE 9.2.10, PVE_PROBES.md Probes 2–6b). PVE returns HTTP 500 (and 400 for token conflict) with an error body for conditions REST would code 404/409. **The match must run against the RAW FULL BODY, not just the `message` field**: the duplicate-tokenid string `"Token already exists"` lives in `errors.tokenid`, NOT in `message` (Probe 6b: `{"message":"Parameter verification failed.\n","data":null,"errors":{"tokenid":"Token already exists."}}`). A helper `classifyPVEError(status int, body []byte) error` checks HTTP 401/403 before body-string classification, then searches the entire decoded body — the top-level `message` string AND every value under the `errors` object — for the following substrings (case-insensitive, tolerant of trailing `\n` and embedded quoted ids). Implementation: decode into `struct{ Message string; Errors map[string]string }`, then concatenate `Message` + all `Errors` values into one haystack (or simply substring-scan the raw `[]byte`), and match:
+  - HTTP 401 (any body, including empty) → `ErrUnauthenticated` (genuine status; check before body-string classification)
+  - HTTP 403 (any) → `ErrForbidden` (403 IS a real status)
   - body contains `"already exists"` (user create, HTTP 500) → `ErrConflict`
   - body contains `"Token already exists"` (token create, HTTP 400) → `ErrConflict`
-  - body contains `"no such user"` (GET/DELETE user, HTTP 500) → `ErrNotFound`
-  - body contains `"does not exist"` (GET group, HTTP 500) → `ErrNotFound`
-  - body contains `"no such group"` (create user with nonexistent group, HTTP 500) → `ErrNotFound`
-  - HTTP 403 (any) → `ErrForbidden` (403 IS a real status)
+  - body contains `"no such user"` (GET/DELETE user, HTTP 500) → `ErrUserNotFound`
+  - body contains `"does not exist"` (GET group, HTTP 500) → `ErrGroupNotFound`
+  - body contains `"no such group"` (create user with nonexistent group, HTTP 500) → `ErrGroupNotFound`
   - everything else → wrapped error carrying status + endpoint (redact body for token endpoints).
   Do NOT branch on 404/409 — PVE never returns them for these conditions. Vault core already retries revoke/renew on any returned error, so no separate retryable type is needed (see `errors.go`).
 
@@ -421,11 +425,13 @@ Typed errors for mapping PVE HTTP responses.
 
 **Key errors**:
 ```go
-// Mapped by BODY STRING, not status code (PVE 9.2.10 returns 500/400 with a message body
-// for these conditions — see client.go classifyPVEError and PVE_PROBES.md Probes 2–6b).
-var ErrNotFound  = errors.New("pveapi: not found")   // body "no such user" / "does not exist" (HTTP 500)
-var ErrConflict  = errors.New("pveapi: conflict")    // body "already exists" (HTTP 500) / "Token already exists" (HTTP 400)
-var ErrForbidden = errors.New("pveapi: forbidden")   // HTTP 403 (genuine status)
+// Business errors are mapped by BODY STRING (PVE 9.2.10 returns 500/400 with a message body
+// for these conditions); HTTP 401/403 are genuine status codes checked before body matching.
+var ErrUserNotFound  = errors.New("pveapi: user not found")  // body "no such user" (HTTP 500)
+var ErrGroupNotFound = errors.New("pveapi: group not found") // body "does not exist" / "no such group" (HTTP 500)
+var ErrConflict      = errors.New("pveapi: conflict")        // body "already exists" (HTTP 500) / "Token already exists" (HTTP 400)
+var ErrUnauthenticated = errors.New("pveapi: unauthenticated") // HTTP 401 (genuine status; expired/revoked/invalid token)
+var ErrForbidden     = errors.New("pveapi: forbidden")       // HTTP 403 (genuine status)
 ```
 
 No `RetryableError` type: nothing consumes it. Issuance errors go straight back to the
@@ -445,34 +451,39 @@ WAL entry and rollback logic.
 
 **Key types**:
 ```go
-const walTypeUser = "pve_user"
+const walTypeUser = "user"
+
+const walCommentPrefix = "vault-wal:"
 
 type walUser struct {
-    UserID string `json:"userid"`
+    UserID string `json:"user_id" mapstructure:"user_id"`
+    Nonce  string `json:"nonce" mapstructure:"nonce"`
 }
 ```
 
 **Key functions**:
 - `walRollback(ctx, req, kind, data) error` — registered via `backend.WALRollback` (type `framework.WALRollbackFunc`):
   1. Reject unknown `kind`.
-  2. Decode `data` into `walUser`. **`data` arrives as `interface{}` holding a `map[string]interface{}`** (the WAL entry is JSON round-tripped through storage), NOT a `walUser` — decode with `mapstructure.Decode` or a `json.Marshal`/`Unmarshal` round-trip. A direct type assertion to `walUser` panics/fails.
+  2. Decode `data` into `walUser`. **`data` arrives as `interface{}` holding a `map[string]interface{}`** (the WAL entry is JSON round-tripped through storage), NOT a `walUser` — decode with `mapstructure.Decode` or a `json.Marshal`/`Unmarshal` round-trip. A direct type assertion to `walUser` panics/fails. Required payload keys are `user_id` and `nonce`; do not add compatibility aliases.
+     - If `user_id` is missing or empty: return an error (WAL entry retained; rollback retries/alerts). The engine cannot safely infer the cleanup target.
   3. Load config, build client.
-  4. Call `client.DeleteUser(userid)`.
-   5. Treat ErrNotFound (body "no such user", HTTP 500) as success (idempotent).
-  6. Return `nil` on success (WAL entry deleted); return error to retry later.
+  4. Call `client.GetUser(userid)`.
+     - If ErrUserNotFound (body "no such user", HTTP 500): return nil (WAL entry deleted; user already gone).
+     - If transient error: return error (WAL entry retained; rollback retries later).
+  5. Compare live `UserInfo.Comment` to `walUser.Nonce`.
+     - If `comment == nonce`: this is our orphan; call `client.DeleteUser(userid)`.
+     - If `comment != nonce` or `nonce == ""`: log an error and return nil, dropping the WAL entry without deleting the user. This protects foreign/pre-existing users and old malformed WAL entries.
+  6. Treat ErrUserNotFound from DeleteUser (body "no such user", HTTP 500) as success.
+  7. Return `nil` on success (WAL entry deleted); return error to retry later.
 
-**Accepted risk (document in the file header)**: on a userid collision (ErrConflict) the userid belongs to
-someone else — normally the handler deletes its own WAL entry and retries with a new suffix.
-If the process dies between `PutWAL` and receiving the ErrConflict, the surviving WAL entry names a
-user this engine did NOT create, and rollback will delete it — potentially another live
-lease's user. Requires a suffix collision (~2⁻⁴⁰) AND a crash inside that window. Documented,
-not mitigated.
-
-A second path to the same outcome: the ErrConflict branch in the issuance loop calls
-`framework.DeleteWAL` but discards any error from that call. A failed `DeleteWAL` on the
-abandoned attempt leaves a WAL entry naming a user this engine did NOT create — same
-consequence as above, same probability class (requires both a suffix collision and a
-transient storage failure). Same bucket; just document it.
+**Accepted risk (document in the file header)**: rollback is deliberately conservative.
+If a WAL entry's nonce is empty or does not match the PVE user's `comment`, rollback treats
+the user as foreign/ownership-lost, logs the condition, and drops the WAL entry without
+deleting the user. This can leak an inert account that requires manual cleanup, but it
+prevents WAL rollback from deleting a foreign/pre-existing user after a userid collision.
+If `user_id` is missing or empty, rollback returns an error instead of dropping the WAL entry;
+operators must inspect/repair/remove that malformed WAL entry because there is no safe PVE
+userid to look up or delete.
 
 **References**: `docs/ARCHITECTURE.md` — WAL-Based Orphan Recovery section, walRollback pseudocode.
 
@@ -530,7 +541,7 @@ Unit-test it beside `ttls()`: (roleMax=0,sysMax=X)→X; (X,0)→X; (0,0)→0; (A
 Userid assembly, validation, and random suffix generation.
 
 **Key functions**:
-- `buildUserID(prefix, role, realm, suffix string) (string, error)` — assembles `{prefix}-{role}-{suffix}@{realm}`. The caller generates the suffix explicitly (via `randomSuffix()`) so the retry loop can control it and replace it on ErrConflict without calling the function twice.
+- `buildUserID(prefix, role, suffix, realm string) string` — assembles `{prefix}-{role}-{suffix}@{realm}`. The caller generates the suffix explicitly (via `randomSuffix()`) so the retry loop can control it and replace it on ErrConflict without calling the function twice. Length and component validation happen at role-write time.
 - `randomSuffix() (string, error)` — generates 8-character lowercase base32 string from `crypto/rand` (Crockford alphabet: `0123456789abcdefghjkmnpqrstvwxyz`, no padding).
 - `validateUserComponent(s string) error` — rejects if `s` is EMPTY, or contains whitespace, `:`, `/`, `@`, or `!`. The `@` and `!` characters break userid/token-header parsing (`<user>@<realm>!<tokenid>` and the `Authorization: PVEAPIToken=<user>@<realm>!<tokenid>=<secret>` header), so they must be rejected in `user_prefix` and role name even though the PVE username regex `[^\s:/]+` alone would permit them. Empty is rejected so `user_prefix` cannot be blank.
 - `validateLengthBudget(prefix, role, realm string) error` — checks `len(prefix) + 1 + len(role) + 1 + 8 + 1 + len(realm) <= 64`.
@@ -592,12 +603,14 @@ Stored in `Secret.InternalData` for each issued credential:
     "group":             "vault-vm-admins",            // NEW: target PVE group, fixed at issue; re-sent on renewal (PUT is full-replace); NOT re-derived from role
     "expire":            1672531200,                   // Unix epoch, mutable on renewal
     "role_name":         "myrole",                     // fixed at issue
-    "effective_max_ttl": 86400                         // seconds, fixed at issue
+    "effective_max_ttl": 86400000000000                // nanoseconds, fixed at issue
 }
 ```
 
-`effective_max_ttl` is what renewal feeds to `CalculateTTL` as `backendMaxTTL` — it must NOT
-be recomputed from the role, which may have changed since issuance. The lease's own
+`effective_max_ttl` is stored as an `int64` nanosecond duration (the raw `int64(time.Duration)`
+value), and renewal converts it with `time.Duration(effective_max_ttl)` before feeding it to
+`CalculateTTL` as `backendMaxTTL`. It must NOT be recomputed from the role, which may have
+changed since issuance. The lease's own
 `req.Secret.IssueTime` supplies `startTime`; `expire` is written for operator/audit
 correlation and is not read by renew/revoke. `role_name` IS read by the renew path (to load
 the current role for its `ttl` as `backendTTL` only) — if the role has since been deleted,
@@ -608,13 +621,19 @@ be re-derived from the role, which may have been deleted or re-bound.
 
 ### WAL Entry Schema
 
-WAL entry at `wal/<uuid>` (kind `"pve_user"`):
+WAL entry at `wal/<uuid>` (kind `"user"`):
 
 ```go
 type walUser struct {
-    UserID string `json:"userid"`
+    UserID string `json:"user_id" mapstructure:"user_id"`
+    Nonce  string `json:"nonce" mapstructure:"nonce"`
 }
 ```
+
+`Nonce` is the full prefixed value `vault-wal:<8-character random suffix>` and must exactly
+match the PVE user's `comment` field for WAL rollback to delete the user. This nonce-gated
+ownership contract is separate from revocation idempotency; revoke still treats `DeleteUser`
+returning body `"no such user"` as success.
 
 **References**: `docs/ARCHITECTURE.md` — Storage Schema section, lease internalData, WAL-Based Orphan Recovery section.
 
@@ -662,67 +681,62 @@ Every attempt therefore has to keep its own `walID`.
 6. Retry loop (bound = 5 attempts):
    a. suffix, err := randomSuffix()
       - If err: return error
-   b. userid, err := buildUserID(role.UserPrefix, roleName, role.Realm, suffix)
-      - If err: return error (length budget exceeded — should have been caught at role write time)
-   c. walID, err := framework.PutWAL(ctx, req.Storage, walTypeUser, walUser{UserID: userid})
-      - If err: return error (nothing created yet; nothing to clean up)
-   d. CreateUser({UserID: userid, Groups: role.Group, Expire: leaseExpiry, Enable: true})  // single CSV groups field
-   e. If ErrConflict (mapped from HTTP 500 + body "already exists" — NOT a 409):
-      - framework.DeleteWAL(ctx, req.Storage, walID)
-      - continue loop (try new suffix)
-   f. If other error (non-Conflict):
-       // PVE may have committed the user before the response failed (timeout/5xx).
-       // Best-effort delete, then conditionally drop the WAL — same discipline as
-       // the CreateToken error path (steps 8–9). Do NOT change the ErrConflict
-       // collision-retry path above (step 6e), which correctly DeleteWALs and loops.
-       - delErr := DeleteUser(userid) [best-effort]
-       - if delErr == nil OR errors.Is(delErr, pveapi.ErrNotFound):
-             // User is gone (or was never committed) — safe to release the WAL entry.
-             framework.DeleteWAL(ctx, req.Storage, walID) [best-effort]
-       - else:
-             // DeleteUser failed transiently — LEAVE the WAL entry so walRollback
-             // retries the cleanup. Do NOT DeleteWAL here (would orphan the user).
-       - return error (wrap delErr if non-nil/non-NotFound so the operator sees the cleanup failure)
-   g. If success:
-       h. READ-BACK ASSERT (PVE silently drops unresolvable group ids with HTTP 200 on modify/append; on create, PVE instead REJECTS with HTTP 500 "no such group" — the read-back assertion covers both paths):
-            - info, err := GetUser(userid)
-            - if err or role.Group NOT in info.Groups:
+   b. userid := buildUserID(role.UserPrefix, roleName, suffix, role.Realm)
+   c. rawNonce, err := randomSuffix(); nonce := walCommentPrefix + rawNonce
+   d. walID, err := framework.PutWAL(ctx, req.Storage, walTypeUser, walUser{UserID: userid, Nonce: nonce})
+       - If err: return error (nothing created yet; nothing to clean up)
+    e. CreateUser({UserID: userid, Groups: role.Group, Expire: leaseExpiry, Enable: true, Comment: nonce})  // single CSV groups field; comment is WAL ownership marker
+    f. If ErrConflict (mapped from HTTP 500 + body "already exists" — NOT a 409):
+       - If framework.DeleteWAL(ctx, req.Storage, walID) fails: return error (abort issuance; nonce-gated rollback will not delete the foreign colliding user)
+       - continue loop (try new suffix)
+    g. If other error (non-Conflict):
+       // PVE may or may not have committed the user before the response failed
+       // (timeout/5xx). Leave the WAL entry in place and return the CreateUser
+       // error; walRollback will later GetUser(userid), drop the WAL if the user
+       // was never committed (ErrUserNotFound), or delete it only if the live
+       // comment still equals nonce. Do NOT inline DeleteUser here.
+       - return error (WAL retained for rollback)
+   h. If success:
+      READ-BACK ASSERT (PVE silently drops unresolvable group ids with HTTP 200 on modify/append; on create, PVE instead REJECTS with HTTP 500 "no such group" — the read-back assertion covers both paths):
+             - info, err := GetUser(userid)
+             - if err or role.Group NOT in info.Groups:
                 // NOTE: this fails closed — a transient GetUser error is treated the same as a
                 // confirmed-absent group (both tear down the user). Acceptable for correctness;
                 // for future retry/metrics, distinguish "group confirmed absent in a successful
                 // GetUser" from "GetUser errored (couldn't confirm)" in the log/error message.
                 - delErr := DeleteUser(userid)
-                - if delErr == nil OR errors.Is(delErr, pveapi.ErrNotFound):
+                 - if delErr == nil OR errors.Is(delErr, pveapi.ErrUserNotFound):
                       // user is gone (or never persisted) → safe to drop the WAL entry
                       framework.DeleteWAL(ctx, req.Storage, walID) [best-effort]
                 - else:
                       // DeleteUser failed transiently — LEAVE the WAL entry so walRollback
                       // retries the cleanup. Do NOT DeleteWAL here (would orphan the user).
                       // (walID still points at this userid.)
-                - return error "group membership not reflected after create (group %q may be unresolvable on cluster)"
-                  (wrap delErr if non-nil/non-NotFound so the operator sees the cleanup failure)
-      - break loop (keep walID for steps 8–9)
+                 - return error "group membership not reflected after create (group %q may be unresolvable on cluster)"
+                   (wrap delErr if non-nil/non-ErrUserNotFound so the operator sees the cleanup failure)
+             - if info.Comment != nonce: add a warning (non-fatal): WAL crash-recovery cleanup for this user may be disabled because the PVE comment did not preserve the nonce; direct revoke is unaffected.
+       - break loop (keep walID for steps 8–9)
 7. If loop exhausted (5 attempts all ErrConflict): return internal error "userid collision after 5 retries"
-8. tokenSecret, err := CreateToken(userid, "vault", privsep=false)  // wire form value "0"
+8. tokenSecret, err := CreateToken(userid, "lease")  // client always sends wire form value privsep=0
    - If ErrConflict (mapped from HTTP 400 + body "Token already exists" — NOT a 409):
        // Not expected: each lease has a unique fresh userid, and token ids are scoped
        // per-user. A conflict here is on OUR OWN freshly-created user — it does NOT
        // belong to a different active lease. Treat it like any other CreateToken error.
        - delErr := DeleteUser(userid) [best-effort cleanup of the user we just created]
-       - if delErr == nil OR errors.Is(delErr, pveapi.ErrNotFound):
+       - if delErr == nil OR errors.Is(delErr, pveapi.ErrUserNotFound):
              framework.DeleteWAL(ctx, req.Storage, walID) [best-effort]
        - else:
              // DeleteUser failed transiently — LEAVE the WAL entry for walRollback to retry.
              // Do NOT DeleteWAL.
-       - return internal error "token conflict on freshly-created userid (unexpected)" (wrap delErr if non-nil/non-NotFound)
+        - return internal error "token conflict on freshly-created userid (unexpected)" (wrap delErr if non-nil/non-ErrUserNotFound)
    - Else if err (any other error):
        - delErr := DeleteUser(userid) [best-effort cleanup of the user we just created]
-       - if delErr == nil OR errors.Is(delErr, pveapi.ErrNotFound):
+       - if delErr == nil OR errors.Is(delErr, pveapi.ErrUserNotFound):
              framework.DeleteWAL(ctx, req.Storage, walID) [best-effort]
        - else:
              // DeleteUser failed transiently — LEAVE the WAL entry for walRollback to retry.
              // Do NOT DeleteWAL.
-       - return error (wrap delErr if it was non-nil/non-NotFound)
+        - return error (wrap delErr if it was non-nil/non-ErrUserNotFound)
 9. err := framework.DeleteWAL(ctx, req.Storage, walID)
    - If DeleteWAL fails:
      - DeleteUser(userid) [best-effort cleanup]
@@ -733,10 +747,10 @@ Every attempt therefore has to keep its own `walID`.
      // are NOT attempting a second DeleteWAL.
 10. resp := b.Secret(secretTypeToken).Response(
         map[string]interface{}{  // Data
-            "pve_userid": userid, "token_id": userid+"!vault", "token_secret": tokenSecret},
+            "user_id": userid, "token_id": userid+"!lease", "token_secret": tokenSecret},
         map[string]interface{}{  // InternalData
             "pve_userid": userid, "group": role.Group, "expire": leaseExpiry, "role_name": roleName,
-            "effective_max_ttl": int64(effMaxTTL.Seconds())})
+            "effective_max_ttl": int64(effMaxTTL)})  // nanoseconds
     resp.Secret.TTL = effTTL
     resp.Secret.MaxTTL = effMaxTTL
     for _, w := range warnings { resp.AddWarning(w) }   // surface CalculateTTL warnings
@@ -745,7 +759,8 @@ Every attempt therefore has to keep its own `walID`.
 
 **Key points**:
 - Each retry writes a NEW WAL entry (new id) for the NEW userid, and deletes the abandoned attempt's entry by ITS id on ErrConflict (per-attempt WAL ordering).
-- Token creation ErrConflict is NOT expected (each lease has a unique userid; token ids are scoped per-user). If it occurs, treat it like any other CreateToken error: best-effort DeleteUser, then DeleteWAL ONLY if DeleteUser returned nil or ErrNotFound.
+- Each WAL payload uses kind `"user"` and keys `user_id` and `nonce`. The nonce is `vault-wal:<8-character random suffix>` and equals the PVE user `comment`.
+- Token creation ErrConflict is NOT expected (each lease has a unique userid; token ids are scoped per-user). If it occurs, treat it like any other CreateToken error: best-effort DeleteUser, then DeleteWAL ONLY if DeleteUser returned nil or ErrUserNotFound.
 - If `DeleteWAL` fails (step 9), the issuance MUST fail and clean up the user — no Secret is returned, preventing WALRollback from racing a live credential.
 - `framework.Secret.Response` sets `Renewable = (s.Renew != nil)`, so the secret is renewable purely because `secretToken(b)` registers a `Renew` callback — nothing to set by hand.
 - After CreateUser, the handler MUST read the user back (`GetUser`) and assert the target group appears in `.Groups`; PVE returns HTTP 200 even when it silently drops an unresolvable group id (observed on modify/append; on create, PVE instead REJECTS with HTTP 500 `"no such group"` — the read-back assertion covers both paths). Verifiable equivalently via `GET /access/groups/{id}.members`.
@@ -758,13 +773,13 @@ Every attempt therefore has to keep its own `walID`.
 
 ```
 1. Read pve_userid, group, role_name, effective_max_ttl from req.Secret.InternalData (group is REQUIRED — renewal re-sends it; do NOT re-derive from the role, which may be gone/re-bound. role_name is used only to load the role for its ttl.)
-2. storedMaxTTL := time.Duration(effective_max_ttl) * time.Second
+2. storedMaxTTL := time.Duration(effective_max_ttl)
    // DECODE DISCIPLINE: InternalData values (effective_max_ttl, expire) round-trip through
    // JSON storage and come back as float64, NOT int/int64 — a direct `.(int64)` type
    // assertion PANICS/fails (same trap documented for WAL decode, wal.go step 2 / line 450).
-   // Read them as float64 then convert: e.g.
+   // Read them as float64 then convert as nanoseconds: e.g.
    //   emtRaw, _ := req.Secret.InternalData["effective_max_ttl"].(float64)
-   //   storedMaxTTL := time.Duration(int64(emtRaw)) * time.Second
+   //   storedMaxTTL := time.Duration(int64(emtRaw))
    // Likewise pve_userid/group/role_name assert to string.
 3. Load config from storage (config). If missing, return error.
    Build client (via getClient).
@@ -772,29 +787,33 @@ Every attempt therefore has to keep its own `walID`.
 5. newTTL, warnings, err := framework.CalculateTTL(
        b.System(), req.Secret.Increment, roleTTL, 0, storedMaxTTL, 0, req.Secret.IssueTime)
    - err → return error (includes "past the max TTL, cannot renew")
-   - (warnings surfaced at step 9 via resp.AddWarning(warnings...))
+   - (warnings surfaced at step 10 via resp.AddWarning(warnings...))
 6. If newTTL == 0: return error "renewal resolves to an unlimited TTL; refusing (expire
    backstop requires a finite lease)" — mirrors the issuance expire=0 policy. This should
    not occur for a lease that issued with a finite TTL, but guard it.
    Otherwise:
    - newExpiry := time.Now().Add(newTTL + expireGrace).Unix()   // finite; never 0
-7. UpdateUser({UserID: pve_userid, Expire: newExpiry, Groups: group, Enable: true, Append: true})
+7. Pre-update GetUser(pve_userid): if Enable == false, refuse renewal so an operator's
+   out-of-band disable remains an incident-response kill switch. If GetUser returns
+   ErrUnauthenticated, wrap with the admin-token diagnostic; if it returns ErrUserNotFound,
+   renewal fails and the lease expires.
+8. UpdateUser({UserID: pve_userid, Expire: newExpiry, Groups: group, Enable: true, Append: true})
    // PVE PUT /access/users is FULL-REPLACE (Probe 7): expire-only PUT WIPES groups.
    // MUST re-send expire+groups+enable(+append=1) together or membership is lost.
-   // NOTE: enable=1 on renewal will RE-ENABLE a PVE user an operator manually disabled
-   // out-of-band. Disabling the PVE user is therefore NOT a sticky kill-switch across
-   // renewal — to kill a lease, REVOKE it in Vault (which deletes the user). Revocation
-   // is the only supported kill path; out-of-band PVE user disable is not sticky.
-   - If ErrNotFound (body "no such user"): return error "user no longer exists" (renewal fails; lease expires)
+   // The pre-update GetUser check prevents re-enabling a user that was already disabled.
+   // TOCTOU: if an operator disables the user between pre-check and UpdateUser, this PUT can
+   // still re-enable it; PVE has no conditional-update API to close that race.
+   - If ErrUnauthenticated (HTTP 401): wrap with "admin token unauthenticated — check config credentials" while preserving errors.Is.
+   - If ErrUserNotFound (body "no such user"): return error "user no longer exists" (renewal fails; lease expires)
    - If other error: return error (Vault retries renewal)
-7b. READ-BACK ASSERT: info, err := GetUser(pve_userid);
+8b. READ-BACK ASSERT: info, err := GetUser(pve_userid);
     if err or group NOT in info.Groups: return error "group membership not preserved across renewal"
-8. req.Secret.InternalData["expire"] = newExpiry
-9. resp := &logical.Response{Secret: req.Secret}
+9. req.Secret.InternalData["expire"] = newExpiry
+10. resp := &logical.Response{Secret: req.Secret}
    resp.Secret.TTL = newTTL
    resp.Secret.MaxTTL = storedMaxTTL
    for _, w := range warnings { resp.AddWarning(w) }   // surface CalculateTTL warnings
-10. Return resp
+11. Return resp
 ```
 
 **Key points**:
@@ -813,13 +832,13 @@ Every attempt therefore has to keep its own `walID`.
 1. Read pve_userid from req.Secret.InternalData
 2. Load config, build client
 3. DeleteUser(pve_userid)
-   - If ErrNotFound (body "no such user", HTTP 500): return nil (idempotent success)
+   - If ErrUserNotFound (body "no such user", HTTP 500): return nil (idempotent success)
    - If other error: return error (Vault retries revocation)
 4. Return nil
 ```
 
 **Key points**:
-- ErrNotFound (body "no such user", HTTP 500) is success (idempotent).
+- ErrUserNotFound (body "no such user", HTTP 500) is success (idempotent).
 - Vault's revocation retry handles transient failures.
 - Single delete cascades to tokens, group memberships, ACL entries.
 
@@ -833,16 +852,20 @@ Registered via `backend.WALRollback` and `backend.WALRollbackMinAge = 5 * time.M
 
 ```
 1. If kind != walTypeUser: return fmt.Errorf("unknown WAL kind: %s", kind)
-2. Decode data (map[string]interface{}) into walUser via mapstructure/JSON round-trip
+2. Decode data (map[string]interface{}) into walUser via mapstructure/JSON round-trip. Required keys are `user_id` and `nonce`; no compatibility aliases.
+   - If `user_id` is missing or empty: return error (WAL entry retained; rollback retries/alerts).
 3. Load config, build client (if config missing, return error → retry later)
-4. DeleteUser(walUser.UserID)
-   - If ErrNotFound (body "no such user", HTTP 500): return nil (WAL entry deleted; user already cleaned up or never existed)
+4. GetUser(walUser.UserID)
+   - If ErrUserNotFound (body "no such user", HTTP 500): return nil (WAL entry deleted; user already cleaned up or never existed)
    - If other error: return error (WAL entry retained; rollback retries later)
-5. Return nil
+5. Verify ownership by comparing `info.Comment == walUser.Nonce`.
+   - If true: DeleteUser(walUser.UserID); ErrUserNotFound from DeleteUser is success.
+   - If false, or if `walUser.Nonce == ""`: log an error and return nil, dropping the WAL entry without deleting the user.
+6. Return nil after successful delete; return any transient delete error for retry.
 ```
 
 **Division of responsibility**:
-- **WALRollback**: Cleans up users orphaned by crash/failover BETWEEN `PutWAL` and `DeleteWAL` (i.e., WAL entry exists but issuance never completed, no Secret returned, no lease registered). It ALSO catches users left behind when an in-line cleanup `DeleteUser` fails transiently: the issuance path deletes its WAL entry ONLY when `DeleteUser` returns nil or `ErrNotFound`; if `DeleteUser` fails otherwise, the WAL entry is deliberately RETAINED and the error is returned so walRollback retries the delete. This guarantees no code path **chooses** to orphan a PVE user with no surviving WAL entry (every in-line cleanup that deletes the WAL first confirms the user is gone or ErrNotFound).
+- **WALRollback**: Cleans up users orphaned by crash/failover BETWEEN `PutWAL` and `DeleteWAL` (i.e., WAL entry exists but issuance never completed, no Secret returned, no lease registered). It ALSO catches users left behind when an in-line cleanup `DeleteUser` fails transiently: the issuance path deletes its WAL entry ONLY when `DeleteUser` returns nil or `ErrUserNotFound`; if `DeleteUser` fails otherwise, the WAL entry is deliberately RETAINED and the error is returned so walRollback retries the delete. Before deleting, WALRollback verifies ownership by reading the PVE user and requiring the live `comment` to equal the WAL `nonce` (`vault-wal:<8-char-random>`). A missing/empty `user_id` is an error/retry condition because there is no safe lookup target. An empty or mismatched nonce is terminal for rollback: log and drop the WAL entry without deleting the user. This preserves safety for foreign users while keeping revoke idempotency separate.
 
   **Accepted risk — crash between `DeleteWAL` and lease persistence**: there is ONE window this does not cover: a crash between the successful `DeleteWAL` (issuance step 9) and Vault core persisting the returned Secret/lease. In that narrow window the WAL entry is already gone and no lease exists, so neither WALRollback nor Vault revocation fires. The PVE `expire` backstop (set to lease-end + grace at creation time) only **neutralizes** the credential — authentication is rejected once past `expire` (Probe 8) — it does **NOT** delete the user; PVE has no auto-reap, so the stale user record **persists in user.cfg until out-of-band cleanup**. This window is therefore a leak of an inert (auth-rejected) but undeleted user, not a live credential. Requires a crash inside that narrow window. Documented, not mitigated.
 - **Vault revocation retry**: Handles failed revocations on existing leases.
@@ -866,7 +889,7 @@ ttl, warns, err := framework.CalculateTTL(b.System(), req.Secret.Increment, role
                                           storedMaxTTL, 0, req.Secret.IssueTime)
 ```
 
-**Capture at issuance**: Store `effective_max_ttl` in `Secret.InternalData["effective_max_ttl"]` (as seconds, int64). All renewals pass this stored value as `backendMaxTTL`, NOT recomputed from the role.
+**Capture at issuance**: Store `effective_max_ttl` in `Secret.InternalData["effective_max_ttl"]` as an `int64` nanosecond duration (`int64(effectiveMaxTTL)`). All renewals convert it with `time.Duration(stored)` and pass this stored value as `backendMaxTTL`, NOT recomputed from the role.
 
 **Key points**:
 - Config `default_ttl` and `default_max_ttl` are fallbacks when role values unset.
@@ -884,16 +907,16 @@ ttl, warns, err := framework.CalculateTTL(b.System(), req.Secret.Increment, role
 | File | Coverage |
 |------|----------|
 | `path_config_test.go` | Config write (validation, client build, GetVersion, GetPermissions ancestor-walk — injected via `b.newClient` func field, see mock-seam note in `path_config.go` section); config read (excludes token_secret); config delete (requires force=true, rejects without it) |
-| `path_roles_test.go` | Role write (ttl validation, userid budget, GetGroup ErrNotFound via 500+body "does not exist", GetPermissions realm check, per-group-path User.Modify check at /access/groups/<group> (propagate=0 → reject)); role read/list/delete |
+| `path_roles_test.go` | Role write (ttl validation, userid budget, GetGroup ErrGroupNotFound via 500+body "does not exist", GetPermissions realm check, per-group-path User.Modify check at /access/groups/<group> (propagate=0 → reject)); role read/list/delete |
 | `path_creds_test.go` | Full issuance flow (WAL ordering, CreateUser ErrConflict via 500+body "already exists" drives retry, group read-back-failure injection (GetUser returns groups:[] → issuance errors, user+WAL cleaned up, no Secret); token ErrConflict via 400+body "Token already exists" → best-effort DeleteUser + conditional DeleteWAL (same as any other CreateToken error); collision exhaustion after 5 attempts); **DeleteWAL-failure injection** (see below); `expire` = lease end + grace; issuance is REFUSED when the effective TTL resolves to 0 (unlimited) — `expire=0` can never reach the wire (the guard fires first; `framework.CalculateTTL` falls back to `sysView.DefaultLeaseTTL()` so `effTTL == 0` is effectively unreachable in practice — the guard is belt-and-braces, correct and cheap, but testing it requires a mock `SystemView` returning zero defaults) |
-| `secret_token_test.go` | Renewal (`CalculateTTL` capped from `IssueTime` — a renew requested near `max_ttl` on an old lease gets the remainder, not a full increment; UpdateUser re-sends expire+groups+enable+append; read-back asserts group preserved; group read from InternalData not role; ErrNotFound(500+body) → fail); revocation (DeleteUser, ErrNotFound(500+body) → success) |
-| `wal_test.go` | walRollback (decodes `map[string]interface{}` payload; DeleteUser success, ErrNotFound (500+body "no such user") → success, error → retry, unknown kind → error) |
+| `secret_token_test.go` | Renewal (`CalculateTTL` capped from `IssueTime` — a renew requested near `max_ttl` on an old lease gets the remainder, not a full increment; UpdateUser re-sends expire+groups+enable+append; read-back asserts group preserved; group read from InternalData not role; ErrUserNotFound(500+body) → fail); revocation (DeleteUser, ErrUserNotFound(500+body) → success) |
+| `wal_test.go` | walRollback (decodes `map[string]interface{}` payload with `user_id`+`nonce`; missing/empty `user_id` → error/retry; GetUser ErrUserNotFound (500+body "no such user") → success; matching comment/nonce → DeleteUser; comment mismatch or empty nonce → log/drop WAL without delete; DeleteUser error → retry; unknown kind → error) |
 | `userid_test.go` | buildUserID format; randomSuffix entropy/charset; validateUserComponent (rejects empty, `:`, `/`, whitespace, `@`, `!`); validateLengthBudget (rejects >64) |
 | `internal/pveapi/permission_tree_test.go` | `HasPrivilege` ancestor-walk: exact path with propagate=0 → true; ancestor with propagate=1 → true; **ancestor with propagate=0 → false**; root grant; missing path |
-| `internal/pveapi/errors_test.go` (NEW) | `classifyPVEError` fed the ACTUAL probed bodies (PVE_PROBES.md Probes 2–6b): 500 `{"data":null,"message":"create user failed: user 'x@pve' already exists\n"}`→ErrConflict; **400 `{"message":"Parameter verification failed.\n","data":null,"errors":{"tokenid":"Token already exists."}}`→ErrConflict (asserts the match reads `errors.tokenid`, NOT `message`)**; 500 `{"data":null,"message":"no such user ('x@pve')\n"}`→ErrNotFound; 500 `{"data":null,"message":"group 'g' does not exist\n"}`→ErrNotFound; 500 `{"data":null,"message":"create user failed: no such group 'vault-test-grp'\n"}`→ErrNotFound; 403 (any body)→ErrForbidden; trailing-`\n` / embedded-quoted-id tolerance |
+| `internal/pveapi/errors_test.go` (NEW) | `classifyPVEError` fed the ACTUAL probed bodies (PVE_PROBES.md Probes 2–6b): 500 `{"data":null,"message":"create user failed: user 'x@pve' already exists\n"}`→ErrConflict; **400 `{"message":"Parameter verification failed.\n","data":null,"errors":{"tokenid":"Token already exists."}}`→ErrConflict (asserts the match reads `errors.tokenid`, NOT `message`)**; 500 `{"data":null,"message":"no such user ('x@pve')\n"}`→ErrUserNotFound; 500 `{"data":null,"message":"group 'g' does not exist\n"}`→ErrGroupNotFound; 500 `{"data":null,"message":"create user failed: no such group 'vault-test-grp'\n"}`→ErrGroupNotFound; 403 (any body)→ErrForbidden; trailing-`\n` / embedded-quoted-id tolerance |
 | `internal/pveapi/client_test.go` (NEW) | `httptest`-based: assert the **real** HTTP client serializes `privsep=0` as the literal string `"0"` (not `"false"` or omitted) on `POST .../token/{tokenid}`; `enable=1` as `"1"` on `POST /access/users`; `append=1` as `"1"` on `PUT /access/users/{userid}`; `groups` as ONE comma-separated form field (never array-repeated) on user create/update. Also assert `classifyPVEError` body-string mapping via the same probed bodies used in `errors_test.go`. Assert that `token_secret` never appears in any error string returned by the client. |
 
-Use `logical.TestBackendConfig` and in-memory storage (`framework.Storage` from `vault/sdk`). Mock client is programmable (inject ErrConflict on attempt N, ErrNotFound on GetGroup, etc.).
+Use `logical.TestBackendConfig` and in-memory storage (`framework.Storage` from `vault/sdk`). Mock client is programmable (inject ErrConflict on attempt N, ErrGroupNotFound on GetGroup, etc.).
 
 **DeleteWAL-failure injection** belongs here, not in the acceptance suite: `framework.DeleteWAL`
 is a package function with no injection seam, but it takes a `logical.Storage`. Wrap the
@@ -924,7 +947,7 @@ recorded a `DeleteUser` for the just-created userid. No live PVE needed.
 | `TestAccLifecycle` | Write config → write role → read creds → use issued token to call PVE API (verify it works) → renew → verify renewed → revoke → verify user deleted by asserting `GET /access/users/{userid}` returns the PVE body "no such user" (HTTP 500, NOT 404). Do NOT assert status 404. |
 | `TestAccAuthorizationContractCanary` | **Four critical assertions** (see `docs/ARCHITECTURE.md` Acceptance Tests section — Authorization contract canary):<br/>a. Admin token attempts `PUT /access/acl` to grant an unheld role → 403<br/>b. Create user with `groups=<group>` (single CSV field); assert membership via read-back (`GET /access/users/{id}.groups` contains the group OR `GET /access/groups/{id}.members` contains the user). **PRIMARY privilege check = BEHAVIORAL**: use the issued privsep=0 token to call a group-role-gated endpoint (e.g. `GET /cluster/resources?type=vm`, gated by PVEVMAdmin) and assert HTTP 200 — this is the only oracle that cannot be confounded (Probe GROUPADD / Probe 6-fix-E). **The `GET /access/permissions?userid=<userid>&path=/` server-side dump is OPTIONAL and requires a documented TEMPORARY cluster-wide `Sys.Audit` grant on the admin token** — under the least-privilege admin it returns `403 Permission check failed (/access, Sys.Audit)` (Probe 6-fix-C/D, Probe CLEAN 5-B). If the harness wants the dump, apply and TEAR DOWN the grant: `pveum acl modify / --user <admin> --role <auditrole> --propagate 1` then teardown with the BARE `--delete` flag: `pveum acl modify / --user <admin> --role <auditrole> --delete` (NOT `--delete 1`, which fails "400 Unable to parse option" — Probe CLEAN Step 8-B / Probe GROUPADD). Do NOT rely on the token's BARE `/access/permissions` (reflects principal only, Probe 6).<br/>c. Create user with `expire` in the past, verify token authentication returns 401<br/>d. Create user, renew with `PUT /access/users/{userid}` re-sending `expire`+`groups`+`enable`+`append=1` (full-replace — expire-only WIPES groups, Probe 7). Assert via read-back that `groups` still contains the group after renewal. Add a CONTROL: an expire-only PUT on a throwaway user leaves `groups:[]`. |
 | `TestAccFailureInjection` | (a) Simulate network error after CreateUser but before CreateToken (kill connection) → verify user cleaned up (best-effort delete ran);<br/>(b) Issue credential, delete user out-of-band, revoke → verify PVE body "no such user" (HTTP 500) treated as success;<br/>(c) Write config with insufficient-privilege token → assert 403 surfaced clearly.<br/>(DeleteWAL-failure injection moved to `path_creds_test.go` — no PVE required) |
-| `TestAccWALRollback` | Write config+role → manually `framework.PutWAL(ctx, storage, walTypeUser, walUser{UserID: userid})` → manually `client.CreateUser(userid)` → **invoke `b.walRollback(ctx, req, walTypeUser, walEntryData)` DIRECTLY** (there is NO `PeriodicFunc` on this backend — rollback is registered via `backend.WALRollback`, and in a live Vault it fires on the rollback manager's schedule; the test calls the func directly rather than waiting) → verify `DeleteUser` ran and the user is gone on PVE (assert `GET` returns body "no such user"). Because `walRollback` receives `data interface{}` holding a `map[string]interface{}`, construct the call arg the same JSON-round-tripped way core would (see wal.go decode note). |
+| `TestAccWALRollback` | Write config+role → create `nonce := walCommentPrefix + <8-char-random>` → manually `framework.PutWAL(ctx, storage, walTypeUser, walUser{UserID: userid, Nonce: nonce})` → manually `client.CreateUser(userid)` with `comment=nonce` → **invoke `b.walRollback(ctx, req, walTypeUser, walEntryData)` DIRECTLY** (there is NO `PeriodicFunc` on this backend — rollback is registered via `backend.WALRollback`, and in a live Vault it fires on the rollback manager's schedule; the test calls the func directly rather than waiting) → verify `DeleteUser` ran and the user is gone on PVE (assert `GET` returns body "no such user"). Because `walRollback` receives `data interface{}` holding a `map[string]interface{}`, construct the call arg the same JSON-round-tripped way core would (see wal.go decode note). |
 | `TestAccConcurrentIssuance` | Spawn 10 goroutines, each calls `creds/:role` concurrently → verify all succeed (no collision errors, ErrConflict retry works). Expect PVE cluster-lock contention here; if it proves flaky, assert "no orphaned users left behind" rather than "zero transient errors" |
 | `TestAccDeleteConfigGuard` | Write config → DELETE without `force=true` → assert refused with clear error;<br/>DELETE with `force=true` → assert succeeds and config gone. Also confirms `force` actually reaches the handler as a query param through whatever client the test uses |
 
@@ -1001,7 +1024,7 @@ After building and registering:
 1. Enable mount
 2. Write config (should succeed if admin token has privileges)
 3. Write role (should succeed if group exists)
-4. Read creds (should return `pve_userid`, `token_id`, `token_secret`)
+4. Read creds (should return `user_id`, `token_id`, `token_secret`)
 5. Use issued token to call PVE API (verify it works)
 6. Renew lease
 7. Revoke lease (verify user deleted on PVE)
@@ -1026,22 +1049,24 @@ annotations elsewhere. No code deliverable — this phase gated the design.
 
 ### Phase 1 — Bootstrap + Proxmox Client + Config Path
 
+**Status**: ✅ COMPLETE — implemented and covered by unit tests.
+
 **Tasks**:
-- [ ] Create `go.mod` (module path `github.com/hazmei/vault-plugin-secrets-proxmox`, go 1.25.7 — bumped from 1.23 to satisfy sdk v0.25.1 minimum, require `vault/sdk v0.25.1` + `go-hclog v1.6.3`)
-- [ ] Create `.gitignore` (Go + Vault plugin artifacts)
-- [ ] Create `Makefile` (build/test/testacc/fmt/lint/tidy targets)
-- [ ] Create `.golangci.yml` (v2 schema — see Bootstrap Files)
-- [ ] Create `cmd/vault-plugin-secrets-proxmox/main.go` (~15 lines; moved up from Phase 6 so the plugin is buildable and registerable from the first phase)
-- [ ] Implement `internal/pveapi/errors.go` (ErrNotFound/ErrConflict/ErrForbidden — no RetryableError)
-- [ ] Implement `internal/pveapi/types.go` (PermissionTree with HasPrivilege ancestor-walk, propagate-flag aware)
-- [ ] Implement `internal/pveapi/client.go` (Client interface + real impl: GetVersion, GetPermissions, GetGroup, CreateUser, GetUser, CreateToken, UpdateUser, DeleteUser; auth header; TLS config; classifyPVEError body-string mapping; explicit `privsep=0`/`enable=1` form values; no secrets in error strings)
-- [ ] Implement `internal/pveapi/mock.go` (programmable mock client for tests)
-- [ ] Implement `backend.go` (Factory, newBackend, getClient cached, invalidate)
-- [ ] Implement `path_config.go` (POST: validate default_ttl<=default_max_ttl, GetVersion, GetPermissions + ancestor-walk for User.Modify+Sys.Audit @ /access/groups, store seal-wrapped at key `config`; GET: return all except token_secret; DELETE: require `force=true` via a declared TypeBool field)
-- [ ] Unit tests: `path_config_test.go` (write validation + permission checks, read excludes secret, delete guard)
-- [ ] Unit tests: `internal/pveapi/permission_tree_test.go` (ancestor-walk cases incl. ancestor with propagate=0 → false)
-- [ ] Unit tests: `internal/pveapi/errors_test.go` (classifyPVEError body-string mapping fed ACTUAL probed bodies incl. 400 `errors.tokenid` "Token already exists" — see Testing Plan table; asserts match reads full body not just `message`)
-- [ ] Unit tests: `internal/pveapi/client_test.go` (httptest-based wire-encoding: assert real client sends `privsep=0` as literal `"0"`, `enable=1` as `"1"`, `append=1` as `"1"`, `groups` as ONE comma-separated form field never array-repeated; assert `token_secret` never appears in error strings)
+- [x] Create `go.mod` (module path `github.com/hazmei/vault-plugin-secrets-proxmox`, go 1.25.7 — bumped from 1.23 to satisfy sdk v0.25.1 minimum, require `vault/sdk v0.25.1` + `go-hclog v1.6.3`)
+- [x] Create `.gitignore` (Go + Vault plugin artifacts)
+- [x] Create `Makefile` (build/test/testacc/fmt/lint/tidy targets)
+- [x] Create `.golangci.yml` (v2 schema — see Bootstrap Files)
+- [x] Create `cmd/vault-plugin-secrets-proxmox/main.go` (~15 lines; moved up from Phase 6 so the plugin is buildable and registerable from the first phase)
+- [x] Implement `internal/pveapi/errors.go` (ErrUserNotFound/ErrGroupNotFound/ErrConflict/ErrForbidden/ErrUnauthenticated — no RetryableError)
+- [x] Implement `internal/pveapi/types.go` (PermissionTree with HasPrivilege ancestor-walk, propagate-flag aware)
+- [x] Implement `internal/pveapi/client.go` (Client interface + real impl: GetVersion, GetPermissions, GetGroup, CreateUser, GetUser, CreateToken, UpdateUser, DeleteUser; auth header; TLS config; classifyPVEError body-string mapping; explicit `privsep=0`/`enable=1` form values; no secrets in error strings)
+- [x] Implement `internal/pveapi/mock.go` (programmable mock client for tests)
+- [x] Implement `backend.go` (Factory, newBackend, getClient cached, invalidate)
+- [x] Implement `path_config.go` (POST: validate default_ttl<=default_max_ttl, GetVersion, GetPermissions + ancestor-walk for User.Modify+Sys.Audit @ /access/groups, store seal-wrapped at key `config`; GET: return all except token_secret; DELETE: require `force=true` via a declared TypeBool field)
+- [x] Unit tests: `path_config_test.go` (write validation + permission checks, read excludes secret, delete guard)
+- [x] Unit tests: `internal/pveapi/permission_tree_test.go` (ancestor-walk cases incl. ancestor with propagate=0 → false)
+- [x] Unit tests: `internal/pveapi/errors_test.go` (classifyPVEError body-string mapping fed ACTUAL probed bodies incl. 400 `errors.tokenid` "Token already exists" — see Testing Plan table; asserts match reads full body not just `message`)
+- [x] Unit tests: `internal/pveapi/client_test.go` (httptest-based wire-encoding: assert real client sends `privsep=0` as literal `"0"`, `enable=1` as `"1"`, `append=1` as `"1"`, `groups` as ONE comma-separated form field never array-repeated; assert `token_secret` never appears in error strings)
 
 **Acceptance Criteria**:
 - `go build ./...` succeeds (no compile errors)
@@ -1058,13 +1083,15 @@ annotations elsewhere. No code deliverable — this phase gated the design.
 
 ### Phase 2 — Userid + TTL Helpers + Roles Path
 
+**Status**: ✅ COMPLETE — implemented and covered by unit tests.
+
 **Tasks**:
-- [ ] Implement `userid.go` (buildUserID, randomSuffix 8-char base32 from crypto/rand, validateUserComponent, validateLengthBudget)
-- [ ] Implement `(*proxmoxRole).ttls(cfg)` fallback helper on `path_roles.go` (role value or config default) — there is NO `ttl.go`; capping is `framework.CalculateTTL`'s job
-- [ ] Implement `cappedMaxTTL(roleMax, sysMax time.Duration) time.Duration` on `path_roles.go` alongside `ttls()` — 4-case: (roleMax=0)→sysMax; (sysMax=0)→roleMax; (0,0)→0; (A,B)→min(A,B)
-- [ ] Implement `path_roles.go` (POST: ttl validation, userid budget, GetGroup ErrNotFound check (body "does not exist", HTTP 500), per-group-path User.Modify check, GetPermissions realm check via ancestor-walk; GET/LIST/DELETE)
-- [ ] Unit tests: `userid_test.go` (buildUserID format, randomSuffix entropy, validateUserComponent rejects `:`, `/`, whitespace; validateLengthBudget >64 rejected)
-- [ ] Unit tests: `path_roles_test.go` (write validation, GetGroup ErrNotFound (body "does not exist", HTTP 500), per-group-path User.Modify check (propagate=0 → reject), realm check, read/list/delete, `ttls()` fallback incl. both-unset; `cappedMaxTTL` 4-case: roleMax=0→sysMax, sysMax=0→roleMax, 0,0→0, A,B→min(A,B))
+- [x] Implement `userid.go` (buildUserID, randomSuffix 8-char base32 from crypto/rand, validateUserComponent, validateLengthBudget)
+- [x] Implement `(*proxmoxRole).ttls(cfg)` fallback helper on `path_roles.go` (role value or config default) — there is NO `ttl.go`; capping is `framework.CalculateTTL`'s job
+- [x] Implement `cappedMaxTTL(roleMax, sysMax time.Duration) time.Duration` on `path_roles.go` alongside `ttls()` — 4-case: (roleMax=0)→sysMax; (sysMax=0)→roleMax; (0,0)→0; (A,B)→min(A,B)
+- [x] Implement `path_roles.go` (POST: ttl validation, userid budget, GetGroup ErrGroupNotFound check (body "does not exist", HTTP 500), per-group-path User.Modify check, GetPermissions realm check via ancestor-walk; GET/LIST/DELETE)
+- [x] Unit tests: `userid_test.go` (buildUserID format, randomSuffix entropy, validateUserComponent rejects `:`, `/`, whitespace; validateLengthBudget >64 rejected)
+- [x] Unit tests: `path_roles_test.go` (write validation, GetGroup ErrGroupNotFound (body "does not exist", HTTP 500), per-group-path User.Modify check (propagate=0 → reject), realm check, read/list/delete, `ttls()` fallback incl. both-unset; `cappedMaxTTL` 4-case: roleMax=0→sysMax, sysMax=0→roleMax, 0,0→0, A,B→min(A,B))
 
 **Acceptance Criteria**:
 - Roles CRUD operations work (unit tests pass)
@@ -1115,14 +1142,14 @@ Unit test: `classifyPVEError(401, []byte{})` returns `ErrUnauthenticated`.
 classification maps the relevant PVE body strings to the correct sentinel, and call sites key
 revocation idempotency specifically on `ErrUserNotFound`.
 
-**What**: `ErrNotFound` is currently a single sentinel overloaded across three body strings:
+**What**: Earlier drafts used a single `ErrNotFound` sentinel overloaded across three body strings:
 `"no such user"`, `"no such group"`, and `"does not exist"`. Different call sites require
 different handling: revocation treats user-not-found as **success** (idempotent), renewal must
 treat it as **failure**, and role-write surfaces group-not-found as `"group does not exist"`.
 The coarse single sentinel makes those distinctions require an additional body-string scan at
 the call site instead of a clean `errors.Is` check.
 
-**Why deferred**: Phase 1 only uses `ErrNotFound` in `GetGroup` (role-write) and `DeleteUser`
+**Why deferred**: Phase 1 only used not-found handling in `GetGroup` (role-write) and `DeleteUser`
 (WAL rollback), where the current coarse mapping is safe. The call-site semantics that require
 the split (revocation idempotency vs. renewal failure) do not exist until Phase 3–4.
 
@@ -1235,17 +1262,19 @@ and asserts the parsed `PermissionTree` matches the expected structure. No live 
 
 ### Phase 3 — Creds + Secret Token + WAL (Issuance)
 
+**Status**: ✅ COMPLETE — implemented and covered by unit tests.
+
 **Tasks**:
-- [ ] Implement `wal.go` (walTypeUser constant, walUser struct, walRollback decoding `map[string]interface{}`, DeleteUser idempotency, accepted-risk header comment)
-- [ ] Implement `path_creds.go` (handleCredsRead full issuance: load role+config, `framework.CalculateTTL`, expire = lease end + 60s grace (refuse if unlimited per expire=0 policy), retry loop with per-attempt `walID, err := PutWAL(...)` → CreateUser → on ErrConflict (body "already exists") `DeleteWAL(ctx, storage, walID)` + retry, read-back assert group membership (ErrNotFound/groups-empty → cleanup + error), CreateToken privsep=false, on token-fail cleanup user+WAL, on DeleteWAL-fail cleanup user + return error, build Secret with internalData including group)
-- [ ] Implement `secret_token.go` (secretToken definition with Fields; **non-nil** stub Renew + Revoke callbacks — `Secret.Response` sets `Renewable = (Renew != nil)`, so a nil stub silently issues non-renewable leases; full impl in Phase 4)
-- [ ] Wire WAL into backend: set `backend.WALRollback = b.walRollback`, `backend.WALRollbackMinAge = 5 * time.Minute`
-- [ ] Unit tests: `path_creds_test.go` (full issuance flow with mock client: success, ErrConflict retry with per-attempt WAL id, group read-back-failure injection, token-fail cleanup, DeleteWAL-fail → error+cleanup via failing-storage wrapper, collision exhaustion, expire grace applied; issuance REFUSED when effective TTL resolves to 0 (unlimited) per Locked Decision #9)
-- [ ] Unit tests: `wal_test.go` (walRollback: map payload decode, DeleteUser success, ErrNotFound (body "no such user", HTTP 500) → success, error → retry, unknown kind → error)
+- [x] Implement `wal.go` (walTypeUser constant `"user"`, walUser struct with JSON/mapstructure keys `user_id` and `nonce`, walRollback decoding `map[string]interface{}`, GetUser ownership check requiring `comment == nonce`, DeleteUser ErrUserNotFound idempotency, accepted-risk header comment)
+- [x] Implement `path_creds.go` (handleCredsRead full issuance: load role+config, `framework.CalculateTTL`, expire = lease end + 60s grace (refuse if unlimited per expire=0 policy), retry loop with per-attempt `nonce := walCommentPrefix + randomSuffix()`, `walID, err := PutWAL(..., walUser{UserID: userid, Nonce: nonce})` → CreateUser with `Comment: nonce` → on ErrConflict (body "already exists") `DeleteWAL(ctx, storage, walID)` + retry, read-back assert group membership and warn on comment/nonce mismatch, CreateToken with tokenid `lease` using the client-enforced `privsep=0`, on token-fail cleanup user+WAL, on DeleteWAL-fail cleanup user + return error, build Secret with internalData including group)
+- [x] Implement `secret_token.go` (secretToken definition with Fields and non-nil Renew/Revoke callbacks; full implementation completed in Phase 4)
+- [x] Wire WAL into backend: set `backend.WALRollback = b.walRollback`, `backend.WALRollbackMinAge = 5 * time.Minute`
+- [x] Unit tests: `path_creds_test.go` (full issuance flow with mock client: success, ErrConflict retry with per-attempt WAL id, group read-back-failure injection, token-fail cleanup, DeleteWAL-fail → error+cleanup via failing-storage wrapper, collision exhaustion, expire grace applied; issuance REFUSED when effective TTL resolves to 0 (unlimited) per Locked Decision #9)
+- [x] Unit tests: `wal_test.go` (walRollback: map payload decode using `user_id`+`nonce`, missing/empty `user_id` → error/retry, GetUser ErrUserNotFound (body "no such user", HTTP 500) → success, matching comment/nonce → DeleteUser success, comment mismatch/empty nonce → no delete, DeleteUser error → retry, unknown kind → error)
 
 **Acceptance Criteria**:
 - Creds issuance unit tests pass (including ErrConflict retry, group read-back-failure injection, token-fail cleanup, DeleteWAL-fail path)
-- WAL rollback unit tests pass (idempotent delete, unknown kind rejected)
+- WAL rollback unit tests pass (nonce-gated ownership, idempotent user-not-found, unknown kind rejected)
 - `DeleteWAL` is called with the id returned by `PutWAL` (compile-checked against the real signature)
 - `CreateToken` explicitly sets `privsep=0` on the wire
 - `CreateUser` sends `groups=<role.group>` and `expire=<leaseExpiry+grace>`
@@ -1257,14 +1286,16 @@ and asserts the parsed `PermissionTree` matches the expected structure. No live 
 
 ### Phase 4 — Renew/Revoke Callbacks
 
+**Status**: ✅ COMPLETE — implemented and covered by unit tests.
+
 **Tasks**:
-- [ ] Implement `secretTokenRenew` in `secret_token.go` (read pve_userid + group + effective_max_ttl from internalData; `framework.CalculateTTL(b.System(), req.Secret.Increment, roleTTL, 0, storedMaxTTL, 0, req.Secret.IssueTime)`; UpdateUser re-sending expire+groups(from InternalData)+enable+append=1; read-back assert group preserved; update internalData["expire"]; return `&logical.Response{Secret: req.Secret}` with TTL/MaxTTL set)
-- [ ] Implement `secretTokenRevoke` in `secret_token.go` (read pve_userid, DeleteUser, ErrNotFound (body "no such user", HTTP 500) → nil, error → return error for Vault retry)
-- [ ] Unit tests: `secret_token_test.go` (renewal: capped from IssueTime not from now — an old lease near its max gets only the remainder; UpdateUser re-sends expire+groups+enable+append; group read from InternalData not role; ErrNotFound(500+body) → fail; revocation: DeleteUser success, ErrNotFound(500+body) → success, error → retry)
+- [x] Implement `secretTokenRenew` in `secret_token.go` (read pve_userid + group + nanosecond effective_max_ttl from internalData; `framework.CalculateTTL(b.System(), req.Secret.Increment, roleTTL, 0, storedMaxTTL, 0, req.Secret.IssueTime)`; pre-update GetUser refuses disabled users; UpdateUser re-sending expire+groups(from InternalData)+enable+append=1; read-back assert group preserved; update internalData["expire"]; return `&logical.Response{Secret: req.Secret}` with TTL/MaxTTL set)
+- [x] Implement `secretTokenRevoke` in `secret_token.go` (read pve_userid, DeleteUser, ErrUserNotFound (body "no such user", HTTP 500) → nil, error → return error for Vault retry)
+- [x] Unit tests: `secret_token_test.go` (renewal: capped from IssueTime not from now — an old lease near its max gets only the remainder; UpdateUser re-sends expire+groups+enable+append; group read from InternalData not role; disabled-user refusal; ErrUserNotFound(500+body) → fail; ErrUnauthenticated wraps with admin-token diagnostic; revocation: DeleteUser success, ErrUserNotFound(500+body) → success, error → retry)
 
 **Acceptance Criteria**:
-- Renew unit tests pass (total lease lifetime never exceeds `IssueTime + effective_max_ttl`, UpdateUser re-sends expire+groups+enable+append (full-replace); read-back confirms group preserved, ErrNotFound(500+body) fails renewal)
-- Revoke unit tests pass (idempotent ErrNotFound (body "no such user", HTTP 500) → success, error → retry)
+- Renew unit tests pass (total lease lifetime never exceeds `IssueTime + effective_max_ttl`, UpdateUser re-sends expire+groups+enable+append (full-replace); read-back confirms group preserved, ErrUserNotFound(500+body) fails renewal)
+- Revoke unit tests pass (idempotent ErrUserNotFound (body "no such user", HTTP 500) → success, error → retry)
 
 **Architecture References**: `docs/ARCHITECTURE.md` Lease Renewal section, Revocation section, idempotency (body "no such user" on HTTP 500 treated as success).
 
@@ -1272,16 +1303,20 @@ and asserts the parsed `PermissionTree` matches the expected structure. No live 
 
 ### Phase 5 — Full Unit Suite + Acceptance Tests
 
+**Status**: ✅ IMPLEMENTED — unit tests and gated acceptance test code are present. Live
+`VAULT_ACC=1 make testacc` remains environment-dependent and is not implied by the normal unit
+test run.
+
 **Tasks**:
-- [ ] Ensure all unit tests (`*_test.go`) pass: `make test` green
-- [ ] Implement `acceptance_test.go` with env gating (`VAULT_ACC=1`) and test scenarios:
-  - [ ] `TestAccLifecycle` (config→role→creds→use token→renew→revoke→verify deleted by asserting "no such user" body (HTTP 500), not a 404)
-  - [ ] `TestAccAuthorizationContractCanary` (4 assertions: PUT /access/acl unheld role→403, group-add confers role verified by read-back + ?userid= resolve, expired-user token→401, renewal re-sends groups (full-replace))
-  - [ ] `TestAccFailureInjection` (mid-provision cleanup, idempotent revoke (PVE body "no such user" HTTP 500 → success), insufficient-privilege token — DeleteWAL-fail lives in `path_creds_test.go`)
-  - [ ] `TestAccWALRollback` (manual WAL entry + rollback sweep)
-  - [ ] `TestAccConcurrentIssuance` (10 goroutines, verify collision retry works)
-  - [ ] `TestAccDeleteConfigGuard` (DELETE without force=true refused; with force=true succeeds)
-- [ ] Document required test env vars in `acceptance_test.go` comment header (PVE_ADDR, PVE_TOKEN_ID, PVE_TOKEN_SECRET, PVE_TEST_GROUP)
+- [x] Ensure all unit tests (`*_test.go`) pass: `make test` green
+- [x] Implement `acceptance_test.go` with env gating (`VAULT_ACC=1`) and test scenarios:
+  - [x] `TestAccLifecycle` (config→role→creds→use token→renew→revoke→verify deleted by asserting "no such user" body (HTTP 500), not a 404)
+  - [x] `TestAccAuthorizationContractCanary` (4 assertions: PUT /access/acl unheld role→403, group-add confers role verified by read-back + ?userid= resolve, expired-user token→401, renewal re-sends groups (full-replace))
+  - [x] `TestAccFailureInjection` (mid-provision cleanup, idempotent revoke (PVE body "no such user" HTTP 500 → success), insufficient-privilege token — DeleteWAL-fail lives in `path_creds_test.go`)
+  - [x] `TestAccWALRollback` (manual WAL entry + rollback sweep)
+  - [x] `TestAccConcurrentIssuance` (10 goroutines, verify collision retry works)
+  - [x] `TestAccDeleteConfigGuard` (DELETE without force=true refused; with force=true succeeds)
+- [x] Document required test env vars in `acceptance_test.go` comment header (PVE_ADDR, PVE_TOKEN_ID, PVE_TOKEN_SECRET, PVE_TEST_GROUP)
 - [ ] Run acceptance tests against containerized/dev PVE: `make testacc` green
 
 **Acceptance Criteria**:

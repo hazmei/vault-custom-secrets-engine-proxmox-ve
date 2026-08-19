@@ -275,15 +275,16 @@ Response:
   "lease_duration": 3600,
   "renewable": true,
   "data": {
-    "pve_userid": "vault-myrole-a1b2c3@pve",
-    "token_id": "vault-myrole-a1b2c3@pve!vault",
+    "user_id": "vault-myrole-a1b2c3@pve",
+    "token_id": "vault-myrole-a1b2c3@pve!lease",
     "token_secret": "1b3f5e2a-....-uuid"
   }
 }
 ```
 
-The `pve_userid` and `token_id` use the realm configured in the role
-(default `@pve`).
+The response `user_id` field and `token_id` use the realm configured in the role
+(default `@pve`). The lease's private `InternalData` stores the same userid under
+`pve_userid` for renew/revoke callbacks; that internal key is not a response field.
 
 ## Implementation Notes
 
@@ -294,9 +295,12 @@ The `pve_userid` and `token_id` use the realm configured in the role
    `enable=1`, no `password` (token-only auth, no interactive login
    needed), `groups=<role.group>` (add the synthetic user to the
    operator-pre-created PVE group at creation time), and
-   `expire=<lease_expiry_unix>` as a Proxmox-side backstop
+   `expire=<lease_expiry_unix + 60>` as a Proxmox-side backstop with
+   a 60-second grace for Vault↔PVE clock drift, plus
+   `comment=<nonce>` where `nonce` is `vault-wal:<8-character-random>`
+   and is also stored in the WAL payload for ownership verification
 2. `POST /access/users/{userid}/token/{tokenid}` — fixed `tokenid`
-   (e.g. `vault`), **`privsep=0`**, no token-level `expire` (the user-level
+   `lease`, **`privsep=0`**, no token-level `expire` (the user-level
    `expire` set in step 1 is the sole Proxmox-side backstop — confirmed on
    PVE 9.2.10: a token whose owning user has an expired `expire` is
    rejected at authentication with 401) — response `value` is the
@@ -431,7 +435,15 @@ used at renew/revoke time):
 - `role_name` — the role this credential was issued from (fixed at issue
   time)
 - `effective_max_ttl` — the computed maximum TTL captured at issue time
-  (fixed: governs renewals for the life of the lease)
+  as an `int64` nanosecond duration (fixed: governs renewals for the life of
+  the lease)
+
+**WAL payload** (one entry per in-flight issuance attempt under Vault's `wal/` prefix):
+- kind: `"user"`
+- payload keys: `user_id` (the fully-qualified PVE userid) and `nonce`
+- `nonce` is exactly `vault-wal:<8-character-random>` and must equal the
+  PVE user's `comment` for rollback to delete the user. No compatibility
+  aliases are part of the contract.
 
 ### Proxmox Cluster Considerations
 
@@ -476,28 +488,35 @@ and confirm the swap.
   internal error, no partial state left (if the token-creation step
   fails after user creation, best-effort delete the user before
   returning the error, so a failed issuance doesn't leak an orphaned
-      identity — then delete the WAL entry by the id returned from PutWAL
-      ONLY if the compensating DeleteUser returned nil or ErrNotFound;
-      if DeleteUser fails transiently, LEAVE the WAL entry for walRollback
-      to retry — never orphan a user with no surviving WAL entry)
+  identity — then delete the WAL entry by the id returned from PutWAL
+       ONLY if the compensating DeleteUser returned nil or ErrUserNotFound;
+       if DeleteUser fails transiently, LEAVE the WAL entry for walRollback
+       to retry — never orphan a user with no surviving WAL entry)
 - **Userid collision** (random suffix conflict on `POST /access/users`
   → **PVE returns HTTP 500 with body `"...already exists"`, NOT 409**
   (confirmed PVE 9.2.10, Probe 2); the engine detects collision by BODY STRING.)
-  → For each suffix attempt: call `framework.PutWAL(ctx, storage, kind, walUser{UserID: userid})`
+  → For each suffix attempt: generate `nonce = "vault-wal:" + <8-character-random>` and call `framework.PutWAL(ctx, storage, "user", walUser{UserID: userid, Nonce: nonce})`
   which RETURNS a WAL id string → attempt `POST /access/users` → on ErrConflict (body
   "already exists"), call `framework.DeleteWAL(ctx, storage, walID)` with THAT id (NOT the
-  userid — the SDK keys WALs by the returned id), generate a new random suffix, and loop
+  userid — the SDK keys WALs by the returned id); if that DeleteWAL fails, abort issuance and
+  return the error. On DeleteWAL success, generate a new random suffix, and loop
   (bounded retry count). On success, proceed to token creation (step 3 in the issuance
   ordering), then continue through step 5 (return the Secret). Each attempt keeps its own
-  walID. This per-attempt WAL ordering prevents orphaning the userid from the WAL entry when
-  retrying with a new suffix.
+  walID. This per-attempt WAL ordering, plus nonce-gated rollback, prevents orphaning the
+  userid from the WAL entry when retrying with a new suffix and prevents rollback from deleting
+  a foreign colliding user.
 - **Token creation conflict** — **PVE returns HTTP 400 with body `"Token already exists"`, NOT 409**
   (confirmed PVE 9.2.10, Probe 6b). Detected by body string. — Since each lease uses a
   unique freshly-created userid (step 2), and token ids are scoped per-user, a token-creation
   conflict at this step is **not expected** to occur. If it does, treat it like any other
   `CreateToken` error: best-effort `DeleteUser`, then `DeleteWAL` ONLY if `DeleteUser`
-  returned `nil` or `ErrNotFound`; if `DeleteUser` fails transiently, LEAVE the WAL entry
+  returned `nil` or `ErrUserNotFound`; if `DeleteUser` fails transiently, LEAVE the WAL entry
   for walRollback to retry. Surface as internal error.
+- `401` from Proxmox → `ErrUnauthenticated` before any body-string
+  classification. This usually means the configured admin token is expired,
+  revoked, or invalid; config, role-write, issuance, renewal, and revocation
+  call sites wrap it with an operator-facing diagnostic while preserving
+  `errors.Is(err, ErrUnauthenticated)`.
 - `403` on config validation → surface clearly; required privileges
   should be checked at `POST <mount>/config` time via the
   privilege-bearing call (`GET /access/permissions` parsed as a tree for
@@ -512,44 +531,64 @@ To handle process death or Vault failover mid-provisioning, the engine uses
 Vault's Write-Ahead Log (WAL) pattern:
 
 **Issuance ordering** (ALL steps occur BEFORE returning the Secret to the caller):
-1. `framework.PutWAL(ctx, storage, kind, walUser{UserID: userid})` — RETURNS a WAL id
+1. Generate `nonce = "vault-wal:" + <8-character-random>`, then call
+   `framework.PutWAL(ctx, storage, "user", walUser{UserID: userid, Nonce: nonce})` — RETURNS a WAL id
    string — written for EACH userid creation attempt (including retries on ErrConflict
    suffix collision). Keep the returned id for the matching DeleteWAL.
 2. `POST /access/users` — create the synthetic PVE user (with
-   `groups=<role.group>`, `expire=<lease_expiry_unix>`)
-3. `POST /access/users/{userid}/token/{tokenid}` — mint the API token
-   (`privsep=0`)
-4. `framework.DeleteWAL(ctx, storage, walID)` using the id returned by PutWAL (NOT the
+   `groups=<role.group>`, `expire=<lease_expiry_unix + 60>`,
+   `comment=<nonce>`)
+3. `GET /access/users/{userid}` — assert group membership is present before minting the token;
+   warn (non-fatal) if `comment != nonce` because WAL rollback cleanup may be disabled for
+   this user, while direct revoke remains unaffected.
+4. `POST /access/users/{userid}/token/{tokenid}` — mint the API token
+   (`tokenid=lease`, `privsep=0`)
+5. `framework.DeleteWAL(ctx, storage, walID)` using the id returned by PutWAL (NOT the
    userid) — if this step FAILS, the handler MUST NOT return the Secret; instead it MUST
    best-effort `DELETE /access/users/{userid}` (cleanup the just-created user), then return
    an error to the caller. The caller retries and receives a fresh credential. Because no
    Secret/lease was returned, no live credential is exposed to a later WALRollback.
-5. Return the `*logical.Response` with the Secret (Vault core then
+6. Return the `*logical.Response` with the Secret (Vault core then
    registers the lease)
 
 **On ErrConflict collision retry**: call `framework.DeleteWAL(ctx, storage, walID)` for the
-abandoned attempt's id, generate a new random suffix, and `PutWAL` again for the new userid
-(capturing a NEW walID) before retrying at step 2. This per-attempt WAL ordering prevents
-orphaning the userid from the WAL entry when retrying with a new suffix.
+abandoned attempt's id. If that DeleteWAL fails, abort issuance and surface the storage error;
+nonce-gated rollback will not delete the foreign colliding user because the PVE `comment` will
+not match the WAL nonce. If DeleteWAL succeeds, generate a new random suffix and nonce, then
+`PutWAL` again for the new userid (capturing a NEW walID) before retrying at step 2. This
+per-attempt WAL ordering prevents orphaning the userid from the WAL entry when retrying with a
+new suffix.
 
 **Implement `WALRollback`** to handle orphaned WAL entries (those left
 behind if Vault crashes or fails over between user creation and lease
 registration):
 
-1. For each WAL entry (representing a userid from a failed/incomplete
-   issuance), issue `DELETE /access/users/{userid}`.
-2. Treat a **nonexistent-user DELETE as success** (idempotent). PVE returns HTTP 500 + body `"no such user"` (NOT 404, Probe 3); the rollback keys on that body string.
+1. For each WAL entry (kind `"user"`, payload keys `user_id` and `nonce`), validate that
+   `user_id` is present and non-empty; if it is missing, return an error so Vault retains the
+   malformed WAL entry and retries/alerts instead of dropping an unknown cleanup target. Then
+   read the PVE user with `GET /access/users/{userid}`.
+2. If the user is absent, return success. PVE returns HTTP 500 + body `"no such user"` (NOT 404,
+   Probe 3); this is idempotent success for an already-swept WAL orphan.
+3. If the user exists, compare the live PVE `comment` to the WAL `nonce`. Delete the user only
+   when `comment == nonce`. If the nonce is empty or the comment does not match, log an error
+   and return success without deleting; the WAL entry is dropped because ownership is not proven.
+4. If the ownership check passes, issue `DELETE /access/users/{userid}`. Treat ErrUserNotFound
+   from that delete as success.
+
+This is **nonce-gated ownership**, not body-string-gated rollback. The body string `"no such user"`
+is still used for idempotent "already gone" handling, but it does not prove ownership of an
+existing user.
 
 **Division of responsibility**:
 - **WALRollback**: Sweeps users left orphaned by a crash BETWEEN `PutWAL`
-  (step 1) and `DeleteWAL` (step 4) — i.e., a WAL entry exists but
+  (step 1) and `DeleteWAL` (step 5) — i.e., a WAL entry exists but
   issuance never completed / the Secret was never returned to the caller,
   so no lease was registered by Vault core. WALRollback runs on Vault
   startup/unseal and periodically thereafter.
 - **Vault's revocation retry**: Handles failed revocations. If a
-  `DELETE /access/users` call fails for reasons other than ErrNotFound (body "no such user") (network
+  `DELETE /access/users` call fails for reasons other than ErrUserNotFound (body "no such user") (network
   blip, transient error), Vault's built-in revocation retry/backoff
-  re-runs the Revoke operation until it succeeds (ErrNotFound treated as success).
+  re-runs the Revoke operation until it succeeds (ErrUserNotFound treated as success).
   This is NOT WALRollback — it is Vault core retrying a failed revoke on
   an existing lease.
 - **PVE `expire` backstop**: Caps any leaked user that slips through both
@@ -557,14 +596,21 @@ registration):
   creation time, cutting off authentication even if the user is never
   deleted.
 
-This ensures that users created but not fully leased are eventually swept,
-preventing orphaned Proxmox identities from accumulating.
+This ensures that nonce-owned users created but not fully leased are eventually swept,
+preventing ordinary orphaned Proxmox identities from accumulating. A WAL entry missing
+`user_id` is malformed in a way the engine cannot safely interpret, so rollback returns an
+error and Vault retries/alerts until an operator repairs or removes the bad WAL entry. If the
+WAL nonce is empty or no longer matches the PVE `comment`, rollback intentionally skips
+deletion and drops the WAL entry; that safety behavior may leave a dead account for manual
+cleanup rather than risk deleting a foreign user. Operators should inspect PVE `vault-*` users
+whose `comment` does not match a `vault-wal:` marker and delete only accounts confirmed to be
+engine-created and no longer backed by an active Vault lease.
 
 **Implementation note**: Vault's WAL minimum-age threshold (rollback skips
 entries younger than the configured age) is a first-line guard against
-racing with an in-flight issuance. A successfully-returned credential (step 5
-completes) has no surviving WAL entry because step 5 is only reached after
-step 4 (`framework.DeleteWAL`) succeeds. If step 4 fails, issuance errors
+racing with an in-flight issuance. A successfully-returned credential (step 6
+completes) has no surviving WAL entry because step 6 is only reached after
+step 5 (`framework.DeleteWAL`) succeeds. If step 5 fails, issuance errors
 out and the just-created user is cleaned up (best-effort delete), so
 WALRollback never faces a live returned credential.
 
@@ -589,8 +635,8 @@ manually removed (the PVE `expire` backstop still prevents authentication after 
 original lease TTL).
 
 **Accepted risk**: one narrow window is NOT covered — a crash between the
-successful `DeleteWAL` (step 4) and Vault core persisting the returned
-Secret/lease (after step 5 returns). In that window the WAL entry is already
+successful `DeleteWAL` (step 5) and Vault core persisting the returned
+Secret/lease (after step 6 returns). In that window the WAL entry is already
 gone and no lease exists, so neither WALRollback nor Vault revocation fires.
 The PVE `expire` backstop only **neutralizes** the credential — authentication
 is rejected once past `expire` (Probe 8) — it is **not** cleanup: the stale
@@ -609,7 +655,7 @@ Rollback section of `docs/IMPLEMENTATION_PLAN.md` for full detail.
 - **TTL calculation** — verify precedence rules (see TTL Precedence
   section) are applied correctly at issuance and renewal
 - **Error handling** — test compensation paths (orphaned user cleanup on
-  mid-provisioning failure), idempotent deletion (ErrNotFound body "no such user" treated as success)
+  mid-provisioning failure), idempotent deletion (ErrUserNotFound body "no such user" treated as success)
 - **Userid sanitization** — verify `user_prefix` and role name validation
   against Proxmox userid character set and length limits
 
