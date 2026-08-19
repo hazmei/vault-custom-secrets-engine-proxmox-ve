@@ -122,6 +122,27 @@ type failingDeleteStorage struct {
 	deleteCount int32 // atomic counter for delete attempts on matching keys
 }
 
+// failingPutStorage wraps logical.Storage and returns an error for Put calls
+// whose key has failPrefix. This simulates framework.PutWAL failing before any
+// PVE user creation occurs.
+type failingPutStorage struct {
+	logical.Storage
+	failPrefix string
+	putCount   int32 // atomic counter for put attempts on matching keys
+}
+
+func (s *failingPutStorage) Put(ctx context.Context, entry *logical.StorageEntry) error {
+	if entry != nil && strings.HasPrefix(entry.Key, s.failPrefix) {
+		atomic.AddInt32(&s.putCount, 1)
+		return errors.New("simulated storage put failure")
+	}
+	return s.Storage.Put(ctx, entry)
+}
+
+func (s *failingPutStorage) PutAttempts() int {
+	return int(atomic.LoadInt32(&s.putCount))
+}
+
 func (s *failingDeleteStorage) Delete(ctx context.Context, key string) error {
 	if strings.HasPrefix(key, s.failPrefix) {
 		atomic.AddInt32(&s.deleteCount, 1)
@@ -265,6 +286,32 @@ func TestCredsRead_HappyPath(t *testing.T) {
 	}
 	if n != 0 {
 		t.Errorf("expected 0 WAL entries after successful issuance; got %d", n)
+	}
+}
+
+// TestCredsRead_PutWALFailure_BeforeCreateUser verifies that a storage failure
+// while writing the WAL aborts issuance before any PVE mutation is attempted.
+func TestCredsRead_PutWALFailure_BeforeCreateUser(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	var mc *pveapi.MockClient
+	b, storage := setupBackendForCreds(t, "testrole", credRoleData(), func(m *pveapi.MockClient) {
+		mc = m
+	})
+	failStorage := &failingPutStorage{Storage: storage, failPrefix: framework.WALPrefix}
+
+	resp, err := b.HandleRequest(ctx, &logical.Request{Operation: logical.ReadOperation, Path: "creds/testrole", Storage: failStorage})
+	if err == nil && (resp == nil || !resp.IsError()) {
+		t.Fatal("expected PutWAL failure to abort issuance; got success")
+	}
+	if resp != nil && resp.Secret != nil {
+		t.Error("resp.Secret must be nil when PutWAL fails")
+	}
+	if failStorage.PutAttempts() == 0 {
+		t.Fatal("expected failing storage to intercept at least one WAL Put")
+	}
+	if mc.HasCall("CreateUser") || mc.HasCall("GetUser") || mc.HasCall("CreateToken") {
+		t.Fatalf("PVE mutation/readback calls must not run after PutWAL failure; calls=%v", mc.CallLog)
 	}
 }
 
@@ -475,6 +522,62 @@ func TestCredsRead_ErrConflict_Retry(t *testing.T) {
 	}
 }
 
+// TestCredsRead_ErrConflict_DeleteWALFailure verifies that a userid collision
+// followed by failure to delete that attempt's WAL is a hard failure. The WAL is
+// retained, and rollback safety is provided by nonce/comment ownership checks.
+func TestCredsRead_ErrConflict_DeleteWALFailure(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	var mc *pveapi.MockClient
+	b, storage := setupBackendForCreds(t, "testrole", credRoleData(), func(m *pveapi.MockClient) {
+		mc = m
+		m.CreateUserFn = func(_ context.Context, _ pveapi.CreateUserRequest) error {
+			return fmt.Errorf("pveapi: CreateUser: %w", pveapi.ErrConflict)
+		}
+	})
+	failStorage := &failingDeleteStorage{Storage: storage, failPrefix: framework.WALPrefix}
+
+	resp, err := b.HandleRequest(ctx, &logical.Request{Operation: logical.ReadOperation, Path: "creds/testrole", Storage: failStorage})
+	if err == nil && (resp == nil || !resp.IsError()) {
+		t.Fatal("expected DeleteWAL failure after collision to abort issuance; got success")
+	}
+	if resp != nil && resp.Secret != nil {
+		t.Error("resp.Secret must be nil when collision WAL cleanup fails")
+	}
+	if failStorage.DeleteAttempts() == 0 {
+		t.Fatal("expected DeleteWAL to be attempted after collision")
+	}
+	walIDs, listErr := framework.ListWAL(ctx, storage)
+	if listErr != nil {
+		t.Fatalf("ListWAL: %v", listErr)
+	}
+	if len(walIDs) != 1 {
+		t.Fatalf("expected colliding attempt WAL to be retained after DeleteWAL failure; got %d", len(walIDs))
+	}
+
+	entry, getErr := framework.GetWAL(ctx, storage, walIDs[0])
+	if getErr != nil {
+		t.Fatalf("GetWAL(%q): %v", walIDs[0], getErr)
+	}
+	if entry == nil {
+		t.Fatalf("GetWAL(%q) returned nil", walIDs[0])
+	}
+	deleteCalled := false
+	mc.GetUserFn = func(_ context.Context, _ string) (pveapi.UserInfo, error) {
+		return pveapi.UserInfo{Comment: "foreign-user-comment", Enable: true}, nil
+	}
+	mc.DeleteUserFn = func(_ context.Context, _ string) error {
+		deleteCalled = true
+		return nil
+	}
+	if rollbackErr := b.walRollback(ctx, &logical.Request{Storage: storage}, entry.Kind, entry.Data); rollbackErr != nil {
+		t.Fatalf("walRollback should drop foreign collision WAL safely: %v", rollbackErr)
+	}
+	if deleteCalled {
+		t.Fatal("walRollback must not delete a colliding foreign user with mismatched nonce/comment")
+	}
+}
+
 // TestCredsRead_ErrConflict_WalIDDiscipline verifies the per-attempt WAL id
 // discipline: after a collision, the WAL entry for that attempt is cleaned up
 // before the next attempt starts, so no orphaned WAL entries accumulate.
@@ -546,6 +649,48 @@ func TestCredsRead_ErrConflict_WalIDDiscipline(t *testing.T) {
 }
 
 // ── Group read-back failure ───────────────────────────────────────────────────
+
+// TestCredsRead_GetUserReadbackFailure_CleansUser verifies that a transient
+// GetUser failure after CreateUser triggers compensation: DeleteUser is called,
+// no token is created, and the WAL is removed when deletion succeeds.
+func TestCredsRead_GetUserReadbackFailure_CleansUser(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	readbackErr := errors.New("transient get user failure")
+	b, storage := setupBackendForCreds(t, "testrole", credRoleData(), func(mc *pveapi.MockClient) {
+		mc.GetUserError = readbackErr
+	})
+
+	resp, err := readCreds(ctx, b, storage, "testrole")
+	if err == nil && (resp == nil || !resp.IsError()) {
+		t.Fatal("expected error when GetUser read-back fails; got success")
+	}
+	if resp != nil && resp.Secret != nil {
+		t.Error("resp.Secret must be nil when GetUser read-back fails")
+	}
+	b.clientMu.RLock()
+	mc, _ := b.client.(*pveapi.MockClient)
+	b.clientMu.RUnlock()
+	if mc == nil {
+		t.Fatal("mock client was not cached")
+	}
+	if !mc.HasCall("CreateUser") {
+		t.Fatal("CreateUser must be called before read-back failure")
+	}
+	if !mc.HasCall("DeleteUser") {
+		t.Fatal("DeleteUser must be called to compensate GetUser read-back failure")
+	}
+	if mc.HasCall("CreateToken") {
+		t.Fatal("CreateToken must not be called after GetUser read-back failure")
+	}
+	n, countErr := countWALEntries(ctx, storage)
+	if countErr != nil {
+		t.Fatalf("countWALEntries: %v", countErr)
+	}
+	if n != 0 {
+		t.Fatalf("expected WAL cleanup after successful DeleteUser compensation; got %d entries", n)
+	}
+}
 
 // TestCredsRead_GroupReadback_Failure verifies the group read-back assertion:
 // if GetUser returns groups NOT containing role.group, issuance fails,
@@ -732,6 +877,52 @@ func TestCredsRead_TokenCreateFailure(t *testing.T) {
 	}
 	if n != 0 {
 		t.Errorf("expected 0 WAL entries after CreateToken failure with successful cleanup; got %d", n)
+	}
+}
+
+// TestCredsRead_CompensationDeleteWALFailure_RetainsWAL verifies the important
+// compensation edge case: when DeleteUser succeeds but DeleteWAL fails, the WAL
+// entry remains in storage. A later rollback is safe and idempotent because the
+// user is already gone, so GetUser returns ErrUserNotFound.
+func TestCredsRead_CompensationDeleteWALFailure_RetainsWAL(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	var mc *pveapi.MockClient
+	b, storage := setupBackendForCreds(t, "testrole", credRoleData(), func(m *pveapi.MockClient) {
+		mc = m
+		m.CreateTokenError = errors.New("simulated token creation failure")
+	})
+	failStorage := &failingDeleteStorage{Storage: storage, failPrefix: framework.WALPrefix}
+
+	resp, err := b.HandleRequest(ctx, &logical.Request{Operation: logical.ReadOperation, Path: "creds/testrole", Storage: failStorage})
+	if err == nil && (resp == nil || !resp.IsError()) {
+		t.Fatal("expected CreateToken failure; got success")
+	}
+	if resp != nil && resp.Secret != nil {
+		t.Error("resp.Secret must be nil when CreateToken fails")
+	}
+	if !mc.HasCall("DeleteUser") {
+		t.Fatal("DeleteUser must be called for compensation")
+	}
+	if failStorage.DeleteAttempts() == 0 {
+		t.Fatal("expected DeleteWAL to be attempted during compensation")
+	}
+	walIDs, listErr := framework.ListWAL(ctx, storage)
+	if listErr != nil {
+		t.Fatalf("ListWAL: %v", listErr)
+	}
+	if len(walIDs) != 1 {
+		t.Fatalf("expected WAL retained after compensation DeleteWAL failure; got %d", len(walIDs))
+	}
+	entry, getErr := framework.GetWAL(ctx, storage, walIDs[0])
+	if getErr != nil {
+		t.Fatalf("GetWAL(%q): %v", walIDs[0], getErr)
+	}
+	if entry == nil {
+		t.Fatalf("GetWAL(%q) returned nil", walIDs[0])
+	}
+	if rollbackErr := b.walRollback(ctx, &logical.Request{Storage: storage}, entry.Kind, entry.Data); rollbackErr != nil {
+		t.Fatalf("walRollback should treat already-deleted compensation user as success: %v", rollbackErr)
 	}
 }
 
