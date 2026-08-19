@@ -54,8 +54,8 @@ func TestBuildUserID_PartsSeparatedByHyphen(t *testing.T) {
 	if len(parts) != 2 {
 		t.Fatalf("expected '@' separator; got %q", got)
 	}
-	userPart := parts[0]   // "p-r-s"
-	realmPart := parts[1]  // "realm"
+	userPart := parts[0]  // "p-r-s"
+	realmPart := parts[1] // "realm"
 
 	if realmPart != "realm" {
 		t.Errorf("realm part = %q; want %q", realmPart, "realm")
