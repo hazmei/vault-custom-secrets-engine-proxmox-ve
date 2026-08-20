@@ -401,18 +401,10 @@ func (c *httpClient) GetUser(ctx context.Context, userid string) (UserInfo, erro
 	}
 
 	info := UserInfo{
+		Groups:  []string(resp.Data.Groups),
 		Enable:  resp.Data.Enable != 0,
 		Expire:  resp.Data.Expire,
 		Comment: resp.Data.Comment,
-	}
-	if resp.Data.Groups != "" {
-		// PVE returns groups as a comma-separated string.
-		for _, g := range strings.Split(resp.Data.Groups, ",") {
-			g = strings.TrimSpace(g)
-			if g != "" {
-				info.Groups = append(info.Groups, g)
-			}
-		}
 	}
 
 	return info, nil

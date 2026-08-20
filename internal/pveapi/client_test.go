@@ -18,6 +18,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -141,6 +142,117 @@ func TestGetPermissionsParsesTree(t *testing.T) {
 	}
 	if !tree.HasPrivilege("/access/realm/pve", "Realm.AllocateUser") {
 		t.Error("expected Realm.AllocateUser at /access/realm/pve")
+	}
+}
+
+// TestGetUserParsesGroupsArrayResponse asserts that the real HTTP client
+// accepts the PVE 9.2.10 GET /access/users/{userid} response shape, where
+// data.groups is a JSON array, and normalizes it into UserInfo.Groups.
+func TestGetUserParsesGroupsArrayResponse(t *testing.T) {
+	t.Parallel()
+
+	const userid = "vault-test@pve"
+	const wantComment = "vault-wal:test-nonce"
+	const wantExpire int64 = 1790000000
+
+	ts := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		wantPath := "/api2/json/access/users/" + url.PathEscape(userid)
+		if r.URL.Path != wantPath {
+			t.Errorf("request path = %q; want %q", r.URL.Path, wantPath)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{ //nolint:errcheck // httptest handler — write error not actionable
+			"data": map[string]interface{}{
+				"groups":  []string{"vault-test-grp", "audit-grp"},
+				"enable":  1,
+				"expire":  wantExpire,
+				"comment": wantComment,
+			},
+		})
+	}))
+	defer ts.Close()
+
+	client := makeTestClient(t, ts.URL, "admin@pve!tok", "secret")
+	info, err := client.GetUser(context.Background(), userid)
+	if err != nil {
+		t.Fatalf("GetUser: %v", err)
+	}
+
+	wantGroups := []string{"vault-test-grp", "audit-grp"}
+	if !slices.Equal(info.Groups, wantGroups) {
+		t.Errorf("groups = %#v; want %#v", info.Groups, wantGroups)
+	}
+	if !info.Enable {
+		t.Error("enable = false; want true")
+	}
+	if info.Expire != wantExpire {
+		t.Errorf("expire = %d; want %d", info.Expire, wantExpire)
+	}
+	if info.Comment != wantComment {
+		t.Errorf("comment = %q; want %q", info.Comment, wantComment)
+	}
+}
+
+// TestGetUserParsesLegacyCSVAndNullGroups preserves compatibility with older
+// or empty PVE user responses while the target PVE 9.2.10 shape is an array.
+func TestGetUserParsesLegacyCSVAndNullGroups(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		groupsJSON string
+		wantGroups []string
+	}{
+		{
+			name:       "legacy csv string",
+			groupsJSON: `"grp-a, grp-b,,"`,
+			wantGroups: []string{"grp-a", "grp-b"},
+		},
+		{
+			name:       "null groups",
+			groupsJSON: `null`,
+			wantGroups: nil,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			ts := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				_, _ = w.Write([]byte(`{"data":{"groups":` + tc.groupsJSON + `,"enable":0,"expire":0,"comment":""}}`)) //nolint:errcheck // httptest handler — write error not actionable
+			}))
+			defer ts.Close()
+
+			client := makeTestClient(t, ts.URL, "admin@pve!tok", "secret")
+			info, err := client.GetUser(context.Background(), "vault-test@pve")
+			if err != nil {
+				t.Fatalf("GetUser: %v", err)
+			}
+
+			if !slices.Equal(info.Groups, tc.wantGroups) {
+				t.Errorf("groups = %#v; want %#v", info.Groups, tc.wantGroups)
+			}
+		})
+	}
+}
+
+// TestGetUserRejectsMalformedGroupsType rejects unexpected groups payloads
+// rather than silently normalizing a shape PVE does not document for users.
+func TestGetUserRejectsMalformedGroupsType(t *testing.T) {
+	t.Parallel()
+
+	ts := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"data":{"groups":{"bad":"shape"},"enable":1,"expire":1,"comment":""}}`)) //nolint:errcheck // httptest handler — write error not actionable
+	}))
+	defer ts.Close()
+
+	client := makeTestClient(t, ts.URL, "admin@pve!tok", "secret")
+	_, err := client.GetUser(context.Background(), "vault-test@pve")
+	if err == nil {
+		t.Fatal("expected malformed groups parse error, got nil")
+	}
+	if !strings.Contains(err.Error(), "parse response") {
+		t.Errorf("error = %q; want parse response context", err.Error())
 	}
 }
 
@@ -358,7 +470,6 @@ func TestClassifyPVEErrorIntegration(t *testing.T) {
 	}
 
 	for _, tc := range tests {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
@@ -399,7 +510,6 @@ func TestUpdateUserRejectsUnsafeRequestsBeforeHTTP(t *testing.T) {
 	t.Parallel()
 
 	for _, tc := range unsafeUpdateUserCases {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
@@ -438,7 +548,6 @@ func TestMockUpdateUserRejectsUnsafeRequestsBeforeLog(t *testing.T) {
 	}
 
 	for _, tc := range unsafeUpdateUserCases {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			err := mc.UpdateUser(context.Background(), tc.req)
 			if err == nil {
@@ -544,7 +653,6 @@ func TestReadResponseBodyBoundarySizes(t *testing.T) {
 	}
 
 	for _, tc := range tests {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
