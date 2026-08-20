@@ -593,13 +593,16 @@ func TestProbePermissionsFixturesThroughRealClient(t *testing.T) {
 			"/access/realm/pve": {"Realm.AllocateUser": 1, "User.Modify": 1, "Sys.Audit": 1},
 			"/access/groups":    {"Realm.AllocateUser": 1, "User.Modify": 1, "Sys.Audit": 1},
 		}},
-		{name: "Probe 6-fix-A root permissions", body: probe6FixAPermissionsResponse, want: PermissionTree{"/": {}}},
+		{name: "Probe 6 empty permissions (unscoped response)", body: probe6EmptyPermissionsResponse, want: PermissionTree{}},
 	}
 	for _, tc := range tests {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			ts := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != http.MethodGet || r.URL.Path != "/api2/json/access/permissions" {
+					t.Errorf("request = %s %s; want GET /api2/json/access/permissions", r.Method, r.URL.Path)
+				}
 				_, _ = w.Write([]byte(tc.body)) //nolint:errcheck // httptest handler
 			}))
 			defer ts.Close()
@@ -638,6 +641,9 @@ func TestProbeUserFixturesThroughRealClient(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			ts := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != http.MethodGet || r.URL.Path != "/api2/json/access/users/probe@pve" {
+					t.Errorf("request = %s %s; want GET /api2/json/access/users/probe@pve", r.Method, r.URL.Path)
+				}
 				_, _ = w.Write([]byte(tc.body)) //nolint:errcheck // httptest handler
 			}))
 			defer ts.Close()

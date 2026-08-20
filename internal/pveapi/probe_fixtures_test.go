@@ -1,7 +1,6 @@
 package pveapi
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"net/http"
@@ -14,17 +13,22 @@ import (
 // These fixtures are copied byte-for-byte from the raw evidence blocks in
 // docs/PVE_PROBES.md. Keep them as raw strings: JSON re-encoding would hide
 // changes to field order, escaped newlines, or whitespace in PVE responses.
+// probeComment is an expected decoded value, not a captured response body.
+const probeComment = "vault-wal:PROBECOMMENT12345"
+
 const (
 	probe1PermissionsResponse = `{"data":{"/access/realm/pve":{"Realm.AllocateUser":1,"User.Modify":1,"Sys.Audit":1},"/access/groups":{"Realm.AllocateUser":1,"User.Modify":1,"Sys.Audit":1}}}`
 
 	probe2DuplicateUserResponse = `{"data":null,"message":"create user failed: user 'probe-dup-52445741@pve' already exists\n"}`
 	// Probes 3 and 4 genuinely returned the same body for different methods.
-	probe3MissingUserResponse     = `{"data":null,"message":"no such user ('probe-ghost-nonexistent@pve')\n"}`
-	probe4MissingUserResponse     = `{"data":null,"message":"no such user ('probe-ghost-nonexistent@pve')\n"}`
-	probe5MissingGroupResponse    = `{"data":null,"message":"group 'definitely-not-a-real-group' does not exist\n"}`
-	probe6FixAPermissionsResponse = `{"data":{"/":{}}}`
-	probe6bDuplicateTokenResponse = `{"message":"Parameter verification failed.\n","data":null,"errors":{"tokenid":"Token already exists."}}`
-	probeComment                  = "vault-wal:PROBECOMMENT12345"
+	probe3MissingUserResponse  = `{"data":null,"message":"no such user ('probe-ghost-nonexistent@pve')\n"}`
+	probe4MissingUserResponse  = `{"data":null,"message":"no such user ('probe-ghost-nonexistent@pve')\n"}`
+	probe5MissingGroupResponse = `{"data":null,"message":"group 'definitely-not-a-real-group' does not exist\n"}`
+	// Probe 6's conclusion is marked flawed in PVE_PROBES.md (see Probe 6-fix).
+	// This is nevertheless the verbatim body for the unscoped request made by
+	// GetPermissions; an empty tree is not evidence that group permissions fail.
+	probe6EmptyPermissionsResponse = `{"data":{}}`
+	probe6bDuplicateTokenResponse  = `{"message":"Parameter verification failed.\n","data":null,"errors":{"tokenid":"Token already exists."}}`
 
 	groupAddUserResponse  = `{"data":{"enable":1,"expire":1786972261,"tokens":null,"groups":["vault-test-grp"]}}`
 	groupAddGroupResponse = `{"data":{"comment":"Vault dynamic-cred test group","members":["probe-ga-7mqj5nzp@pve"]}}`
@@ -50,7 +54,7 @@ func TestProbeFixturesRemainRawJSON(t *testing.T) {
 		{name: "Probe 3", body: probe3MissingUserResponse},
 		{name: "Probe 4", body: probe4MissingUserResponse},
 		{name: "Probe 5", body: probe5MissingGroupResponse},
-		{name: "Probe 6-fix-A", body: probe6FixAPermissionsResponse},
+		{name: "Probe 6 empty permissions (unscoped response)", body: probe6EmptyPermissionsResponse},
 		{name: "Probe 6b", body: probe6bDuplicateTokenResponse},
 		{name: "GROUPADD user", body: groupAddUserResponse},
 		{name: "GROUPADD group", body: groupAddGroupResponse},
@@ -71,7 +75,7 @@ func TestProbeFixturesRemainRawJSON(t *testing.T) {
 			if !json.Valid([]byte(fixture.body)) {
 				t.Fatal("fixture is not valid JSON")
 			}
-			if bytes.Contains([]byte(fixture.body), []byte("\r")) || bytes.Contains([]byte(fixture.body), []byte("\n")) {
+			if strings.ContainsAny(fixture.body, "\r\n") {
 				t.Fatal("fixture contains a literal line ending; preserve the documented bytes")
 			}
 			if !strings.Contains(string(docs), fixture.body) {
@@ -81,8 +85,9 @@ func TestProbeFixturesRemainRawJSON(t *testing.T) {
 	}
 }
 
-// TestGroupAddGroupFixtureThroughRealClient verifies the documented group
-// response through GetGroup; the engine intentionally uses user read-back.
+// TestGroupAddGroupFixtureThroughRealClient verifies GetGroup's request shape
+// and HTTP 200 -> nil contract. GetGroup intentionally discards the response;
+// the fixture body itself is guarded only by TestProbeFixturesRemainRawJSON.
 func TestGroupAddGroupFixtureThroughRealClient(t *testing.T) {
 	t.Parallel()
 	ts := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
