@@ -216,11 +216,17 @@ support bundles, issues, pull requests, or documentation.
 
 Use the protected secret when writing the mount configuration. Prefer a trusted
 CA bundle over `tls_skip_verify=true`. If creating the secret file from a shell
-variable, preserve the secret without a trailing newline, for example:
+variable, read it without echoing or placing it in shell history, create a
+file readable only by the operator, and preserve the secret without a trailing
+newline:
 
 ```bash
+read -rs SECRET   # paste the one-time secret; not echoed, not in history
+install -m 0600 /dev/null /run/secrets/pve-provisioner-token
 printf '%s' "$SECRET" > /run/secrets/pve-provisioner-token
 ```
+
+Then write the mount configuration and a role:
 
 ```bash
 vault write proxmox/config \
@@ -255,8 +261,15 @@ Root-token rotation is out of scope for v1 and must be performed manually:
    with explicit `--privsep 0`.
 2. Verify its secret is captured safely and test it against a maintenance or
    controlled mount/configuration path without exposing the secret. Ensure the
-   protected secret file contains no trailing newline; for example, write it
-   with `printf '%s' "$SECRET" > /run/secrets/pve-provisioner-token`.
+   protected secret file is mode 0600 and contains no trailing newline; for
+   example:
+
+   ```bash
+   read -rs SECRET   # paste the one-time secret; not echoed, not in history
+   install -m 0600 /dev/null /run/secrets/pve-provisioner-token
+   printf '%s' "$SECRET" > /run/secrets/pve-provisioner-token
+   ```
+
 3. Re-send the complete `<mount>/config` configuration with the replacement
    `token_id` and one-time secret. Config writes are full replacements, not
    patches: include `address`, `token_id`, `token_secret`,
@@ -273,6 +286,8 @@ rotation where possible, and retain an approved recovery procedure for manual
 cleanup. Similarly, do not delete the mount configuration while leases remain;
 `DELETE <mount>/config` requires `force=true` and makes those leases
 non-renewable and non-revocable by the engine.
+
+#### Provisioner token blast radius
 
 The required `/access/groups` grant is intentionally cluster-wide user
 administration. A compromised provisioner token can modify or delete arbitrary
