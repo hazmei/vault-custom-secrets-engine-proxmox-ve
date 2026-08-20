@@ -87,6 +87,30 @@ The engine requires a Proxmox API token with privileges to manage users, tokens,
 
 **Blast radius and threat model**: See the Security Considerations section in `docs/ARCHITECTURE.md` for the complete threat model analysis, including the cluster-wide user administration blast radius, self-escalation primitives in the compromise case (both the admin-self-modification route and the quieter new-user-in-privileged-group route), honest comparison to full-admin, and partial containment recommendations.
 
+**Why group membership instead of direct ACL grants?** Proxmox enforces
+anti-privilege-escalation on `PUT /access/acl`: a principal cannot grant
+roles it does not hold (confirmed on PVE 9.2.10: a token lacking
+PVEVMAdmin at `/vms/200` receives `403: Permission check failed
+(/vms/200, Permissions.Modify|VM.Allocate)` when attempting to grant that
+role). By using **group membership**, the engine's admin token avoids
+holding the delegated roles directly in the non-compromise case — those are bound to groups once by
+a cluster admin (typically `root@pam`). Group-membership writes are
+authorized solely by `User.Modify`. However, the required `User.Modify` at `/access/groups` is cluster-wide user administration; see the Security Considerations section in `docs/ARCHITECTURE.md` for the full threat model.
+
+**Acceptable Fallback**:
+- Use a full-admin token (e.g., `root@pam` or `PVEAdmin`-equivalent at `/`)
+- Can bypass anti-escalation checks and has broader initial blast radius (direct ACL/resource management permissions in addition to user admin)
+- The group model is preferred when operators can pre-create groups and want to avoid granting direct ACL/resource management permissions; it narrows the initial blast radius but does not achieve true least-privilege in the compromise case
+
+The engine validates the admin token's connectivity and privileges at
+configuration time via `GET /version` (reachability/TLS) and
+`GET /access/permissions` (privilege verification, parsed as a tree for
+the specific `User.Modify` and `Sys.Audit` on `/access/groups`; the
+realm-specific `Realm.AllocateUser` at `/access/realm/<realm>` is
+validated per-role at role-write time). The privilege check walks
+ancestor paths (a grant at `/access` with `propagate=1` satisfies
+requirements for `/access/groups`).
+
 ### Production Proxmox Prerequisites and Runbook
 
 The following is the production setup path. It is intentionally separate from
@@ -191,7 +215,12 @@ support bundles, issues, pull requests, or documentation.
 #### 4. Configure and verify the production mount
 
 Use the protected secret when writing the mount configuration. Prefer a trusted
-CA bundle over `tls_skip_verify=true`.
+CA bundle over `tls_skip_verify=true`. If creating the secret file from a shell
+variable, preserve the secret without a trailing newline, for example:
+
+```bash
+printf '%s' "$SECRET" > /run/secrets/pve-provisioner-token
+```
 
 ```bash
 vault write proxmox/config \
@@ -225,7 +254,9 @@ Root-token rotation is out of scope for v1 and must be performed manually:
 1. Create a replacement token for the same dedicated provisioner user, again
    with explicit `--privsep 0`.
 2. Verify its secret is captured safely and test it against a maintenance or
-   controlled mount/configuration path without exposing the secret.
+   controlled mount/configuration path without exposing the secret. Ensure the
+   protected secret file contains no trailing newline; for example, write it
+   with `printf '%s' "$SECRET" > /run/secrets/pve-provisioner-token`.
 3. Re-send the complete `<mount>/config` configuration with the replacement
    `token_id` and one-time secret. Config writes are full replacements, not
    patches: include `address`, `token_id`, `token_secret`,
@@ -264,30 +295,6 @@ len(user_prefix) + 1 + len(role) + 1 + 8 + 1 + len(realm) <= 64
 For example, `vault` / `production-readers` / `pve` uses 37 characters. Choose
 the `user_prefix` and Vault role name with this limit in mind so validation does
 not fail after the Proxmox setup is complete.
-
-**Why group membership instead of direct ACL grants?** Proxmox enforces
-anti-privilege-escalation on `PUT /access/acl`: a principal cannot grant
-roles it does not hold (confirmed on PVE 9.2.10: a token lacking
-PVEVMAdmin at `/vms/200` receives `403: Permission check failed
-(/vms/200, Permissions.Modify|VM.Allocate)` when attempting to grant that
-role). By using **group membership**, the engine's admin token avoids
-holding the delegated roles directly in the non-compromise case — those are bound to groups once by
-a cluster admin (typically `root@pam`). Group-membership writes are
-authorized solely by `User.Modify`. However, the required `User.Modify` at `/access/groups` is cluster-wide user administration; see the Security Considerations section in `docs/ARCHITECTURE.md` for the full threat model.
-
-**Acceptable Fallback**:
-- Use a full-admin token (e.g., `root@pam` or `PVEAdmin`-equivalent at `/`)
-- Can bypass anti-escalation checks and has broader initial blast radius (direct ACL/resource management permissions in addition to user admin)
-- The group model is preferred when operators can pre-create groups and want to avoid granting direct ACL/resource management permissions; it narrows the initial blast radius but does not achieve true least-privilege in the compromise case
-
-The engine validates the admin token's connectivity and privileges at
-configuration time via `GET /version` (reachability/TLS) and
-`GET /access/permissions` (privilege verification, parsed as a tree for
-the specific `User.Modify` and `Sys.Audit` on `/access/groups`; the
-realm-specific `Realm.AllocateUser` at `/access/realm/<realm>` is
-validated per-role at role-write time). The privilege check walks
-ancestor paths (a grant at `/access` with `propagate=1` satisfies
-requirements for `/access/groups`).
 
 ## Build and Install
 
