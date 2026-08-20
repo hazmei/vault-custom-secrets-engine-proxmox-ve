@@ -142,9 +142,10 @@ type UserInfo struct {
 
 // userGroups decodes PVE's GET /access/users/{userid} groups field.
 //
-// PVE 9.2.10 returns groups as a JSON array. Older assumptions in this client
-// treated groups as a CSV string, so string and null are accepted for defensive
-// compatibility while malformed shapes are rejected by json.Unmarshal.
+// PVE 9.2.10 returns groups as a JSON array. Null is accepted for empty group
+// sets. A CSV string is also accepted defensively so an unexpected string shape
+// preserves the security-critical read-back membership assertion instead of
+// hard-failing issuance or renewal. Malformed shapes are rejected explicitly.
 type userGroups []string
 
 // UnmarshalJSON normalizes PVE user group responses into a string slice.

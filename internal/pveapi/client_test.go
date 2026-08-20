@@ -18,6 +18,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -177,7 +178,7 @@ func TestGetUserParsesGroupsArrayResponse(t *testing.T) {
 	}
 
 	wantGroups := []string{"vault-test-grp", "audit-grp"}
-	if strings.Join(info.Groups, ",") != strings.Join(wantGroups, ",") {
+	if !slices.Equal(info.Groups, wantGroups) {
 		t.Errorf("groups = %#v; want %#v", info.Groups, wantGroups)
 	}
 	if !info.Enable {
@@ -214,7 +215,6 @@ func TestGetUserParsesLegacyCSVAndNullGroups(t *testing.T) {
 	}
 
 	for _, tc := range tests {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
@@ -229,7 +229,7 @@ func TestGetUserParsesLegacyCSVAndNullGroups(t *testing.T) {
 				t.Fatalf("GetUser: %v", err)
 			}
 
-			if strings.Join(info.Groups, ",") != strings.Join(tc.wantGroups, ",") {
+			if !slices.Equal(info.Groups, tc.wantGroups) {
 				t.Errorf("groups = %#v; want %#v", info.Groups, tc.wantGroups)
 			}
 		})
@@ -470,7 +470,6 @@ func TestClassifyPVEErrorIntegration(t *testing.T) {
 	}
 
 	for _, tc := range tests {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
@@ -511,7 +510,6 @@ func TestUpdateUserRejectsUnsafeRequestsBeforeHTTP(t *testing.T) {
 	t.Parallel()
 
 	for _, tc := range unsafeUpdateUserCases {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
@@ -550,7 +548,6 @@ func TestMockUpdateUserRejectsUnsafeRequestsBeforeLog(t *testing.T) {
 	}
 
 	for _, tc := range unsafeUpdateUserCases {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			err := mc.UpdateUser(context.Background(), tc.req)
 			if err == nil {
@@ -656,7 +653,6 @@ func TestReadResponseBodyBoundarySizes(t *testing.T) {
 	}
 
 	for _, tc := range tests {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
