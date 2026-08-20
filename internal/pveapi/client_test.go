@@ -560,8 +560,7 @@ func TestProbeErrorFixturesThroughRealClient(t *testing.T) {
 	}
 }
 
-// TestProbePermissionsFixturesThroughRealClient parses the exact Probe 1 and
-// Probe 6 permissions responses and asserts every captured permission entry.
+// assertPermissionTree verifies every captured permission path and privilege.
 func assertPermissionTree(t *testing.T, got, want PermissionTree) {
 	t.Helper()
 	if len(got) != len(want) {
@@ -583,6 +582,8 @@ func assertPermissionTree(t *testing.T, got, want PermissionTree) {
 	}
 }
 
+// TestProbePermissionsFixturesThroughRealClient parses the exact Probe 1 and
+// Probe 6 permissions responses and asserts every captured permission entry.
 func TestProbePermissionsFixturesThroughRealClient(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -615,7 +616,7 @@ func TestProbePermissionsFixturesThroughRealClient(t *testing.T) {
 	}
 }
 
-// TestProbeUserFixturesThroughRealClient replays GROUPADD and
+// TestProbeUserFixturesThroughRealClient replays GROUPADD, COMMENT, and
 // RENEWAL-PRESERVE user responses and asserts all fields consumed by the
 // issuance and renewal read-back checks.
 func TestProbeUserFixturesThroughRealClient(t *testing.T) {
