@@ -10,7 +10,10 @@ This secrets engine implements Vault's dynamic secrets pattern for Proxmox VE. E
 
 ## Project Status
 
-🚧 **Active implementation** — Core plugin code, unit tests, and operator-run live acceptance tests are present. The current focus is hardening dynamic credential issuance, renewal/revocation, WAL rollback safety, and Proxmox VE 9.2.10 acceptance coverage before a v1 release.
+🚧 **Active implementation** — Core plugin code, unit tests, operator-run live
+acceptance tests, and a working `make build` are present. Current Phase 5 and
+Phase 6 validation status is tracked in
+[`docs/IMPLEMENTATION_PLAN.md`](docs/IMPLEMENTATION_PLAN.md#phased-task-list).
 
 ## How It Works
 
@@ -184,6 +187,8 @@ Key points:
 - Unit tests cover deterministic mid-provisioning network/error injection and WAL-delete failure paths. The live acceptance suite does not inject network failures, quorum loss, or ACL lock contention.
 - Run against an operator-provided disposable/dev Proxmox VE 9.2.10 cluster with a test admin token. These tests mutate the cluster by creating, renewing, expiring, and deleting temporary `vaultacc-*@pve` users.
 - Live acceptance tests are operator-run only and are never run by CI. Normal PR CI runs build, unit tests, and lint only.
+- Current recorded operator results and the only optional `TestAcc*` gates that
+  may skip are tracked in `docs/IMPLEMENTATION_PLAN.md`.
 
 #### Acceptance Test Prerequisites
 

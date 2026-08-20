@@ -6,17 +6,18 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Commands
 
-No build/test/lint config exists yet — the repo is docs-only. Once `go.mod` exists:
-
 ```bash
 go build ./...
-go test ./...                              # unit tests (mocked Proxmox client)
+make build                               # builds plugin into vault/plugins/
+make test                                # unit tests (mocked Proxmox client)
 go test ./... -run TestXxx -v              # single test
 make testacc                              # operator-run acceptance tests (needs disposable/dev Proxmox)
-golangci-lint run
+make lint                                # pinned golangci-lint via Makefile
 ```
 
-Add a Go `.gitignore` before creating any build artifacts.
+Current phase validation status, including the recorded PVE build, optional
+acceptance-test skip gates, and pending Vault-server smoke-test scope, is tracked
+in `docs/IMPLEMENTATION_PLAN.md`.
 
 ## Constraints beyond AGENTS.md
 

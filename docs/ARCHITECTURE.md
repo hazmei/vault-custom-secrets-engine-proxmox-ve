@@ -679,6 +679,9 @@ Rollback section of `docs/IMPLEMENTATION_PLAN.md` for full detail.
   against Proxmox userid character set and length limits
 
 ### Acceptance Tests
+- **Recorded status** — `docs/IMPLEMENTATION_PLAN.md` is the source of truth for
+  current Phase 5/Phase 6 validation status, including the recorded PVE build and
+  the only optional `TestAcc*` gates permitted to skip.
 - **Environment gating** — tests prefixed `TestAcc*` run only when
   `VAULT_ACC=1` is set (HashiCorp convention)
 - **Operator-run only** — live acceptance is never run by CI. Operators run
@@ -747,11 +750,11 @@ Rollback section of `docs/IMPLEMENTATION_PLAN.md` for full detail.
   `force=true` is refused with a clear error, and that DELETE with
   `force=true` succeeds (matching the documented MUST in the DELETE config
   behavior section)
-- **Cluster failure modes** — test behavior under Proxmox quorum loss and
-  ACL lock contention (should surface as retryable errors)
-- **Status** — live acceptance remains incomplete until an operator actually
-  runs `make testacc` against a disposable/dev PVE cluster and records the
-  result.
+- **Cluster failure modes** — live acceptance does not inject Proxmox quorum
+  loss or ACL lock contention. Unit tests cover deterministic client/storage
+  error injection; live cluster failure-mode testing remains future/operator-run
+  scope. The engine returns PVE errors to Vault core rather than using a custom
+  `RetryableError` type.
 
 ## Security Considerations
 
