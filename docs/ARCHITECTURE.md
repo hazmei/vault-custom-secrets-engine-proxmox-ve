@@ -679,6 +679,10 @@ Rollback section of `docs/IMPLEMENTATION_PLAN.md` for full detail.
   against Proxmox userid character set and length limits
 
 ### Acceptance Tests
+- **Recorded status** — required Phase 5 operator-run live acceptance passed on
+  the operator's Proxmox VE 9.2.10 build on 2026-08-20. Optional canaries that
+  lacked configured environment prerequisites remained skipped; this result does
+  not imply they passed.
 - **Environment gating** — tests prefixed `TestAcc*` run only when
   `VAULT_ACC=1` is set (HashiCorp convention)
 - **Operator-run only** — live acceptance is never run by CI. Operators run
@@ -749,9 +753,19 @@ Rollback section of `docs/IMPLEMENTATION_PLAN.md` for full detail.
   behavior section)
 - **Cluster failure modes** — test behavior under Proxmox quorum loss and
   ACL lock contention (should surface as retryable errors)
-- **Status** — live acceptance remains incomplete until an operator actually
-  runs `make testacc` against a disposable/dev PVE cluster and records the
-  result.
+- **Status** — required live acceptance has a recorded operator green result from
+  2026-08-20 against PVE 9.2.10. Optional canaries remain skipped unless their
+  prerequisites are configured.
+
+### Build/Register/Smoke Status
+
+- `make build` passed on 2026-08-20.
+- Local Vault plugin registration, enable, and `force=true` config-delete checks
+  passed on 2026-08-20.
+- The full Vault-server lifecycle smoke test remains pending because the
+  execution environment did not provide the required `PVE_*` variables. Do not
+  claim the issue/use/renew/revoke live lifecycle passed until it is run against
+  configured PVE.
 
 ## Security Considerations
 

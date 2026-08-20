@@ -4,7 +4,15 @@ Instructions for AI coding agents working on this Vault secrets engine plugin.
 
 ## Project State
 
-- **Active implementation** through Phase 3 (dynamic creds issuance + lease renewal/revocation). `docs/ARCHITECTURE.md` and `docs/IMPLEMENTATION_PLAN.md` are the authoritative design — READ THEM before extending.
+- **Active implementation** through Phase 6 partial validation. Phase 5 required
+  operator-run live acceptance passed on the operator's PVE 9.2.10 build on
+  2026-08-20, with optional canaries skipped when their `PVE_*` prerequisites
+  were unset. Phase 6 `make build` and local Vault plugin
+  registration/enable/`force=true` config-delete checks passed; the full
+  Vault-server issue/use/renew/revoke smoke test remains pending without
+  required `PVE_*` variables. `docs/ARCHITECTURE.md` and
+  `docs/IMPLEMENTATION_PLAN.md` are the authoritative design/status — READ THEM
+  before extending.
 - Go module (`go.mod`), `.gitignore`, and source exist: `backend.go`, `path_config.go`, `path_roles.go`, `path_creds.go`, `secret_token.go`, `wal.go`, `internal/pveapi/*`, with unit tests throughout.
 - Target: Proxmox VE 9.2.10, using `hashicorp/vault/sdk`.
 
