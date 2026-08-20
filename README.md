@@ -124,27 +124,43 @@ auto-registers binaries found there, so no manual registration command is
 needed in this mode:
 
 ```bash
-vault server -dev-plugin-dir=./vault/plugins
+vault server -dev -dev-root-token-id=root -dev-plugin-dir=./vault/plugins
 ```
 
-For a production-style install, copy the binary to Vault's plugin directory,
-calculate its SHA-256 digest, and register it in the Vault plugin catalog:
+The development server is now running with the plugin auto-registered. In a
+second terminal, enable the engine at the mount path used by the examples
+below:
 
 ```bash
-sha256sum vault/plugins/vault-plugin-secrets-proxmox
-vault plugin register -sha256=<hash> \
-  secret vault-plugin-secrets-proxmox
-vault secrets enable -path=pve vault-plugin-secrets-proxmox
+export VAULT_ADDR='http://127.0.0.1:8200'
+export VAULT_TOKEN='root'
+vault secrets enable -path=proxmox vault-plugin-secrets-proxmox
 ```
 
-Use the `-sha256` value produced for the exact binary being installed. Keep
-token secrets out of shell history, logs, issues, and documentation.
+For a production-style install, configure Vault with a real plugin directory,
+copy the binary there, calculate its SHA-256 digest from that exact file, and
+register it in the Vault plugin catalog. The directory must be configured as a
+real directory, not a symlink:
+
+```hcl
+plugin_directory = "/etc/vault/plugins"
+```
+
+```bash
+SHA256=$(shasum -a 256 /etc/vault/plugins/vault-plugin-secrets-proxmox | cut -d' ' -f1)
+vault plugin register -sha256="$SHA256" \
+  secret vault-plugin-secrets-proxmox
+vault secrets enable -path=proxmox vault-plugin-secrets-proxmox
+```
+
+The production catalog registration path has not been live-verified in this
+repository.
 
 ## Configuration Example
 
 ```bash
 # Configure the secrets engine
-vault write pve/config \
+vault write proxmox/config \
   address="https://pve.example.com:8006" \
   token_id="vault-admin@pve!root-token" \
   token_secret="<uuid-secret>" \
@@ -152,10 +168,17 @@ vault write pve/config \
   ca_cert=@ca-bundle.pem \
   default_ttl=3600 \
   default_max_ttl=86400
+```
 
+The example intentionally uses a placeholder for the one-time token secret.
+Keep real token secrets out of shell history, logs, issues, and documentation.
+
+## Role and Usage Example
+
+```bash
 # Create a role for VM administrators
 # (Assumes a PVE group "vault-vm-admins" already exists and is bound to PVEVMAdmin at /vms/100)
-vault write pve/roles/vm-admin \
+vault write proxmox/roles/vm-admin \
   group="vault-vm-admins" \
   user_prefix="vault" \
   realm="pve" \
@@ -163,7 +186,7 @@ vault write pve/roles/vm-admin \
   max_ttl=86400
 
 # Issue a credential
-vault read pve/creds/vm-admin
+vault read proxmox/creds/vm-admin
 # Returns: user_id, token_id, token_secret (lease auto-revokes on expiry)
 ```
 
