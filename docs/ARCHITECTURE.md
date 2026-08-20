@@ -30,6 +30,15 @@ direct-ACL, and negative-authorization canaries were explicitly skipped on
 2026-08-20 because their optional prerequisites were unset. These skips do
 not constitute completed tests.
 
+**Production operations reference:** The README's [Production Proxmox
+Prerequisites and Runbook](../README.md#production-proxmox-prerequisites-and-runbook)
+is the operator-facing setup procedure. It is distinct from the disposable
+acceptance setup and covers the dedicated provisioner identity, exact ACL
+paths, mandatory propagation, one-time token secret handling, manual token
+rotation, and stranded-lease warnings. Production catalog registration remains
+unverified; the documented production-style Vault installation commands must
+not be treated as live validation.
+
 ## Configuration
 
 ```
@@ -498,7 +507,13 @@ primitive in the Proxmox API for the token currently in use; document as
 a manual operation (create new token, update `<mount>/config`, delete old
 token) rather than an automated endpoint. Operators can read the current
 `token_id` via `GET <mount>/config` to identify the token being replaced
-and confirm the swap.
+and confirm the swap. Create the replacement with `privsep=0`, verify it before
+removing the old token, and revoke outstanding leases before rotation where
+possible. If the configured provisioner token is removed or loses its required
+privileges, outstanding PVE users and lease tokens can remain on the cluster
+while becoming non-renewable and non-revocable by the engine. The README
+[production runbook](../README.md#5-rotate-the-provisioner-token-safely)
+contains the operator sequence and recovery warning.
 
 ### Error Handling
 
