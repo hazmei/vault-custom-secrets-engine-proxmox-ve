@@ -504,28 +504,30 @@ func TestClassifyPVEErrorIntegration(t *testing.T) {
 }
 
 type probeClientErrorCase struct {
-	name    string
-	status  int
-	body    string
-	call    func(Client) error
-	wantErr error
+	name       string
+	status     int
+	body       string
+	wantMethod string
+	wantPath   string
+	call       func(Client) error
+	wantErr    error
 }
 
 var probeClientErrorCases = []probeClientErrorCase{
-	{name: "Probe 2 duplicate user", status: 500, body: probe2DuplicateUserResponse, call: func(client Client) error {
+	{name: "Probe 2 duplicate user", status: 500, body: probe2DuplicateUserResponse, wantMethod: http.MethodPost, wantPath: "/api2/json/access/users", call: func(client Client) error {
 		return client.CreateUser(context.Background(), CreateUserRequest{UserID: "probe-dup-52445741@pve", Groups: "grp", Expire: 1, Enable: true})
 	}, wantErr: ErrConflict},
-	{name: "Probe 3 missing user delete", status: 500, body: probe3MissingUserResponse, call: func(client Client) error {
+	{name: "Probe 3 missing user delete", status: 500, body: probe3MissingUserResponse, wantMethod: http.MethodDelete, wantPath: "/api2/json/access/users/probe-ghost-nonexistent@pve", call: func(client Client) error {
 		return client.DeleteUser(context.Background(), "probe-ghost-nonexistent@pve")
 	}, wantErr: ErrUserNotFound},
-	{name: "Probe 4 missing user get", status: 500, body: probe4MissingUserResponse, call: func(client Client) error {
+	{name: "Probe 4 missing user get", status: 500, body: probe4MissingUserResponse, wantMethod: http.MethodGet, wantPath: "/api2/json/access/users/probe-ghost-nonexistent@pve", call: func(client Client) error {
 		_, err := client.GetUser(context.Background(), "probe-ghost-nonexistent@pve")
 		return err
 	}, wantErr: ErrUserNotFound},
-	{name: "Probe 5 missing group", status: 500, body: probe5MissingGroupResponse, call: func(client Client) error {
+	{name: "Probe 5 missing group", status: 500, body: probe5MissingGroupResponse, wantMethod: http.MethodGet, wantPath: "/api2/json/access/groups/definitely-not-a-real-group", call: func(client Client) error {
 		return client.GetGroup(context.Background(), "definitely-not-a-real-group")
 	}, wantErr: ErrGroupNotFound},
-	{name: "Probe 6b duplicate token", status: 400, body: probe6bDuplicateTokenResponse, call: func(client Client) error {
+	{name: "Probe 6b duplicate token", status: 400, body: probe6bDuplicateTokenResponse, wantMethod: http.MethodPost, wantPath: "/api2/json/access/users/probe-ps-52445741@pve/token/vault", call: func(client Client) error {
 		_, err := client.CreateToken(context.Background(), "probe-ps-52445741@pve", "vault")
 		return err
 	}, wantErr: ErrConflict},
@@ -534,6 +536,9 @@ var probeClientErrorCases = []probeClientErrorCase{
 func runProbeClientError(t *testing.T, tc probeClientErrorCase) {
 	t.Helper()
 	ts := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != tc.wantMethod || r.URL.Path != tc.wantPath {
+			t.Errorf("request = %s %s; want %s %s", r.Method, r.URL.Path, tc.wantMethod, tc.wantPath)
+		}
 		w.WriteHeader(tc.status)
 		_, _ = w.Write([]byte(tc.body)) //nolint:errcheck // httptest handler
 	}))
@@ -588,7 +593,7 @@ func TestProbePermissionsFixturesThroughRealClient(t *testing.T) {
 			"/access/realm/pve": {"Realm.AllocateUser": 1, "User.Modify": 1, "Sys.Audit": 1},
 			"/access/groups":    {"Realm.AllocateUser": 1, "User.Modify": 1, "Sys.Audit": 1},
 		}},
-		{name: "Probe 6 empty permissions", body: probe6EmptyPermissionsResponse, want: PermissionTree{}},
+		{name: "Probe 6-fix-A root permissions", body: probe6FixAPermissionsResponse, want: PermissionTree{"/": {}}},
 	}
 	for _, tc := range tests {
 		tc := tc
@@ -614,13 +619,16 @@ func TestProbeUserFixturesThroughRealClient(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name       string
-		body       string
-		wantGroups []string
-		wantEnable bool
-		wantExpire int64
+		name        string
+		body        string
+		wantGroups  []string
+		wantEnable  bool
+		wantExpire  int64
+		wantComment string
 	}{
 		{name: "GROUPADD user read-back", body: groupAddUserResponse, wantGroups: []string{"vault-test-grp"}, wantEnable: true, wantExpire: 1786972261},
+		{name: "COMMENT after create", body: commentAfterCreateResponse, wantGroups: []string{"vault-test-grp"}, wantEnable: true, wantExpire: 1787108586, wantComment: probeComment},
+		{name: "COMMENT after renewal", body: commentAfterRenewalResponse, wantGroups: []string{"vault-test-grp"}, wantEnable: true, wantExpire: 1787112186, wantComment: probeComment},
 		{name: "RENEWAL-PRESERVE before", body: renewalPreserveBeforeResponse, wantGroups: []string{"vault-test-grp"}, wantEnable: true, wantExpire: 1786986804},
 		{name: "RENEWAL-PRESERVE after", body: renewalPreserveAfterResponse, wantGroups: []string{"vault-test-grp"}, wantEnable: true, wantExpire: 1786990429},
 	}
@@ -641,8 +649,8 @@ func TestProbeUserFixturesThroughRealClient(t *testing.T) {
 			if !slices.Equal(info.Groups, tc.wantGroups) || info.Enable != tc.wantEnable || info.Expire != tc.wantExpire {
 				t.Fatalf("user info = %#v; want groups=%#v enable=%t expire=%d", info, tc.wantGroups, tc.wantEnable, tc.wantExpire)
 			}
-			if info.Comment != "" {
-				t.Errorf("comment = %q; want empty comment", info.Comment)
+			if info.Comment != tc.wantComment {
+				t.Errorf("comment = %q; want %q", info.Comment, tc.wantComment)
 			}
 		})
 	}
