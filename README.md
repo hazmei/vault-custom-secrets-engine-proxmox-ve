@@ -222,6 +222,7 @@ newline:
 
 ```bash
 read -rs SECRET   # paste the one-time secret; not echoed, not in history
+install -d -m 0700 /run/secrets
 install -m 0600 /dev/null /run/secrets/pve-provisioner-token
 printf '%s' "$SECRET" > /run/secrets/pve-provisioner-token
 ```
@@ -244,6 +245,8 @@ vault write proxmox/roles/production-readers \
   realm="pve" \
   ttl=3600 \
   max_ttl=86400
+
+unset SECRET
 ```
 
 The config write checks connectivity and the provisioner's permissions; the
@@ -266,6 +269,7 @@ Root-token rotation is out of scope for v1 and must be performed manually:
 
    ```bash
    read -rs SECRET   # paste the one-time secret; not echoed, not in history
+   install -d -m 0700 /run/secrets
    install -m 0600 /dev/null /run/secrets/pve-provisioner-token
    printf '%s' "$SECRET" > /run/secrets/pve-provisioner-token
    ```
@@ -276,6 +280,13 @@ Root-token rotation is out of scope for v1 and must be performed manually:
    `tls_skip_verify`, `ca_cert`, `default_ttl`, and `default_max_ttl` as
    applicable. Use a protected `@file` or equivalent secret-input mechanism;
    never put the secret directly on the command line.
+   After the replacement config write completes, remove the secret from the
+   shell environment:
+
+   ```bash
+   unset SECRET
+   ```
+
 4. Confirm the config and a controlled lease lifecycle, then revoke/delete the
    old token out-of-band in Proxmox.
 
