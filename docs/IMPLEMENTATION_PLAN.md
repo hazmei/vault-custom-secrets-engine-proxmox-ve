@@ -1310,9 +1310,10 @@ and asserts the parsed `PermissionTree` matches the expected structure. No live 
 
 ### Phase 5 — Full Unit Suite + Acceptance Tests
 
-**Status**: ✅ IMPLEMENTED — unit tests and gated acceptance test code are present. Live
-`VAULT_ACC=1 make testacc` remains environment-dependent and is not implied by the normal unit
-test run.
+**Status**: ✅ LOCAL VERIFICATION PASSED (2026-08-20) — unit tests and gated acceptance
+test code are present. Phase 5 local checks (`go build ./...`, `go test ./...`, and
+`make lint`) pass. Live `VAULT_ACC=1 make testacc` remains environment-dependent and is
+not implied by the normal unit test run.
 
 **Tasks**:
 - [x] Ensure all unit tests (`*_test.go`) pass: `make test` green
@@ -1324,6 +1325,7 @@ test run.
   - [x] `TestAccConcurrentIssuance` (10 goroutines, verify collision retry works)
   - [x] `TestAccDeleteConfigGuard` (DELETE without force=true refused; with force=true succeeds)
 - [x] Document required test env vars in `acceptance_test.go` comment header (PVE_ADDR, PVE_TOKEN_ID, PVE_TOKEN_SECRET, PVE_TEST_GROUP)
+- [x] Run Phase 5 local verification: `go build ./...`, `go test ./...`, and `make lint` green
 - [ ] Run acceptance tests against containerized/dev PVE: `make testacc` green
 
 **Acceptance Criteria**:
