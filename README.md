@@ -247,6 +247,7 @@ vault write proxmox/roles/production-readers \
   max_ttl=86400
 
 unset SECRET
+rm -f /run/secrets/pve-provisioner-token
 ```
 
 The config write checks connectivity and the provisioner's permissions; the
@@ -285,6 +286,7 @@ Root-token rotation is out of scope for v1 and must be performed manually:
 
    ```bash
    unset SECRET
+   rm -f /run/secrets/pve-provisioner-token
    ```
 
 4. Confirm the config and a controlled lease lifecycle, then revoke/delete the
