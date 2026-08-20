@@ -16,6 +16,20 @@ and removes its token(s), group memberships, and ACL entries in one call.
 - Lifecycle: full dynamic create/delete — Proxmox supports user and token
   creation/deletion natively, so no static-secret fallback is needed
 
+## Implementation and Validation Status
+
+The authoritative phase and deferred-review status is maintained in
+`docs/IMPLEMENTATION_PLAN.md`: Phases 0–5 are complete, while Phase 6 is
+**partially complete**. Development-mode registration via
+`-dev-plugin-dir` and the real Vault lifecycle smoke test are verified;
+production-style catalog registration with
+`vault plugin register -sha256=<hash>` remains unverified. DR-1 through DR-4
+are complete, and DR-5/DR-6 remain pending. The required positive
+authorization canary passed, while the optional insufficient-privilege,
+direct-ACL, and negative-authorization canaries were explicitly skipped on
+2026-08-20 because their optional prerequisites were unset. These skips do
+not constitute completed tests.
+
 ## Configuration
 
 ```

@@ -1128,8 +1128,8 @@ before or during the phase where its call site is introduced.
 
 #### DR-1 — `ErrUnauthenticated` (401) sentinel
 
-**Status**: Complete — implemented on `fix/dr-1-dr-3-hardening`. `ErrUnauthenticated` is mapped
-from any HTTP 401 response before body-string classification, and issuance, renewal, and
+**Status**: ✅ COMPLETE — `ErrUnauthenticated` is mapped from any HTTP 401
+response before body-string classification, and issuance, renewal, and
 revocation wrap it with an admin-token diagnostic while preserving `errors.Is`.
 
 **What**: Add a new typed sentinel `ErrUnauthenticated` in `internal/pveapi/errors.go` and map
@@ -1138,8 +1138,9 @@ expired or revoked admin token) falls through to a generic `"HTTP 401 <endpoint>
 "Engine config credentials are dead" is operationally distinct from Forbidden (403) or NotFound.
 PVE returns 401 with an empty body when a token is expired or revoked (confirmed PVE 9.2.10).
 
-**Why deferred**: Phase 1 config-write only exercises 403 (privilege check). Runtime 401 only
-matters once issuance, renewal, and revocation paths exist (Phase 3–4).
+**Verification**: Unit coverage exercises empty and non-empty 401 bodies;
+the live authorization canary also verified that an expired-user token is
+rejected with HTTP 401 on 2026-08-20.
 
 **Where**: `internal/pveapi/errors.go` (new sentinel), `internal/pveapi/client.go`
 (`classifyPVEError`), and any call site in `path_creds.go` / `secret_token.go` that calls the
@@ -1154,7 +1155,7 @@ Unit test: `classifyPVEError(401, []byte{})` returns `ErrUnauthenticated`.
 
 #### DR-2 — Split `ErrNotFound` into `ErrUserNotFound` / `ErrGroupNotFound`
 
-**Status**: Complete — `ErrUserNotFound` and `ErrGroupNotFound` are distinct sentinels, client
+**Status**: ✅ COMPLETE — `ErrUserNotFound` and `ErrGroupNotFound` are distinct sentinels, client
 classification maps the relevant PVE body strings to the correct sentinel, and call sites key
 revocation idempotency specifically on `ErrUserNotFound`.
 
@@ -1165,9 +1166,9 @@ treat it as **failure**, and role-write surfaces group-not-found as `"group does
 The coarse single sentinel makes those distinctions require an additional body-string scan at
 the call site instead of a clean `errors.Is` check.
 
-**Why deferred**: Phase 1 only used not-found handling in `GetGroup` (role-write) and `DeleteUser`
-(WAL rollback), where the current coarse mapping is safe. The call-site semantics that require
-the split (revocation idempotency vs. renewal failure) do not exist until Phase 3–4.
+**Verification**: Unit coverage and the live lifecycle smoke test verify the
+HTTP 500 body-string contract, including idempotent revoke handling for
+`"no such user"`, on 2026-08-20.
 
 **Where**: `internal/pveapi/errors.go` (new sentinels), `internal/pveapi/client.go`
 (`classifyPVEError`), `secret_token.go` (`secretTokenRevoke`/`secretTokenRenew`), `wal.go`
@@ -1193,8 +1194,8 @@ semantics that can wipe the user's `groups`, stripping all effective privileges.
 has exactly one valid input combination: `Enable=true`, `Append=true`, with `Groups` re-sent.
 Make invalid combinations unrepresentable or explicitly rejected before the wire call fires.
 
-**Why deferred**: `UpdateUser` is not called until the Phase 4 renewal path. Introducing the
-guard now would add dead code with no exercising call site.
+**Verification**: Renewal unit coverage and the live authorization canary
+verify the safe `enable=1`, `append=1`, and group-preserving update shape.
 
 **Where**: `internal/pveapi/types.go` or `client.go` (`UpdateUserRequest` definition / `UpdateUser`
 call site in `secret_token.go`).
@@ -1217,8 +1218,8 @@ A misbehaving, misconfigured, or compromised PVE endpoint (or a MITM proxy) coul
 arbitrarily large body, causing unbounded memory allocation. PVE responses are small JSON
 objects (< 1 KB in practice).
 
-**Why deferred**: Hardening item with no functional impact on correctness. Deferred until the
-client implementation is otherwise stable to avoid churn on the test helpers.
+**Verification**: Boundary tests cover cap-1, cap, and cap+1 responses and
+confirm oversized business-error bodies fail closed before classification.
 
 **Where**: `internal/pveapi/client.go` — the response-body read in `doRequest` (or wherever
 `resp.Body` is consumed before being passed to `classifyPVEError`).
@@ -1234,6 +1235,10 @@ Unit tests cover the boundary sizes and confirm an oversized HTTP 500 DELETE bod
 ---
 
 #### DR-5 — `force` / `-force` CLI collision documentation
+
+**Status**: ⏳ PENDING — the operator-facing CLI collision documentation has
+not yet been completed. Do not mark this item complete based on the existing
+`force=true` implementation or smoke-test coverage.
 
 **What**: `DELETE <mount>/config` requires a `force=true` **data parameter**, but
 `vault delete -force <path>` is a real Vault CLI **flag** (skip-confirmation prompt) that
@@ -1258,6 +1263,9 @@ collision entirely — note the trade-off (non-standard name vs. less confusion)
 ---
 
 #### DR-6 — Probe-fixture tests (upgrade unit tests to verbatim PVE bodies)
+
+**Status**: ⏳ PENDING — the unit tests still use representative bodies rather
+than a complete verbatim fixture set from `PVE_PROBES.md`.
 
 **What**: The 9 verbatim-captured PVE response bodies in `docs/PVE_PROBES.md` (Probes 2–6b,
 GROUPADD, RENEWAL-PRESERVE, etc.) should be replayed as test fixtures through
@@ -1374,16 +1382,20 @@ not run by CI.
 
 ### Phase 6 — Build/Register/Smoke + CI + Docs
 
-**Status**: ✅ COMPLETE (2026-08-20) — `make build`, `make test`, and
-`make lint` passed previously, and the full real Vault-server lifecycle smoke
-test now passes against the disposable `pve-manager/9.2.10/43df2e01f27a1a19`
-target. The plugin was auto-registered from `-dev-plugin-dir=./vault/plugins`
-and enabled successfully. The test covered stored-config validation and
-secret redaction, role creation, credential issuance, issued-token `/version`
-authentication, renewal, revocation, PVE absence verification, the
-`force=true` delete guard, forced deletion of stored config, and cached-client
-invalidation (a post-delete credential request failed because config was gone,
-not because a stale client was used).
+**Status**: ⚠️ PARTIALLY COMPLETE (2026-08-20) — `make build`, `make test`,
+and `make lint` passed, and the full real Vault-server lifecycle smoke test
+passed against the disposable `pve-manager/9.2.10/43df2e01f27a1a19` target.
+Development-mode registration through `-dev-plugin-dir=./vault/plugins` and
+enablement were verified. Production-style plugin catalog registration with
+`vault plugin register -sha256=<hash>` was not run and remains unverified.
+Therefore Phase 6 is not complete.
+
+The smoke test covered stored-config validation and secret redaction, role
+creation, credential issuance, issued-token `/version` authentication,
+renewal, revocation, PVE absence verification, the `force=true` delete guard,
+forced deletion of stored config, and cached-client invalidation (a
+post-delete credential request failed because config was gone, not because a
+stale client was used).
 
 The canonical `make testacc` command was also preflighted without printing
 secrets. The exact missing variables were `PVE_BEHAVIORAL_PATH` and
@@ -1428,9 +1440,9 @@ changes were made outside the disposable target.
 
 **Acceptance Criteria**:
 - Clean build (`make build` succeeds)
-- Plugin auto-registers and enables through `-dev-plugin-dir`; the production
-  catalog registration path using `vault plugin register -sha256=<hash>`
-  remains unverified
+- Plugin auto-registers and enables through `-dev-plugin-dir` (verified)
+- Production catalog registration using `vault plugin register -sha256=<hash>`
+  remains unverified and is not claimed as complete
 - Full issue→use→renew→revoke smoke test passes through a real `vault server`
   plus registered plugin binary with required live PVE configuration
 - Stored config can be force-deleted and the cached PVE client is invalidated
@@ -1440,6 +1452,22 @@ changes were made outside the disposable target.
   2026-08-20 against `pve-manager/9.2.10/43df2e01f27a1a19`; only the three
   optional gates listed above may skip when their prerequisites are not configured
 - `README.md` has build, config, and usage examples
+
+**Explicitly skipped optional canaries on 2026-08-20** (their prerequisites
+were unset; these are not failures and are not complete):
+
+- `TestAccInsufficientPrivileges` — `PVE_INSUFFICIENT_TOKEN_ID` /
+  `PVE_INSUFFICIENT_TOKEN_SECRET`
+- Direct ACL anti-privilege-escalation canary — `PVE_ACL_CANARY_PATH`,
+  `PVE_ACL_CANARY_UNHELD_ROLE`, and `PVE_ACL_CANARY_TARGET_USER`
+- Negative authorization endpoint canary — `PVE_NEGATIVE_AUTH_PATH` (and
+  optional method override)
+
+The required positive behavioral authorization canary passed, including the
+group-role-gated endpoint, expired-user HTTP 401 check, and renewal
+group-preservation check. Omitted-`append` semantics remain unresolved; the
+engine therefore continues to send explicit `append=1` with `expire` +
+`groups` + `enable` and read back membership.
 
 **Architecture References**: `docs/ARCHITECTURE.md` Root Rotation section (manual operation), Build & Run commands above.
 
