@@ -1375,24 +1375,27 @@ not run by CI.
 ### Phase 6 — Build/Register/Smoke + CI + Docs
 
 **Status**: 🚧 PARTIAL (2026-08-20) — `make build`, `make test`, and
-`make lint` passed on 2026-08-20. The plugin was auto-registered from
+`make lint` passed. The plugin was auto-registered from
 `-dev-plugin-dir=./vault/plugins` and enabled successfully. The
 `force=true` guard branch was exercised on an unconfigured mount (DELETE
 without `force` refused, with it accepted). Deletion of a *stored* config and
 the subsequent cached-client invalidation remain pending.
 
-The live Vault-server lifecycle smoke test remains blocked in this branch's
-working environment, distinct from the operator workstation where the Phase 5
-run of 2026-08-20 was performed, because the PVE configuration required for
-the smoke test is not present here. The smoke test requires PVE reachability,
-an admin token, a pre-created test group, and the test realm. Separately, the
-`make testacc` acceptance suite stopped at its documented preflight because
-`PVE_ADDR`, `PVE_TOKEN_ID`, `PVE_TOKEN_SECRET`, `PVE_TEST_GROUP`,
-`PVE_BEHAVIORAL_PATH`, and `PVE_BEHAVIORAL_MARKER` are not present in this
-environment. The last two variables gate the authorization-contract canary,
-not the Vault-server lifecycle smoke test. The acceptance preflight did not
-contact PVE and is not evidence about the smoke test. Consequently, config
-write, issue/use, renewal, revocation, stored-config deletion, and real
+The live Vault-server lifecycle smoke test remains blocked in the Phase 6
+validation environment used on 2026-08-20 (a local workstation with no PVE
+access), distinct from the operator workstation where the Phase 5 run was
+performed, because the PVE configuration required for the smoke test is not
+available in that validation environment. The smoke test requires PVE
+reachability, an admin token with the grants documented in the Admin Token
+Configuration section of `README.md` and `AGENTS.md`, a pre-created test group
+bound out-of-band to the role being exercised, and the test realm. Separately,
+the `make testacc` acceptance suite stopped at its documented preflight in the
+Phase 6 validation environment because `PVE_ADDR`, `PVE_TOKEN_ID`,
+`PVE_TOKEN_SECRET`, `PVE_TEST_GROUP`, `PVE_BEHAVIORAL_PATH`, and
+`PVE_BEHAVIORAL_MARKER` are not present there. The last two variables gate the
+authorization-contract canary, not the Vault-server lifecycle smoke test. The
+acceptance preflight did not contact PVE and is not evidence about the smoke
+test. Consequently, config write, issue/use, renewal, revocation, and real
 cached-client invalidation against PVE are still unverified. Do not treat the
 local Vault registration/enable check as proof of the live lifecycle smoke
 test.
@@ -1404,8 +1407,9 @@ test.
   register, enable, write config, write role, read creds, use token, renew,
   revoke, delete config with `force=true`) — the plugin was auto-registered
   and enabled, and the unconfigured-mount `force=true` guard check passed; the
-  full sequence remains pending because the PVE reachability, admin token,
-  pre-created group, and realm required by the smoke test are unavailable.
+  full sequence remains pending because PVE reachability, an admin token with
+  the documented grants, a pre-created group bound to the test role, and the
+  test realm are unavailable in the Phase 6 validation environment.
   Separately, `make testacc` stopped at its acceptance-suite preflight without
   contacting PVE; that preflight does not exercise this smoke test.
 - [x] Update `README.md` with: overview, build/install instructions,
@@ -1417,7 +1421,9 @@ test.
 
 **Acceptance Criteria**:
 - Clean build (`make build` succeeds)
-- Plugin registers and enables
+- Plugin auto-registers and enables through `-dev-plugin-dir`; the production
+  catalog registration path using `vault plugin register -sha256=<hash>`
+  remains unverified
 - Full issue→use→renew→revoke smoke test passes through a real `vault server`
   plus registered plugin binary with required live PVE configuration
 - CI runs on PR: fmt/lint/test green

@@ -111,6 +111,35 @@ validated per-role at role-write time). The privilege check walks
 ancestor paths (a grant at `/access` with `propagate=1` satisfies
 requirements for `/access/groups`).
 
+## Build and Install
+
+Build the plugin binary into `vault/plugins/`:
+
+```bash
+make build
+```
+
+For local development, start Vault with the plugin directory. Vault
+auto-registers binaries found there, so no manual registration command is
+needed in this mode:
+
+```bash
+vault server -dev-plugin-dir=./vault/plugins
+```
+
+For a production-style install, copy the binary to Vault's plugin directory,
+calculate its SHA-256 digest, and register it in the Vault plugin catalog:
+
+```bash
+sha256sum vault/plugins/vault-plugin-secrets-proxmox
+vault plugin register -sha256=<hash> \
+  secret vault-plugin-secrets-proxmox
+vault secrets enable -path=pve vault-plugin-secrets-proxmox
+```
+
+Use the `-sha256` value produced for the exact binary being installed. Keep
+token secrets out of shell history, logs, issues, and documentation.
+
 ## Configuration Example
 
 ```bash
