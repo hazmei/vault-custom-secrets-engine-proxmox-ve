@@ -145,8 +145,9 @@ func TestAccAuthorizationContractCanary(t *testing.T) {
 	controlUser := accUserID(t, "fullreplace")
 	createAccUser(t, ctx, h.Client, controlUser, h.Env.Group, futureExpire, walCommentPrefix+"fullreplace")
 	registerAccUserCleanup(t, h.Client, controlUser)
+	assertAccUserInGroup(t, ctx, h.Client, controlUser, h.Env.Group)
 	raw := newAccHTTPClient(t, h.Env)
-	form := url.Values{"expire": {strconv.FormatInt(time.Now().Add(20*time.Minute).Unix(), 10)}}
+	form := accFullReplaceControlForm(time.Now().Add(20 * time.Minute))
 	status, body, err := raw.do(ctx, http.MethodPut, "/access/users/"+url.PathEscape(controlUser), h.Env.TokenID, h.Env.TokenSecret, form)
 	if err != nil {
 		t.Fatalf("expire-only PUT control failed: %v", err)
@@ -219,6 +220,29 @@ func TestInsufficientPrivilegeErrorFragments(t *testing.T) {
 		if !isAccInsufficientPrivilegeError(tc) {
 			t.Fatalf("isAccInsufficientPrivilegeError(%q) = false; want true", tc)
 		}
+	}
+}
+
+func TestAccFullReplaceControlFormSendsExplicitAppendZero(t *testing.T) {
+	expire := time.Unix(1234, 0)
+
+	form := accFullReplaceControlForm(expire)
+
+	if got := form.Get("expire"); got != "1234" {
+		t.Fatalf("expire=%q; want 1234", got)
+	}
+	if got := form.Get("append"); got != "0" {
+		t.Fatalf("append=%q; want explicit 0", got)
+	}
+	if _, ok := form["groups"]; ok {
+		t.Fatalf("groups field present in full-replace control form: %v", form["groups"])
+	}
+}
+
+func accFullReplaceControlForm(expire time.Time) url.Values {
+	return url.Values{
+		"expire": {strconv.FormatInt(expire.Unix(), 10)},
+		"append": {"0"},
 	}
 }
 

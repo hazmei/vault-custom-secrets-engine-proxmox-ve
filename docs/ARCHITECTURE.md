@@ -350,10 +350,12 @@ has been disabled out-of-band. This preserves PVE user disable as an operator
 incident-response control; renewal does not silently re-enable disabled lease
 users. For enabled users, renewal issues `PUT /access/users/{userid}`
 re-sending `expire`+`groups`+`enable`+`append=1` together.
-**Confirmed on PVE 9.2.10 (PVE_PROBES.md Probe 7): `PUT /access/users` is FULL-REPLACE.**
-An expire-only PUT WIPES the `groups` array (observed `groups:[]`), stripping the credential's
-effective privileges. Renewal therefore MUST re-send the target group. The full-replace wipe
-is confirmed; the preserve path (re-sending `groups` retains membership) is confirmed by
+**Confirmed on PVE 9.2.10 (PVE_PROBES.md Probe 7): explicit replacement PUTs can clear groups.**
+Historical Probe 7 observed an expire-only PUT returning `groups:[]`, while a later live
+acceptance run on PVE manager 9.2.10 build `43df2e01f27a1a19` preserved groups when
+`append` was omitted; omitted-`append` semantics are unresolved and not relied upon.
+Renewal therefore MUST re-send the target group with explicit `append=1`. The preserve path
+(re-sending `groups` retains membership) is confirmed by
 Probe RENEWAL-PRESERVE (17 Aug 2026 — groups `["vault-test-grp"]` read back, expire advanced
 1786986804→1786990429). The runtime read-back assertion remains as defense-in-depth. The group is
 read from the lease's InternalData (`group` field), NOT from the role — the role may have
@@ -706,18 +708,19 @@ Rollback section of `docs/IMPLEMENTATION_PLAN.md` for full detail.
   USER has an `expire` in the past is rejected at authentication (401);
   (c) after a renewal (`PUT /access/users/{userid}` re-sending `expire`+`groups`+`enable`+`append=1`),
   the issued token still holds the group's roles (read-back confirms `groups` preserved).
-  PVE PUT is full-replace (Probe 7): an expire-only PUT WIPES groups; the canary guards
-  against a regression to expire-only renewal. Add a control: expire-only PUT on a throwaway
-  user leaves `groups:[]`. Optional negative/ACL probes assert direct `PUT /access/acl` of an
+  The canary guards against a regression to expire-only renewal. Add a control: explicit
+  replacement (`append=0`) on a throwaway user leaves `groups:[]`; omitted-`append`
+  semantics are unresolved and are not part of the engine contract. Optional negative/ACL probes assert direct `PUT /access/acl` of an
   unheld role by the admin token returns 403 and that a configured forbidden endpoint remains
   forbidden. These assertions guard against
   a future PVE version silently changing the authorization or expiry
   enforcement model the engine relies on. The user-level `expire`
-  backstop behavior and the full-replace wipe behavior are confirmed on PVE 9.2.10;
+  backstop behavior is confirmed on PVE 9.2.10; explicit replacement control coverage
+  guards against depending on unresolved omitted-`append` behavior;
   the renewal canary serves as a regression guard in the acceptance suite (the decisive live evidence
   for the preserve path is Probe RENEWAL-PRESERVE, 17 Aug 2026 — groups `["vault-test-grp"]`
-  read back, expire advanced 1786986804→1786990429). The control sub-assertion (expire-only PUT
-  leaves `groups:[]`) guards against a future regression to expire-only renewal.
+  read back, expire advanced 1786986804→1786990429). The control sub-assertion (explicit
+  `append=0` replacement leaves `groups:[]`) guards against a future regression to expire-only renewal.
 - **Failure and idempotency coverage** — live acceptance tests issue a
   credential, delete the PVE user out-of-band, then revoke the Vault secret and
   require success (PVE body `"no such user"` (HTTP 500) treated as success).
