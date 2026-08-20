@@ -484,8 +484,8 @@ and confirm the swap.
 
 ### Error Handling
 
-The PVE HTTP client caps every response body at 1 MiB with an N+1 read. A
-response of `maxResponseBodyBytes+1` bytes returns `ErrResponseTooLarge` before
+The PVE HTTP client caps every response body at 1 MiB with an N+1 read. Any
+response larger than `maxResponseBodyBytes` returns `ErrResponseTooLarge` before
 JSON parsing or body-string business-error classification. This is deliberately
 fail-closed: an oversized `DELETE /access/users/{userid}` response containing
 `"no such user"` is **not** treated as idempotent success, because the client
