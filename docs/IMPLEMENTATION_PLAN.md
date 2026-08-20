@@ -136,14 +136,14 @@ testacc:
 	[ -n "$$PVE_TOKEN_ID" ] || missing="$$missing PVE_TOKEN_ID"; \
 	[ -n "$$PVE_TOKEN_SECRET" ] || missing="$$missing PVE_TOKEN_SECRET"; \
 	[ -n "$$PVE_TEST_GROUP" ] || missing="$$missing PVE_TEST_GROUP"; \
-	[ -n "$$PVE_BEHAVIORAL_PATH" ] || missing="$$missing PVE_BEHAVIORAL_PATH"; \
+	[ -n "$$PVE_BEHAVIORAL_PATH" ] && [ "$$PVE_BEHAVIORAL_PATH" != "/version" ] || missing="$$missing PVE_BEHAVIORAL_PATH"; \
 	[ -n "$$PVE_BEHAVIORAL_MARKER" ] || missing="$$missing PVE_BEHAVIORAL_MARKER"; \
 	if [ -n "$$missing" ]; then \
 		echo "missing required acceptance environment variables:$$missing" >&2; \
 		echo "set these before running make testacc; optional variables are not required" >&2; \
 		exit 1; \
 	fi
-	VAULT_ACC=1 go test -count=1 -v ./... -run TestAcc
+	VAULT_ACC=1 go test -count=1 -v -timeout=30m ./... -run TestAcc
 
 .PHONY: fmt
 fmt:
@@ -162,7 +162,7 @@ clean:
 	rm -rf $(PLUGIN_DIR) bin/ dist/
 ```
 
-Targets: `build` → compile to `vault/plugins/`; `test` → unit tests; `testacc` → operator-run live acceptance tests with required env preflight (`VAULT_ACC=1`, verbose, non-cached `TestAcc` run); `fmt` → `gofmt`; `lint` → `golangci-lint run`; `tidy` → `go mod tidy`.
+Targets: `build` → compile to `vault/plugins/`; `test` → unit tests; `testacc` → operator-run live acceptance tests with required env preflight (`PVE_BEHAVIORAL_PATH` must be set to a group-role-gated endpoint, not `/version`) and a 30-minute Go test timeout (`VAULT_ACC=1`, verbose, non-cached `TestAcc` run); `fmt` → `gofmt`; `lint` → `golangci-lint run`; `tidy` → `go mod tidy`.
 
 ### `.golangci.yml`
 
@@ -949,7 +949,7 @@ recorded a `DeleteUser` for the just-created userid. No live PVE needed.
 - `PVE_BEHAVIORAL_PATH` — group-role-gated endpoint for the authorization canary
 - `PVE_BEHAVIORAL_MARKER` — response marker required from the behavioral endpoint
 
-**Gating**: Tests prefixed `TestAcc*` run ONLY when `VAULT_ACC=1` (HashiCorp convention). The canonical operator command is `make testacc`, which preflights only the required variables above and then runs `VAULT_ACC=1 go test -count=1 -v ./... -run TestAcc`.
+**Gating**: Tests prefixed `TestAcc*` run ONLY when `VAULT_ACC=1` (HashiCorp convention). The canonical operator command is `make testacc`, which preflights only the required variables above (`PVE_BEHAVIORAL_PATH` must be a group-role-gated endpoint, not `/version`) and then runs `VAULT_ACC=1 go test -count=1 -v -timeout=30m ./... -run TestAcc`.
 
 **Harness (concrete)**:
 - **Vault instantiation**: acceptance tests DO NOT spin up a real Vault server. They construct the backend directly with `logical.TestBackendConfig()` + in-memory `logical.Storage`, call `Factory(ctx, config)`, and drive it through `logical.Request`s (same pattern as unit tests). The difference from unit tests is that the *pveapi.Client is the REAL client pointed at a live PVE cluster (not the mock). A full `vault server -dev` end-to-end run is the manual smoke test (Build & Run section), not an automated `TestAcc`.

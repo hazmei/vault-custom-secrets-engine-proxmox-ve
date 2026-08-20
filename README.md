@@ -270,9 +270,11 @@ make testacc
 `make testacc` is the canonical operator command. It preflights only the
 required variables (`PVE_ADDR`, `PVE_TOKEN_ID`, `PVE_TOKEN_SECRET`,
 `PVE_TEST_GROUP`, `PVE_BEHAVIORAL_PATH`, and `PVE_BEHAVIORAL_MARKER`) before
-running the verbose, non-cached `TestAcc` suite with `VAULT_ACC=1`; optional
-variables remain optional. Do not point this at production unless temporary
-test users can be safely created, renewed, expired, and deleted.
+running the verbose, non-cached `TestAcc` suite with `VAULT_ACC=1` and a
+30-minute Go test timeout; `PVE_BEHAVIORAL_PATH` must be a group-role-gated
+endpoint, not `/version`. Optional variables remain optional. Do not point this
+at production unless temporary test users can be safely created, renewed,
+expired, and deleted.
 
 ## License
 

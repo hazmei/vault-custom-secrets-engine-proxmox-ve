@@ -441,6 +441,16 @@ func TestValidateAccBehaviorEnvRequiresPathForMarker(t *testing.T) {
 	}
 }
 
+func TestValidateAccBehaviorEnvRejectsVersionSentinelWithSpecificMessage(t *testing.T) {
+	err := validateAccBehavioralCanaryEnv(accEnv{BehaviorPath: accDefaultBehavior, BehaviorMarker: "marker"})
+	if err == nil {
+		t.Fatal("expected /version behavioral path sentinel to fail")
+	}
+	if !strings.Contains(err.Error(), "must be a group-role-gated endpoint, not /version") {
+		t.Fatalf("validation error = %q; want /version-specific guidance", err.Error())
+	}
+}
+
 func requireAccBehavioralCanaryEnv(t *testing.T, env accEnv) {
 	t.Helper()
 	if err := validateAccBehavioralCanaryEnv(env); err != nil {
@@ -450,7 +460,10 @@ func requireAccBehavioralCanaryEnv(t *testing.T, env accEnv) {
 
 func validateAccBehavioralCanaryEnv(env accEnv) error {
 	missing := []string{}
-	if env.BehaviorPath == "" || env.BehaviorPath == accDefaultBehavior {
+	if env.BehaviorPath == accDefaultBehavior {
+		return fmt.Errorf("TestAccAuthorizationContractCanary requires %s; it must be a group-role-gated endpoint, not /version, so group-derived privilege is proven by a behavioral endpoint response marker", accBehaviorPathEnv)
+	}
+	if env.BehaviorPath == "" {
 		missing = append(missing, accBehaviorPathEnv)
 	}
 	if env.BehaviorMarker == "" {
