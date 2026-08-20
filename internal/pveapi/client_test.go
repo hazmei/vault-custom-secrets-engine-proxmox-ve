@@ -114,17 +114,7 @@ func TestGetPermissionsParsesTree(t *testing.T) {
 		if r.URL.Path != "/api2/json/access/permissions" {
 			t.Errorf("unexpected path: %q", r.URL.Path)
 		}
-		_ = json.NewEncoder(w).Encode(map[string]interface{}{ //nolint:errcheck // httptest handler — write error not actionable
-			"data": map[string]interface{}{
-				"/access/groups": map[string]interface{}{
-					"User.Modify": 1,
-					"Sys.Audit":   1,
-				},
-				"/access/realm/pve": map[string]interface{}{
-					"Realm.AllocateUser": 1,
-				},
-			},
-		})
+		_, _ = w.Write([]byte(probe1PermissionsResponse)) //nolint:errcheck // httptest handler
 	}))
 	defer ts.Close()
 
@@ -142,6 +132,9 @@ func TestGetPermissionsParsesTree(t *testing.T) {
 	}
 	if !tree.HasPrivilege("/access/realm/pve", "Realm.AllocateUser") {
 		t.Error("expected Realm.AllocateUser at /access/realm/pve")
+	}
+	if !tree.HasPrivilege("/access/groups/vault-test-grp", "User.Modify") {
+		t.Error("expected User.Modify to propagate to /access/groups/vault-test-grp")
 	}
 }
 
