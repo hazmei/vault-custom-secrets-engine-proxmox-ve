@@ -317,9 +317,10 @@ expire-only `PUT /access/users/{userid}` with `append` omitted preserved the
 control user's `groups`, conflicting with the historical Probe 7 result above.
 The historical evidence is preserved because it was observed on the target PVE
 line and motivated the renewal contract. Omitted-`append` semantics are now
-unresolved and MUST NOT be relied upon. The acceptance control uses explicit
-`append=0` to exercise replacement semantics, while the engine contract remains
-explicit `append=1` plus `expire`+`groups`+`enable` and read-back confirmation.
+unresolved and MUST NOT be relied upon. The acceptance control sends an empty
+`groups=` with explicit `append=0` to exercise replacement semantics, while the
+engine contract remains explicit `append=1` plus `expire`+`groups`+`enable` and
+read-back confirmation.
 
 ---
 
@@ -1018,7 +1019,7 @@ engine depends on, its confirmation status, and the code area affected.
 | 5 | `GET /access/groups/{group}` for nonexistent group | 404 → `ErrNotFound` → friendly message | N — 500 not 404 | `path_roles.go` `GetGroup` | GetGroup: match body "does not exist" |
 | 6 | `privsep=0` token inherits user ACL (non-empty perms) | Token perms NON-EMPTY after group assignment | RE-PROBE (Probe 6 flawed) | `pveapi` `CreateToken` | Await Probe 6-fix-E behavioral result |
 | 6b | Duplicate `tokenid` on `POST .../token/{tokenid}` | 409 Conflict | N — 400 not 409 | creds token-409 branch | Map 400+"Token already exists" → conflict |
-| 7 | `PUT /access/users/{userid}` with `expire` only preserves `groups` | `groups` field unchanged after PUT | N — historical Probe 7 saw `groups:[]`; later live acceptance on build `43df2e01f27a1a19` preserved groups with `append` omitted | `secret_token.go` renew / `acceptance_test.go` control | Omitted-`append` semantics unresolved; renewal must re-send expire+groups+enable+append=1; control uses explicit append=0 |
+| 7 | `PUT /access/users/{userid}` with `expire` only preserves `groups` | `groups` field unchanged after PUT | N — historical Probe 7 saw `groups:[]`; later live acceptance on build `43df2e01f27a1a19` preserved groups with `append` omitted | `secret_token.go` renew / `acceptance_test.go` control | Omitted-`append` semantics unresolved; renewal must re-send expire+groups+enable+append=1; control uses empty `groups=` with explicit append=0 |
 | 8 | Expired user's token returns 401 | 401 once `expire` is in the past | Y — 401 on expired user | creds `expire` backstop | |
 | 9 | Permissions tree distinguishes `propagate=0` from `propagate=1` | Config-time check can detect `propagate=0` at `/access/groups` | Y — propagate=0 shows :0 | `path_config.go` validation | C3 fixable: check per-group path /access/groups/<group> at role-write |
 | 6-fix | privsep=0 token inheritance (behavioral) | Token can call /cluster/resources?type=vm | SUPERSEDED — see CLEAN | pveapi CreateToken / canary | Confounded; re-run as Probe CLEAN |

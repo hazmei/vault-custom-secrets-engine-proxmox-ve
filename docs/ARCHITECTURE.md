@@ -712,7 +712,8 @@ Rollback section of `docs/IMPLEMENTATION_PLAN.md` for full detail.
   the issued token still holds the group's roles (read-back confirms `groups` preserved).
   The canary guards against a regression to expire-only renewal. Add a control intended to
   exercise explicit replacement (`groups=` with `append=0`) on a throwaway user; the expected
-  outcome is `groups:[]` pending live confirmation. Omitted-`append`
+  outcome is `groups:[]` pending live confirmation. A parameter-verification 400 here means
+  the empty-list shape was rejected, not that replacement preserved groups. Omitted-`append`
   semantics are unresolved and are not part of the engine contract. Optional negative/ACL probes assert direct `PUT /access/acl` of an
   unheld role by the admin token returns 403 and that a configured forbidden endpoint remains
   forbidden. These assertions guard against
