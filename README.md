@@ -11,9 +11,9 @@ This secrets engine implements Vault's dynamic secrets pattern for Proxmox VE. E
 ## Project Status
 
 🚧 **Active implementation** — Core plugin code, unit tests, operator-run live
-acceptance tests, build output, and local Vault plugin registration checks are
-present. Current phase validation status is tracked in
-[`docs/IMPLEMENTATION_PLAN.md`](docs/IMPLEMENTATION_PLAN.md#phase-5--full-unit-suite--acceptance-tests).
+acceptance tests, and a working `make build` are present. Current Phase 5 and
+Phase 6 validation status is tracked in
+[`docs/IMPLEMENTATION_PLAN.md`](docs/IMPLEMENTATION_PLAN.md#phased-task-list).
 
 ## How It Works
 

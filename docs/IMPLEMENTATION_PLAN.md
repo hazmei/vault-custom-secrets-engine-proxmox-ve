@@ -1350,13 +1350,14 @@ not run by CI.
   cluster: `make testacc` green for required tests on 2026-08-20 against
   `pve-manager/9.2.10/43df2e01f27a1a19`; only these optional gates may skip
   when their prerequisites are unset:
-  - [x] `TestAccInsufficientPrivileges` (`PVE_INSUFFICIENT_TOKEN_ID` and
-    `PVE_INSUFFICIENT_TOKEN_SECRET`)
-  - [x] `TestAccAuthorizationContractCanary/direct ACL anti-privilege-escalation`
-    (`PVE_ACL_CANARY_PATH`, `PVE_ACL_CANARY_UNHELD_ROLE`, and
-    `PVE_ACL_CANARY_TARGET_USER`)
-  - [x] `TestAccAuthorizationContractCanary/negative authorization endpoint`
-    (`PVE_NEGATIVE_AUTH_PATH`, optionally `PVE_NEGATIVE_AUTH_METHOD`)
+   - `TestAccInsufficientPrivileges` (`PVE_INSUFFICIENT_TOKEN_ID` and
+     `PVE_INSUFFICIENT_TOKEN_SECRET`) — permitted skip; not run on 2026-08-20
+   - `TestAccAuthorizationContractCanary/direct ACL anti-privilege-escalation`
+     (`PVE_ACL_CANARY_PATH`, `PVE_ACL_CANARY_UNHELD_ROLE`, and
+     `PVE_ACL_CANARY_TARGET_USER`) — permitted skip; not run on 2026-08-20
+   - `TestAccAuthorizationContractCanary/negative authorization endpoint`
+     (`PVE_NEGATIVE_AUTH_PATH`, optionally `PVE_NEGATIVE_AUTH_METHOD`) —
+     permitted skip; not run on 2026-08-20
 - [x] Keep live acceptance operator-run only; no GitHub Actions acceptance
   workflow is present, and normal PR CI remains unchanged
 
@@ -1365,8 +1366,7 @@ not run by CI.
 - Required `make testacc` tests pass against live PVE; only the three optional
   gates listed above may skip when their prerequisites are not configured
 - Required authorization contract canary passes (guards against PVE version
-  changes); optional ACL/negative canaries require explicit environment
-  prerequisites
+  changes)
 
 **Architecture References**: `docs/ARCHITECTURE.md` Testing Strategy section, Acceptance Tests — authorization contract canary.
 
@@ -1375,12 +1375,15 @@ not run by CI.
 ### Phase 6 — Build/Register/Smoke + CI + Docs
 
 **Status**: 🚧 PARTIAL (2026-08-20) — `make build` passed, and local Vault
-plugin registration, enable, and `DELETE <mount>/config?force=true` config-delete
-checks passed in a separate Vault dev-server environment. That environment did
-not provide the required `PVE_*` configuration, so the full issue/use/renew/revoke
-lifecycle through a real `vault server` plus registered plugin binary remains
-pending. Do not treat the local Vault checks as proof that this Vault-server
-smoke test passed against live PVE.
+plugin registration and enable checks passed in a separate Vault dev-server
+environment. That environment did not provide the required `PVE_*`
+configuration. The `DELETE <mount>/config?force=true` guard branch was exercised
+on an unconfigured mount (DELETE without `force` refused; with it accepted), but
+deletion of a stored config and subsequent cached-client invalidation remain
+part of the pending smoke test. The full issue/use/renew/revoke lifecycle
+through a real `vault server` plus registered plugin binary remains pending.
+Do not treat the local Vault checks as proof that this Vault-server smoke test
+passed against live PVE.
 
 **Tasks**:
 - [x] Build plugin: `make build` (output to `vault/plugins/`) — passed on
