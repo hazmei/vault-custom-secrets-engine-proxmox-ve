@@ -1316,7 +1316,7 @@ test code are present. Phase 5 local checks (`go build ./...`, `go test ./...`, 
 not implied by the normal unit test run.
 
 **Tasks**:
-- [x] Ensure all unit tests (`*_test.go`) pass: `make test` green
+- [x] Ensure Phase 5 local verification passes: `go build ./...`, `make test`, and `make lint` green
 - [x] Implement `acceptance_test.go` with env gating (`VAULT_ACC=1`) and test scenarios:
   - [x] `TestAccLifecycle` (config→role→creds→use token→renew→revoke→verify deleted by asserting "no such user" body (HTTP 500), not a 404)
   - [x] `TestAccAuthorizationContractCanary` (4 assertions: PUT /access/acl unheld role→403, group-add confers role verified by read-back + ?userid= resolve, expired-user token→401, renewal re-sends groups (full-replace))
@@ -1325,7 +1325,6 @@ not implied by the normal unit test run.
   - [x] `TestAccConcurrentIssuance` (10 goroutines, verify collision retry works)
   - [x] `TestAccDeleteConfigGuard` (DELETE without force=true refused; with force=true succeeds)
 - [x] Document required test env vars in `acceptance_test.go` comment header (PVE_ADDR, PVE_TOKEN_ID, PVE_TOKEN_SECRET, PVE_TEST_GROUP)
-- [x] Run Phase 5 local verification: `go build ./...`, `go test ./...`, and `make lint` green
 - [ ] Run acceptance tests against containerized/dev PVE: `make testacc` green
 
 **Acceptance Criteria**:
