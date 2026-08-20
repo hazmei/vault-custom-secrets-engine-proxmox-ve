@@ -202,19 +202,19 @@ isolated/disposable test cluster, replacing only the example names if needed:
 pveum user add vault-acc@pve --comment "Vault acceptance test provisioner"
 
 # Custom role with the privileges the engine validates and uses.
-pveum role add VaultProvisioner \
+pveum role add VaultAccProvisioner \
   --privs "User.Modify Realm.AllocateUser Sys.Audit"
 
 # The /access/groups grant must propagate to /access/groups/<PVE_TEST_GROUP>.
 pveum acl modify /access/groups \
   --user vault-acc@pve \
-  --role VaultProvisioner \
+  --role VaultAccProvisioner \
   --propagate 1
 
 # Realm allocation is validated per role. Keep it scoped to the test realm.
 pveum acl modify /access/realm/pve \
   --user vault-acc@pve \
-  --role VaultProvisioner \
+  --role VaultAccProvisioner \
   --propagate 1
 
 # Create the API token with privsep=0 so it inherits vault-acc@pve ACLs.
@@ -226,9 +226,10 @@ pveum user token add vault-acc@pve acceptance \
 The final command prints the token secret one time. PVE token IDs use the form
 `user@realm!tokenid`; in the example above, the token **ID** is
 `vault-acc@pve!acceptance`. The token **secret** is the generated `value` field.
-The ID alone is not a usable credential, but the secret is. Copy the secret
-directly into your local shell or secret manager, do not commit it, and do not
-paste it into logs, issues, PRs, or documentation.
+The ID alone is not a usable credential; the secret is the sensitive half of the
+`Authorization: PVEAPIToken=<id>=<secret>` pair. Copy the secret directly into
+your local shell or secret manager, do not commit it, and do not paste it into
+logs, issues, PRs, or documentation.
 
 `PVE_TEST_GROUP` must also be pre-created and bound by a cluster administrator
 to the role/path you want issued test credentials to exercise. The engine does
@@ -247,6 +248,12 @@ pveum acl modify / \
   --role PVEAuditor \
   --propagate 1
 ```
+
+With the example `PVE_BEHAVIORAL_PATH` and `PVE_BEHAVIORAL_MARKER` below, the
+test cluster must have at least one qemu VM visible through the group-role
+binding. A stopped stub VM is sufficient; an empty cluster returns HTTP 200 with
+an empty `/cluster/resources?type=vm` list, which does not prove the issued
+token has the delegated authorization and will fail the marker canary.
 
 Required environment:
 
