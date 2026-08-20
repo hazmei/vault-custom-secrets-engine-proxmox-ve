@@ -1326,11 +1326,13 @@ and asserts the parsed `PermissionTree` matches the expected structure. No live 
 ### Phase 5 — Full Unit Suite + Acceptance Tests
 
 **Status**: ✅ COMPLETE (2026-08-20) — unit tests and operator-run acceptance
-test code are present. Phase 5 local checks (`go build ./...`, `go test ./...`,
-and `make lint`) pass. An operator-run live `make testacc` passed against the
-operator's PVE 9.2.10 build on 2026-08-20 with the required tests green;
-optional canaries that lacked configured environment prerequisites remained
-skipped. Live acceptance remains operator-run only and is not run by CI.
+test code are present. Phase 5 local checks (`go build ./...`, `make test`,
+and `make lint`) pass. The required live `make testacc` suite ran on the
+operator's workstation against `pve-manager/9.2.10/43df2e01f27a1a19` on
+2026-08-20 with all required tests green. Only the explicitly optional gates
+listed below lacked prerequisites and skipped; any other skipped `TestAcc*` test
+means Phase 5 is not complete. Live acceptance remains operator-run only and is
+not run by CI.
 
 **Tasks**:
 - [x] Ensure Phase 5 local verification passes: `go build ./...`,
@@ -1345,15 +1347,23 @@ skipped. Live acceptance remains operator-run only and is not run by CI.
   - [x] `TestAccDeleteConfigGuard` (DELETE without force=true refused; with force=true succeeds)
 - [x] Document required test env vars in `acceptance_test.go` comment header (PVE_ADDR, PVE_TOKEN_ID, PVE_TOKEN_SECRET, PVE_TEST_GROUP, plus behavioral marker requirements for the canary)
 - [x] Run acceptance tests against an operator-provided disposable/dev PVE 9.2.10
-  cluster: `make testacc` green for required tests on 2026-08-20; optional
-  canaries without configured prerequisites remained skipped
+  cluster: `make testacc` green for required tests on 2026-08-20 against
+  `pve-manager/9.2.10/43df2e01f27a1a19`; only these optional gates may skip
+  when their prerequisites are unset:
+  - [x] `TestAccInsufficientPrivileges` (`PVE_INSUFFICIENT_TOKEN_ID` and
+    `PVE_INSUFFICIENT_TOKEN_SECRET`)
+  - [x] `TestAccAuthorizationContractCanary/direct ACL anti-privilege-escalation`
+    (`PVE_ACL_CANARY_PATH`, `PVE_ACL_CANARY_UNHELD_ROLE`, and
+    `PVE_ACL_CANARY_TARGET_USER`)
+  - [x] `TestAccAuthorizationContractCanary/negative authorization endpoint`
+    (`PVE_NEGATIVE_AUTH_PATH`, optionally `PVE_NEGATIVE_AUTH_METHOD`)
 - [x] Keep live acceptance operator-run only; no GitHub Actions acceptance
   workflow is present, and normal PR CI remains unchanged
 
 **Acceptance Criteria**:
 - `make test` passes (all unit tests green)
-- Required `make testacc` tests pass against live PVE; optional canaries may
-  skip when their prerequisites are not configured
+- Required `make testacc` tests pass against live PVE; only the three optional
+  gates listed above may skip when their prerequisites are not configured
 - Required authorization contract canary passes (guards against PVE version
   changes); optional ACL/negative canaries require explicit environment
   prerequisites
@@ -1366,10 +1376,11 @@ skipped. Live acceptance remains operator-run only and is not run by CI.
 
 **Status**: 🚧 PARTIAL (2026-08-20) — `make build` passed, and local Vault
 plugin registration, enable, and `DELETE <mount>/config?force=true` config-delete
-checks passed. The full Vault-server lifecycle smoke test remains pending because
-the execution environment did not provide the required `PVE_*` variables; do not
-treat the local Vault checks as proof that issue/use/renew/revoke passed against
-live PVE.
+checks passed in a separate Vault dev-server environment. That environment did
+not provide the required `PVE_*` configuration, so the full issue/use/renew/revoke
+lifecycle through a real `vault server` plus registered plugin binary remains
+pending. Do not treat the local Vault checks as proof that this Vault-server
+smoke test passed against live PVE.
 
 **Tasks**:
 - [x] Build plugin: `make build` (output to `vault/plugins/`) — passed on
@@ -1378,7 +1389,8 @@ live PVE.
   register, enable, write config, write role, read creds, use token, renew,
   revoke, delete config with `force=true`) — local
   registration/enable/`force=true` config-delete checks passed, but full
-  issue/use/renew/revoke remains pending without required `PVE_*` variables
+  issue/use/renew/revoke through a real `vault server` plus registered plugin
+  binary remains pending without required `PVE_*` variables in that environment
 - [x] Update `README.md` with: overview, build/install instructions,
   configuration example, role example, usage example, development/testing notes
 - [x] CI config (GitHub Actions or equivalent): normal PR CI runs build, unit
@@ -1388,12 +1400,13 @@ live PVE.
 
 **Acceptance Criteria**:
 - Clean build (`make build` succeeds)
-- Plugin registers and enables; full smoke test passes only after
-  issue→use→renew→revoke is run with required live PVE configuration
+- Plugin registers and enables
+- Full issue→use→renew→revoke smoke test passes through a real `vault server`
+  plus registered plugin binary with required live PVE configuration
 - CI runs on PR: fmt/lint/test green
 - Live acceptance required tests have a recorded operator green result from
-  2026-08-20 against PVE 9.2.10; optional canaries remain skipped unless their
-  prerequisites are configured
+  2026-08-20 against `pve-manager/9.2.10/43df2e01f27a1a19`; only the three
+  optional gates listed above may skip when their prerequisites are not configured
 - `README.md` has build, config, and usage examples
 
 **Architecture References**: `docs/ARCHITECTURE.md` Root Rotation section (manual operation), Build & Run commands above.

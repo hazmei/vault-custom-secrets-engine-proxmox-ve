@@ -9,18 +9,15 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ```bash
 go build ./...
 make build                               # builds plugin into vault/plugins/
-go test ./...                              # unit tests (mocked Proxmox client)
+make test                                # unit tests (mocked Proxmox client)
 go test ./... -run TestXxx -v              # single test
 make testacc                              # operator-run acceptance tests (needs disposable/dev Proxmox)
 make lint                                # pinned golangci-lint via Makefile
 ```
 
-Phase 5 required operator-run live acceptance passed on the operator's PVE 9.2.10
-build on 2026-08-20; optional canaries remained skipped when their environment
-prerequisites were unset. Phase 6 `make build` plus local Vault plugin
-registration, enable, and `force=true` config-delete checks passed. The full
-Vault-server issue/use/renew/revoke lifecycle smoke test remains pending until a
-configured environment provides the required `PVE_*` variables.
+Current phase validation status, including the recorded PVE build, optional
+acceptance-test skip gates, and pending Vault-server smoke-test scope, is tracked
+in `docs/IMPLEMENTATION_PLAN.md`.
 
 ## Constraints beyond AGENTS.md
 

@@ -10,14 +10,10 @@ This secrets engine implements Vault's dynamic secrets pattern for Proxmox VE. E
 
 ## Project Status
 
-🚧 **Active implementation** — Core plugin code, unit tests, and operator-run
-live acceptance tests are present. Phase 5 operator-run live acceptance passed
-on the operator's Proxmox VE 9.2.10 build on 2026-08-20 with the required tests
-green; optional canaries that lacked environment variables remained skipped.
-Phase 6 `make build` and local Vault plugin registration/enable/`force=true`
-config-delete checks passed. A full Vault-server lifecycle smoke test that
-issues, uses, renews, and revokes a live credential remains pending because the
-execution environment did not provide the required `PVE_*` variables.
+🚧 **Active implementation** — Core plugin code, unit tests, operator-run live
+acceptance tests, build output, and local Vault plugin registration checks are
+present. Current phase validation status is tracked in
+[`docs/IMPLEMENTATION_PLAN.md`](docs/IMPLEMENTATION_PLAN.md#phase-5--full-unit-suite--acceptance-tests).
 
 ## How It Works
 
@@ -191,9 +187,8 @@ Key points:
 - Unit tests cover deterministic mid-provisioning network/error injection and WAL-delete failure paths. The live acceptance suite does not inject network failures, quorum loss, or ACL lock contention.
 - Run against an operator-provided disposable/dev Proxmox VE 9.2.10 cluster with a test admin token. These tests mutate the cluster by creating, renewing, expiring, and deleting temporary `vaultacc-*@pve` users.
 - Live acceptance tests are operator-run only and are never run by CI. Normal PR CI runs build, unit tests, and lint only.
-- Last recorded operator result: required Phase 5 `make testacc` tests passed
-  against the operator's PVE 9.2.10 build on 2026-08-20; optional canaries
-  without configured `PVE_*` prerequisites remained skipped.
+- Current recorded operator results and the only optional `TestAcc*` gates that
+  may skip are tracked in `docs/IMPLEMENTATION_PLAN.md`.
 
 #### Acceptance Test Prerequisites
 

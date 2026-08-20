@@ -679,10 +679,9 @@ Rollback section of `docs/IMPLEMENTATION_PLAN.md` for full detail.
   against Proxmox userid character set and length limits
 
 ### Acceptance Tests
-- **Recorded status** — required Phase 5 operator-run live acceptance passed on
-  the operator's Proxmox VE 9.2.10 build on 2026-08-20. Optional canaries that
-  lacked configured environment prerequisites remained skipped; this result does
-  not imply they passed.
+- **Recorded status** — `docs/IMPLEMENTATION_PLAN.md` is the source of truth for
+  current Phase 5/Phase 6 validation status, including the recorded PVE build and
+  the only optional `TestAcc*` gates permitted to skip.
 - **Environment gating** — tests prefixed `TestAcc*` run only when
   `VAULT_ACC=1` is set (HashiCorp convention)
 - **Operator-run only** — live acceptance is never run by CI. Operators run
@@ -751,21 +750,11 @@ Rollback section of `docs/IMPLEMENTATION_PLAN.md` for full detail.
   `force=true` is refused with a clear error, and that DELETE with
   `force=true` succeeds (matching the documented MUST in the DELETE config
   behavior section)
-- **Cluster failure modes** — test behavior under Proxmox quorum loss and
-  ACL lock contention (should surface as retryable errors)
-- **Status** — required live acceptance has a recorded operator green result from
-  2026-08-20 against PVE 9.2.10. Optional canaries remain skipped unless their
-  prerequisites are configured.
-
-### Build/Register/Smoke Status
-
-- `make build` passed on 2026-08-20.
-- Local Vault plugin registration, enable, and `force=true` config-delete checks
-  passed on 2026-08-20.
-- The full Vault-server lifecycle smoke test remains pending because the
-  execution environment did not provide the required `PVE_*` variables. Do not
-  claim the issue/use/renew/revoke live lifecycle passed until it is run against
-  configured PVE.
+- **Cluster failure modes** — live acceptance does not inject Proxmox quorum
+  loss or ACL lock contention. Unit tests cover deterministic client/storage
+  error injection; live cluster failure-mode testing remains future/operator-run
+  scope. The engine returns PVE errors to Vault core rather than using a custom
+  `RetryableError` type.
 
 ## Security Considerations
 

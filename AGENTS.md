@@ -4,13 +4,10 @@ Instructions for AI coding agents working on this Vault secrets engine plugin.
 
 ## Project State
 
-- **Active implementation** through Phase 6 partial validation. Phase 5 required
-  operator-run live acceptance passed on the operator's PVE 9.2.10 build on
-  2026-08-20, with optional canaries skipped when their `PVE_*` prerequisites
-  were unset. Phase 6 `make build` and local Vault plugin
-  registration/enable/`force=true` config-delete checks passed; the full
-  Vault-server issue/use/renew/revoke smoke test remains pending without
-  required `PVE_*` variables. `docs/ARCHITECTURE.md` and
+- **Active implementation** through Phase 6 partial validation. Current phase
+  validation status, including the recorded PVE build, optional acceptance-test
+  skip gates, and pending Vault-server smoke-test scope, is tracked in
+  `docs/IMPLEMENTATION_PLAN.md`. `docs/ARCHITECTURE.md` and
   `docs/IMPLEMENTATION_PLAN.md` are the authoritative design/status — READ THEM
   before extending.
 - Go module (`go.mod`), `.gitignore`, and source exist: `backend.go`, `path_config.go`, `path_roles.go`, `path_creds.go`, `secret_token.go`, `wal.go`, `internal/pveapi/*`, with unit tests throughout.
@@ -118,7 +115,8 @@ The admin token never needs to hold the delegated roles — those are bound to o
 
 - **Acceptance tests:** Prefix `TestAcc*`, gated by `VAULT_ACC=1` (HashiCorp convention), run only by an operator against a disposable/dev Proxmox cluster. They are never run by CI.
 - **Unit tests** use a mocked PVE client (`internal/pveapi/mock.go`).
-- Run: `go build ./...`, `go test ./...`, `make testacc` (operator-run live acceptance with required env preflight), `golangci-lint run`.
+- Run: `go build ./...`, `make test`, `make testacc` (operator-run live
+  acceptance with required env preflight), `make lint`.
 - **CI** (`.github/workflows/ci.yml`) runs build + unit tests + golangci-lint (pinned v2.12.2) on every push/PR. The lint version is pinned in the Makefile (`GOLANGCI_LINT_VERSION`) so local and CI agree.
 
 ## Docs
