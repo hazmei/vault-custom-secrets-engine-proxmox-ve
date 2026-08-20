@@ -24,7 +24,7 @@ This secrets engine implements Vault's dynamic secrets pattern for Proxmox VE. E
 2. **Renew**:
    - Extends Vault lease TTL up to the effective `max_ttl` (measured from the original issue time)
    - Refuses renewal if the PVE user was disabled out-of-band, preserving that operator kill switch
-   - Issues `PUT /access/users/{userid}` re-sending `expire`+`groups`+`enable`+`append=1` **together** — PVE's `PUT /access/users` is full-replace, so an expire-only PUT would wipe the user's group membership and strip its privileges (confirmed PVE 9.2.10). The target group is read from the lease's internal data, and a read-back confirms membership survived. Both directions are now confirmed on PVE 9.2.10: the full-replace wipe by Probe 7; the preserve path (re-sending groups retains membership) confirmed by Probe RENEWAL-PRESERVE (17 Aug 2026 — groups `["vault-test-grp"]` read back, expire advanced 1786986804→1786990429). The runtime read-back remains as defense-in-depth.
+   - Issues `PUT /access/users/{userid}` re-sending `expire`+`groups`+`enable`+`append=1` **together**. Historical PVE 9.2.10 Probe 7 showed replacement-style updates can wipe group membership and strip privileges; a later live acceptance run preserved groups when `append` was omitted, so omitted-`append` semantics are unresolved and not relied upon. The target group is read from the lease's internal data, and a read-back confirms membership survived. The preserve path (re-sending groups with explicit `append=1`) is confirmed by Probe RENEWAL-PRESERVE (17 Aug 2026 — groups `["vault-test-grp"]` read back, expire advanced 1786986804→1786990429). The runtime read-back remains as defense-in-depth.
 
 3. **Revoke**:
    - Single `DELETE /access/users/{userid}` call

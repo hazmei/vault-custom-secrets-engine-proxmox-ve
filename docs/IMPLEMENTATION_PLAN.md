@@ -400,7 +400,7 @@ type UserInfo struct {
 - `privsep` MUST be serialized as the literal `0` on `POST /access/users/{userid}/token/{tokenid}` — never omitted. A Go `bool` written with a "skip zero value" encoder drops the field, and PVE then defaults to `privsep=1`, yielding a token with an empty ACL and zero effective permissions. Build the form with explicit `url.Values{"privsep": {"0"}}`-style writes, not struct-tag omitempty encoding.
 - `enable` likewise serializes as the literal `1` on `POST /access/users`.
 - `groups` MUST be serialized as ONE comma-separated field (`groups=a,b,c`), NEVER as repeated keys. PVE's `pve-groupid-list` parser mishandles array-repeated keys. For the single-group case send `groups=<role.Group>` verbatim.
-- `append` MUST be serialized as the literal `1` on renewal PUTs (`UpdateUser`). Omitting it defaults to replace (`append=0`).
+- `append` MUST be serialized as the literal `1` on renewal PUTs (`UpdateUser`). Omitted-`append` semantics are unresolved across observed PVE 9.2.10 runs; do not rely on the server default.
 
 **Secret hygiene**: `token_secret` (the admin one from config, and the issued one in the `POST .../token/...` response body) must never appear in an error string or log line. When wrapping a non-2xx response, include status and endpoint; include the body only for non-token endpoints, or redact it.
 
@@ -811,8 +811,9 @@ Every attempt therefore has to keep its own `walID`.
    ErrUnauthenticated, wrap with the admin-token diagnostic; if it returns ErrUserNotFound,
    renewal fails and the lease expires.
 8. UpdateUser({UserID: pve_userid, Expire: newExpiry, Groups: group, Enable: true, Append: true})
-   // PVE PUT /access/users is FULL-REPLACE (Probe 7): expire-only PUT WIPES groups.
-   // MUST re-send expire+groups+enable(+append=1) together or membership is lost.
+   // Historical Probe 7 showed replacement-style updates can wipe groups; a later live
+   // acceptance run preserved groups when append was omitted. Omitted-append semantics are
+   // unresolved, so renewal MUST re-send expire+groups+enable+append=1 together.
    // The pre-update GetUser check prevents re-enabling a user that was already disabled.
    // TOCTOU: if an operator disables the user between pre-check and UpdateUser, this PUT can
    // still re-enable it; PVE has no conditional-update API to close that race.
@@ -833,7 +834,7 @@ Every attempt therefore has to keep its own `walID`.
 - **`max_ttl` runs from `IssueTime`, not from now.** Capping the renewal at `min(requested, effective_max_ttl)` measured from the current time lets a lease live roughly 2× its `max_ttl`. `framework.CalculateTTL` handles this correctly given `startTime = req.Secret.IssueTime` (populated by core on renew — see the `IssueTime` comment in `sdk/logical/lease.go`).
 - Use stored `effective_max_ttl` from issuance time as `backendMaxTTL`; do NOT recompute the max from the role (role may have changed). Only `backendTTL` may come from the current role.
 - Return `&logical.Response{Secret: req.Secret}` — the mutated `InternalData["expire"]` persists only because core stores the returned Secret back onto the lease entry.
-- `UpdateUser` re-sends `expire`+`groups`+`enable`+`append=1` on every renewal PUT. **PVE `PUT /access/users` is FULL-REPLACE** (confirmed PVE 9.2.10, PVE_PROBES.md Probe 7): an expire-only PUT WIPES the groups array, stripping the credential's effective privileges. The target group is read from lease InternalData (`group`), not the role. A read-back (`GetUser`) MUST confirm membership survived.
+- `UpdateUser` re-sends `expire`+`groups`+`enable`+`append=1` on every renewal PUT. Historical PVE 9.2.10 Probe 7 showed replacement-style updates can wipe the groups array, stripping the credential's effective privileges; a later live acceptance run preserved groups when `append` was omitted, so omitted-`append` semantics are unresolved. The target group is read from lease InternalData (`group`), not the role. A read-back (`GetUser`) MUST confirm membership survived.
 
 **References**: `docs/ARCHITECTURE.md` — Lease Renewal section, TTL Precedence section (renewal note).
 
@@ -960,7 +961,7 @@ recorded a `DeleteUser` for the just-created userid. No live PVE needed.
 | Test | Assertions |
 |------|-----------|
 | `TestAccLifecycle` | Write config → write role → read creds → use issued token for `/version` authentication smoke (not proof of group privilege) → renew → verify renewed → revoke → verify user deleted by asserting `GET /access/users/{userid}` returns the PVE body "no such user" (HTTP 500, NOT 404). Do NOT assert status 404. |
-| `TestAccAuthorizationContractCanary` | **Required behavioral canary plus optional negative/ACL probes** (see `docs/ARCHITECTURE.md` Acceptance Tests section — Authorization contract canary):<br/>a. Require `PVE_BEHAVIORAL_PATH` and `PVE_BEHAVIORAL_MARKER`; use the issued privsep=0 token to call the group-role-gated endpoint and assert HTTP 200 plus marker in the body. This is the authoritative oracle; bare `/version` success is only an auth smoke check.<br/>b. Optional: admin token attempts `PUT /access/acl` to grant an unheld role → 403 when `PVE_ACL_CANARY_*` variables are configured.<br/>c. Create user with `expire` in the past, verify token authentication returns 401.<br/>d. Create user, renew with `PUT /access/users/{userid}` re-sending `expire`+`groups`+`enable`+`append=1` (full-replace — expire-only WIPES groups, Probe 7). Assert via read-back that `groups` still contains the group after renewal. Add a CONTROL: an expire-only PUT on a throwaway user leaves `groups:[]`.<br/>e. Optional: negative authorization endpoint returns 403 when `PVE_NEGATIVE_AUTH_PATH` is configured. |
+| `TestAccAuthorizationContractCanary` | **Required behavioral canary plus optional negative/ACL probes** (see `docs/ARCHITECTURE.md` Acceptance Tests section — Authorization contract canary):<br/>a. Require `PVE_BEHAVIORAL_PATH` and `PVE_BEHAVIORAL_MARKER`; use the issued privsep=0 token to call the group-role-gated endpoint and assert HTTP 200 plus marker in the body. This is the authoritative oracle; bare `/version` success is only an auth smoke check.<br/>b. Optional: admin token attempts `PUT /access/acl` to grant an unheld role → 403 when `PVE_ACL_CANARY_*` variables are configured.<br/>c. Create user with `expire` in the past, verify token authentication returns 401.<br/>d. Create user, renew with `PUT /access/users/{userid}` re-sending `expire`+`groups`+`enable`+`append=1`. Assert via read-back that `groups` still contains the group after renewal. Add a CONTROL intended to exercise explicit replacement (`groups=` with `append=0`) on a throwaway user that already has the group; the expected outcome is `groups:[]` pending live confirmation.<br/>e. Optional: negative authorization endpoint returns 403 when `PVE_NEGATIVE_AUTH_PATH` is configured. |
 | `TestAccRevocationIdempotencyAfterOutOfBandDelete` | Issue credential, delete the issued PVE user out-of-band, then revoke the Vault secret → verify PVE body "no such user" (HTTP 500) is treated as success. Live acceptance does NOT inject network failures; mid-provisioning network/error injection and DeleteWAL-failure injection live in unit tests (`path_creds_test.go`) with mock client/storage seams. |
 | `TestAccWALRollback` | Write config+role → create `nonce := walCommentPrefix + <8-char-random>` → manually `framework.PutWAL(ctx, storage, walTypeUser, walUser{UserID: userid, Nonce: nonce})` → manually `client.CreateUser(userid)` with `comment=nonce` → **invoke `b.walRollback(ctx, req, walTypeUser, walEntryData)` DIRECTLY** (there is NO `PeriodicFunc` on this backend — rollback is registered via `backend.WALRollback`, and in a live Vault it fires on the rollback manager's schedule; the test calls the func directly rather than waiting) → verify `DeleteUser` ran and the user is gone on PVE (assert `GET` returns body "no such user"). Because `walRollback` receives `data interface{}` holding a `map[string]interface{}`, construct the call arg the same JSON-round-tripped way core would (see wal.go decode note). |
 | `TestAccConcurrentIssuance` | Spawn 10 goroutines by default (configurable 1–10 with `PVE_CONCURRENT_WORKERS`), each calls `creds/:role` concurrently → verify all succeed (no collision errors, ErrConflict retry works). Every issued credential is revoked and absence-verified, and WAL rollback cleanup is attempted on all paths. If a disposable/dev cluster cannot safely sustain default load, lower the worker env var rather than weakening the success assertion. |
@@ -1187,8 +1188,8 @@ failure. Unit tests: table-driven body fixtures covering both sentinels.
 validation before recording calls or invoking hooks.
 
 **What**: `UpdateUserRequest{Enable bool, Append bool}` has dangerous zero values: `Enable=false`
-sends `enable=0` (disabling the lease user in PVE); `Append=false` flips the PUT to a
-full-replace (silently wiping the user's `groups`, stripping all effective privileges). Renewal
+sends `enable=0` (disabling the lease user in PVE); `Append=false` requests replacement-style
+semantics that can wipe the user's `groups`, stripping all effective privileges. Renewal
 has exactly one valid input combination: `Enable=true`, `Append=true`, with `Groups` re-sent.
 Make invalid combinations unrepresentable or explicitly rejected before the wire call fires.
 

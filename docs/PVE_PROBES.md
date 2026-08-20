@@ -309,7 +309,18 @@ pve "$PVE_ADDR/api2/json/access/users/probe-ps-${SUFFIX}@pve"
 | Body string | {"data":{"expire":1786966464,"enable":1,"groups":[],"tokens":{"vault":{"expire":0,"privsep":0}}}} |
 | Verdict (matches plan? Y/N) | N (REAL BUG) |
 | `groups` still contains `$TESTGROUP` after PUT? | N |
-| Notes | CONFIRMED BUG: PUT /access/users is full-replace; expire-only PUT wipes groups. Renewal MUST re-send expire+groups+enable. See Probe 7-fix. |
+| Notes | HISTORICAL FINDING: this expire-only PUT wiped groups. Later live acceptance observed a conflicting omitted-`append` result; renewal MUST still re-send expire+groups+enable+append=1 and read back. See Probe 7-fix and discrepancy note below. |
+
+**Live acceptance discrepancy (20 Aug 2026):** `TestAccAuthorizationContractCanary`
+against PVE manager 9.2.10 build `43df2e01f27a1a19` observed that an
+expire-only `PUT /access/users/{userid}` with `append` omitted preserved the
+control user's `groups`, conflicting with the historical Probe 7 result above.
+The historical evidence is preserved because it was observed on the target PVE
+line and motivated the renewal contract. Omitted-`append` semantics are now
+unresolved and MUST NOT be relied upon. The acceptance control sends an empty
+`groups=` with explicit `append=0` to exercise replacement semantics, while the
+engine contract remains explicit `append=1` plus `expire`+`groups`+`enable` and
+read-back confirmation.
 
 ---
 
@@ -493,8 +504,10 @@ ground-truth oracles (node-local `pveum user permissions` AND admin-token `?user
 dump) so no single confounder can produce a misleading pass/fail.
 
 > **Key schema fact:** `pveum user modify` defaults to `--append 0` (REPLACE). Setting
-> `groups` on a PUT replaces the list; omitting it wipes the list. This is why Probe 7
-> saw `groups:[]`. But no earlier probe confirmed groups were present AT CREATION — that
+> `groups` on a PUT replaces the list. Historical Probe 7 observed omitted `append`
+> wiping the list, but a later live acceptance run on build `43df2e01f27a1a19`
+> preserved groups with `append` omitted, so omitted-`append` semantics are unresolved.
+> No earlier probe confirmed groups were present AT CREATION — that
 > is what Step 3 settles.
 
 **Step 0 — [PVE NODE] Fix Confounder #1 (admin audit scope). TEMPORARY diagnostic grant.**
@@ -909,8 +922,9 @@ pve -X DELETE "$PVE_ADDR/api2/json/access/users/${USERID}"
 
 ### Probe RENEWAL-PRESERVE — Renewal PUT preserves group membership when groups re-sent
 
-**Maps to:** M2 wording fix. The full-replace wipe is confirmed (Probe 7, `groups:[]` after
-expire-only PUT). The inverse — that a PUT carrying `expire`+`groups`+`enable`+`append=1`
+**Maps to:** M2 wording fix. Historical Probe 7 observed `groups:[]` after an
+expire-only PUT; later live acceptance preserved groups with `append` omitted, so omitted-
+`append` semantics are unresolved. The engine-path inverse — that a PUT carrying `expire`+`groups`+`enable`+`append=1`
 *preserves* membership — is the designed behaviour but has not been cleanly probed on a user
 whose membership was confirmed present at creation. Probe CLEAN 6-B saw `groups:[]` but the
 user's membership never landed (confounded). Probe GROUPADD settled the CREATE side only;
@@ -966,7 +980,7 @@ pve -X DELETE "$PVE_ADDR/api2/json/access/users/${USERID}"
 | RP3 renewal PUT — HTTP status | 200 |
 | RP4 groups after renewal PUT — groups field | `["vault-test-grp"]` — PRESERVED; expire advanced 1786986804 → 1786990429 |
 | Verdict: membership preserved? (Y/N) | Y — CONFIRMED |
-| Notes | Renewal PUT re-sending expire+groups+enable+append=1 preserves group membership. Combined with Probe 7 (expire-only PUT wipes groups), the full renewal contract is confirmed by live evidence. INCIDENTAL: POST /access/users with a nonexistent group returned HTTP 500 "no such group" (REJECT), refining Finding 3 — the silent-drop-with-200 behavior may be modify/append-specific, not create. Read-back assertion covers both paths regardless. |
+| Notes | Renewal PUT re-sending expire+groups+enable+append=1 preserves group membership. Combined with historical Probe 7 and the later omitted-`append` discrepancy, the safe renewal contract is explicit `append=1` plus read-back. INCIDENTAL: POST /access/users with a nonexistent group returned HTTP 500 "no such group" (REJECT), refining Finding 3 — the silent-drop-with-200 behavior may be modify/append-specific, not create. Read-back assertion covers both paths regardless. |
 
 **Raw evidence:**
 ```
@@ -1005,7 +1019,7 @@ engine depends on, its confirmation status, and the code area affected.
 | 5 | `GET /access/groups/{group}` for nonexistent group | 404 → `ErrNotFound` → friendly message | N — 500 not 404 | `path_roles.go` `GetGroup` | GetGroup: match body "does not exist" |
 | 6 | `privsep=0` token inherits user ACL (non-empty perms) | Token perms NON-EMPTY after group assignment | RE-PROBE (Probe 6 flawed) | `pveapi` `CreateToken` | Await Probe 6-fix-E behavioral result |
 | 6b | Duplicate `tokenid` on `POST .../token/{tokenid}` | 409 Conflict | N — 400 not 409 | creds token-409 branch | Map 400+"Token already exists" → conflict |
-| 7 | `PUT /access/users/{userid}` with `expire` only preserves `groups` | `groups` field unchanged after PUT | N — REAL BUG (full-replace) | `secret_token.go` renew | Renewal must re-send expire+groups+enable; store group in InternalData |
+| 7 | `PUT /access/users/{userid}` with `expire` only preserves `groups` | `groups` field unchanged after PUT | N — historical Probe 7 saw `groups:[]`; later live acceptance on build `43df2e01f27a1a19` preserved groups with `append` omitted | `secret_token.go` renew / `acceptance_test.go` control | Omitted-`append` semantics unresolved; renewal must re-send expire+groups+enable+append=1; control uses empty `groups=` with explicit append=0 |
 | 8 | Expired user's token returns 401 | 401 once `expire` is in the past | Y — 401 on expired user | creds `expire` backstop | |
 | 9 | Permissions tree distinguishes `propagate=0` from `propagate=1` | Config-time check can detect `propagate=0` at `/access/groups` | Y — propagate=0 shows :0 | `path_config.go` validation | C3 fixable: check per-group path /access/groups/<group> at role-write |
 | 6-fix | privsep=0 token inheritance (behavioral) | Token can call /cluster/resources?type=vm | SUPERSEDED — see CLEAN | pveapi CreateToken / canary | Confounded; re-run as Probe CLEAN |
@@ -1037,8 +1051,10 @@ Summary of load-bearing findings that MUST shape the implementation:
    silent-drop-with-200 behavior appears specific to the modify/append path. The read-back
    assertion is correct defensive practice regardless.
 
-4. **Renewal:** `PUT /access/users/{id}` is FULL-REPLACE (Probe 7 confirmed expire-only wipes
-   groups). **Probe RENEWAL-PRESERVE (17 Aug 2026) confirms the inverse:** a PUT re-sending
+4. **Renewal:** Historical Probe 7 showed replacement-style `PUT /access/users/{id}` can wipe
+   groups, while later live acceptance on build `43df2e01f27a1a19` preserved groups when
+   `append` was omitted; omitted-`append` semantics are unresolved and must not be relied upon.
+   **Probe RENEWAL-PRESERVE (17 Aug 2026) confirms the engine path:** a PUT re-sending
    `expire`+`groups`+`enable`+`append=1` PRESERVES group membership (expire advanced from
    1786986804 → 1786990429; groups field intact). Renewal MUST re-send these fields together.
    Store the target group in lease InternalData (renewal must not depend on the role still
