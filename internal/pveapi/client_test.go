@@ -503,6 +503,151 @@ func TestClassifyPVEErrorIntegration(t *testing.T) {
 	}
 }
 
+type probeClientErrorCase struct {
+	name    string
+	status  int
+	body    string
+	call    func(Client) error
+	wantErr error
+}
+
+var probeClientErrorCases = []probeClientErrorCase{
+	{name: "Probe 2 duplicate user", status: 500, body: probe2DuplicateUserResponse, call: func(client Client) error {
+		return client.CreateUser(context.Background(), CreateUserRequest{UserID: "probe-dup-52445741@pve", Groups: "grp", Expire: 1, Enable: true})
+	}, wantErr: ErrConflict},
+	{name: "Probe 3 missing user delete", status: 500, body: probe3MissingUserResponse, call: func(client Client) error {
+		return client.DeleteUser(context.Background(), "probe-ghost-nonexistent@pve")
+	}, wantErr: ErrUserNotFound},
+	{name: "Probe 4 missing user get", status: 500, body: probe4MissingUserResponse, call: func(client Client) error {
+		_, err := client.GetUser(context.Background(), "probe-ghost-nonexistent@pve")
+		return err
+	}, wantErr: ErrUserNotFound},
+	{name: "Probe 5 missing group", status: 500, body: probe5MissingGroupResponse, call: func(client Client) error {
+		return client.GetGroup(context.Background(), "definitely-not-a-real-group")
+	}, wantErr: ErrGroupNotFound},
+	{name: "Probe 6b duplicate token", status: 400, body: probe6bDuplicateTokenResponse, call: func(client Client) error {
+		_, err := client.CreateToken(context.Background(), "probe-ps-52445741@pve", "vault")
+		return err
+	}, wantErr: ErrConflict},
+}
+
+func runProbeClientError(t *testing.T, tc probeClientErrorCase) {
+	t.Helper()
+	ts := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(tc.status)
+		_, _ = w.Write([]byte(tc.body)) //nolint:errcheck // httptest handler
+	}))
+	defer ts.Close()
+	err := tc.call(makeTestClient(t, ts.URL, "admin@pve!tok", "secret"))
+	if !errors.Is(err, tc.wantErr) {
+		t.Fatalf("error = %v; want errors.Is(%v)", err, tc.wantErr)
+	}
+}
+
+// TestProbeErrorFixturesThroughRealClient replays the verbatim error bodies
+// from PVE_PROBES.md through the corresponding real-client methods. The
+// classifier-only table preserves generalized malformed/status coverage.
+func TestProbeErrorFixturesThroughRealClient(t *testing.T) {
+	t.Parallel()
+	for _, tc := range probeClientErrorCases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) { t.Parallel(); runProbeClientError(t, tc) })
+	}
+}
+
+// TestProbePermissionsFixturesThroughRealClient parses the exact Probe 1 and
+// Probe 6 permissions responses and asserts every captured permission entry.
+func assertPermissionTree(t *testing.T, got, want PermissionTree) {
+	t.Helper()
+	if len(got) != len(want) {
+		t.Fatalf("permission paths = %d; want %d", len(got), len(want))
+	}
+	for path, wantPrivileges := range want {
+		gotPrivileges, ok := got[path]
+		if !ok {
+			t.Fatalf("missing permission path %q", path)
+		}
+		if len(gotPrivileges) != len(wantPrivileges) {
+			t.Fatalf("privileges at %q = %#v; want %#v", path, gotPrivileges, wantPrivileges)
+		}
+		for privilege, wantFlag := range wantPrivileges {
+			if gotPrivileges[privilege] != wantFlag {
+				t.Errorf("permission %q at %q = %d; want %d", privilege, path, gotPrivileges[privilege], wantFlag)
+			}
+		}
+	}
+}
+
+func TestProbePermissionsFixturesThroughRealClient(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name, body string
+		want       PermissionTree
+	}{
+		{name: "Probe 1 permissions", body: probe1PermissionsResponse, want: PermissionTree{
+			"/access/realm/pve": {"Realm.AllocateUser": 1, "User.Modify": 1, "Sys.Audit": 1},
+			"/access/groups":    {"Realm.AllocateUser": 1, "User.Modify": 1, "Sys.Audit": 1},
+		}},
+		{name: "Probe 6 empty permissions", body: probe6EmptyPermissionsResponse, want: PermissionTree{}},
+	}
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			ts := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				_, _ = w.Write([]byte(tc.body)) //nolint:errcheck // httptest handler
+			}))
+			defer ts.Close()
+			tree, err := makeTestClient(t, ts.URL, "admin@pve!tok", "secret").GetPermissions(context.Background())
+			if err != nil {
+				t.Fatalf("GetPermissions: %v", err)
+			}
+			assertPermissionTree(t, tree, tc.want)
+		})
+	}
+}
+
+// TestProbeUserFixturesThroughRealClient replays GROUPADD and
+// RENEWAL-PRESERVE user responses and asserts all fields consumed by the
+// issuance and renewal read-back checks.
+func TestProbeUserFixturesThroughRealClient(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		body       string
+		wantGroups []string
+		wantEnable bool
+		wantExpire int64
+	}{
+		{name: "GROUPADD user read-back", body: groupAddUserResponse, wantGroups: []string{"vault-test-grp"}, wantEnable: true, wantExpire: 1786972261},
+		{name: "RENEWAL-PRESERVE before", body: renewalPreserveBeforeResponse, wantGroups: []string{"vault-test-grp"}, wantEnable: true, wantExpire: 1786986804},
+		{name: "RENEWAL-PRESERVE after", body: renewalPreserveAfterResponse, wantGroups: []string{"vault-test-grp"}, wantEnable: true, wantExpire: 1786990429},
+	}
+
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			ts := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				_, _ = w.Write([]byte(tc.body)) //nolint:errcheck // httptest handler
+			}))
+			defer ts.Close()
+
+			info, err := makeTestClient(t, ts.URL, "admin@pve!tok", "secret").GetUser(context.Background(), "probe@pve")
+			if err != nil {
+				t.Fatalf("GetUser: %v", err)
+			}
+			if !slices.Equal(info.Groups, tc.wantGroups) || info.Enable != tc.wantEnable || info.Expire != tc.wantExpire {
+				t.Fatalf("user info = %#v; want groups=%#v enable=%t expire=%d", info, tc.wantGroups, tc.wantEnable, tc.wantExpire)
+			}
+			if info.Comment != "" {
+				t.Errorf("comment = %q; want empty comment", info.Comment)
+			}
+		})
+	}
+}
+
 // TestUpdateUserRejectsUnsafeRequestsBeforeHTTP verifies the renewal safety
 // guard: unsafe expire, groups, enable, or append values must fail before any
 // HTTP request is sent.
