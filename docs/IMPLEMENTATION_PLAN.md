@@ -1374,26 +1374,28 @@ not run by CI.
 
 ### Phase 6 — Build/Register/Smoke + CI + Docs
 
-**Status**: 🚧 PARTIAL (2026-08-20) — `make build` passed, and local Vault
-plugin registration and enable checks passed in a separate Vault dev-server
-environment. That environment did not provide the required `PVE_*`
-configuration. The `DELETE <mount>/config?force=true` guard branch was exercised
-on an unconfigured mount (DELETE without `force` refused; with it accepted), but
-deletion of a stored config and subsequent cached-client invalidation remain
-part of the pending smoke test. The full issue/use/renew/revoke lifecycle
-through a real `vault server` plus registered plugin binary remains pending.
-Do not treat the local Vault checks as proof that this Vault-server smoke test
-passed against live PVE.
+**Status**: 🚧 PARTIAL (2026-08-20) — `make build`, `make test`, and
+`make lint` passed on the dedicated Phase 6 branch. A fresh local Vault dev
+server run with `-dev-plugin-dir=./vault/plugins` also registered and enabled
+the plugin successfully. The live Vault-server lifecycle smoke test remains
+blocked because the required `PVE_*` configuration is not present in this
+environment; `make testacc` stopped at its documented preflight for
+`PVE_ADDR`, `PVE_TOKEN_ID`, `PVE_TOKEN_SECRET`, `PVE_TEST_GROUP`,
+`PVE_BEHAVIORAL_PATH`, and `PVE_BEHAVIORAL_MARKER`. Consequently, config
+write, issue/use, renewal, revocation, stored-config deletion, and real
+cached-client invalidation against PVE are still unverified. Do not treat the
+local Vault registration/enable check as proof of the live lifecycle smoke
+test.
 
 **Tasks**:
 - [x] Build plugin: `make build` (output to `vault/plugins/`) — passed on
   2026-08-20
 - [ ] Manual smoke test (dev Vault server with `-dev-plugin-dir` → no manual
   register, enable, write config, write role, read creds, use token, renew,
-  revoke, delete config with `force=true`) — local
-  registration/enable/`force=true` config-delete checks passed, but full
-  issue/use/renew/revoke through a real `vault server` plus registered plugin
-  binary remains pending without required `PVE_*` variables in that environment
+  revoke, delete config with `force=true`) — fresh local registration/enable
+  passed; the full sequence remains pending because the required `PVE_*`
+  variables are unavailable. `make testacc` was run and stopped at its
+  documented preflight, without contacting PVE.
 - [x] Update `README.md` with: overview, build/install instructions,
   configuration example, role example, usage example, development/testing notes
 - [x] CI config (GitHub Actions or equivalent): normal PR CI runs build, unit
