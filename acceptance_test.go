@@ -150,17 +150,17 @@ func TestAccAuthorizationContractCanary(t *testing.T) {
 	form := accFullReplaceControlForm(time.Now().Add(20 * time.Minute))
 	status, body, err := raw.do(ctx, http.MethodPut, "/access/users/"+url.PathEscape(controlUser), h.Env.TokenID, h.Env.TokenSecret, form)
 	if err != nil {
-		t.Fatalf("expire-only PUT control failed: %v", err)
+		t.Fatalf("explicit replacement PUT control failed: %v", err)
 	}
 	if status < 200 || status >= 300 {
-		t.Fatalf("expire-only PUT control status=%d body=%s", status, redactBody(body))
+		t.Fatalf("explicit replacement PUT control status=%d body=%s", status, redactBody(body))
 	}
 	info, err := h.Client.GetUser(ctx, controlUser)
 	if err != nil {
-		t.Fatalf("read control user after expire-only PUT: %v", err)
+		t.Fatalf("read control user after explicit replacement PUT: %v", err)
 	}
 	if len(info.Groups) != 0 {
-		t.Fatalf("expire-only PUT control groups=%v; want empty groups to confirm full-replace behavior", info.Groups)
+		t.Fatalf("explicit replacement PUT control groups=%v; want empty groups to confirm full-replace behavior", info.Groups)
 	}
 }
 
@@ -223,7 +223,7 @@ func TestInsufficientPrivilegeErrorFragments(t *testing.T) {
 	}
 }
 
-func TestAccFullReplaceControlFormSendsExplicitAppendZero(t *testing.T) {
+func TestFullReplaceControlFormSendsExplicitAppendZeroAndEmptyGroups(t *testing.T) {
 	expire := time.Unix(1234, 0)
 
 	form := accFullReplaceControlForm(expire)
@@ -234,8 +234,12 @@ func TestAccFullReplaceControlFormSendsExplicitAppendZero(t *testing.T) {
 	if got := form.Get("append"); got != "0" {
 		t.Fatalf("append=%q; want explicit 0", got)
 	}
-	if _, ok := form["groups"]; ok {
-		t.Fatalf("groups field present in full-replace control form: %v", form["groups"])
+	groups, ok := form["groups"]
+	if !ok {
+		t.Fatal("groups field missing from full-replace control form")
+	}
+	if len(groups) != 1 || groups[0] != "" {
+		t.Fatalf("groups=%v; want one empty groups field", groups)
 	}
 }
 
@@ -243,6 +247,7 @@ func accFullReplaceControlForm(expire time.Time) url.Values {
 	return url.Values{
 		"expire": {strconv.FormatInt(expire.Unix(), 10)},
 		"append": {"0"},
+		"groups": {""},
 	}
 }
 
