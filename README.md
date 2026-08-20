@@ -94,6 +94,10 @@ the disposable-cluster [acceptance test setup](#acceptance-test-prerequisites),
 which uses `vault-acc@pve` and test-only groups. Do not reuse the acceptance
 identity, a human identity, or `root@pam` for a production mount.
 
+Before starting this runbook, build and install the plugin and enable the
+`proxmox` mount as described in [Build and Install](#build-and-install). The
+configuration command in step 4 assumes that the mount already exists.
+
 #### 1. Create a dedicated provisioner identity
 
 Run these commands as a Proxmox cluster administrator. Substitute the target
@@ -158,9 +162,10 @@ allocation privilege.
 
 #### 3. Create the provisioner API token
 
-Create the token only after the user, role, ACL grants, and target groups are in
-place. **`privsep=0` is mandatory.** Without it, Proxmox's default `privsep=1`
-gives the token a separate empty ACL and the engine cannot provision usable
+The token may be created after the dedicated user exists; before issuing a
+credential, ensure the ACL grants, target groups, and Vault role are in place.
+**`privsep=0` is mandatory.** Without it, Proxmox's default `privsep=1` gives
+the token a separate empty ACL and the engine cannot provision usable
 credentials.
 
 ```bash
@@ -192,7 +197,7 @@ CA bundle over `tls_skip_verify=true`.
 vault write proxmox/config \
   address="https://pve.example.com:8006" \
   token_id="vault-provisioner@pve!vault" \
-  token_secret="<one-time-secret>" \
+  token_secret=@/run/secrets/pve-provisioner-token \
   tls_skip_verify=false \
   ca_cert=@/path/to/pve-ca.pem \
   default_ttl=3600 \
@@ -221,7 +226,12 @@ Root-token rotation is out of scope for v1 and must be performed manually:
    with explicit `--privsep 0`.
 2. Verify its secret is captured safely and test it against a maintenance or
    controlled mount/configuration path without exposing the secret.
-3. Update `<mount>/config` with the replacement `token_id` and one-time secret.
+3. Re-send the complete `<mount>/config` configuration with the replacement
+   `token_id` and one-time secret. Config writes are full replacements, not
+   patches: include `address`, `token_id`, `token_secret`,
+   `tls_skip_verify`, `ca_cert`, `default_ttl`, and `default_max_ttl` as
+   applicable. Use a protected `@file` or equivalent secret-input mechanism;
+   never put the secret directly on the command line.
 4. Confirm the config and a controlled lease lifecycle, then revoke/delete the
    old token out-of-band in Proxmox.
 
@@ -240,6 +250,20 @@ privilege ceiling of roles bound to groups. This is not true least privilege in
 the compromise case; see the [full threat model](docs/ARCHITECTURE.md#threat-model-admin-token-compromise)
 and apply containment controls such as network restriction, token protection,
 short finite TTLs, alerting, and regular audit review.
+
+#### Production userid length budget
+
+The generated PVE userid is `{user_prefix}-{role}-{random}@{realm}` and must be
+at most 64 characters, including the realm. The role write validates this
+budget before issuance:
+
+```text
+len(user_prefix) + 1 + len(role) + 1 + 8 + 1 + len(realm) <= 64
+```
+
+For example, `vault` / `production-readers` / `pve` uses 37 characters. Choose
+the `user_prefix` and Vault role name with this limit in mind so validation does
+not fail after the Proxmox setup is complete.
 
 **Why group membership instead of direct ACL grants?** Proxmox enforces
 anti-privilege-escalation on `PUT /access/acl`: a principal cannot grant
@@ -291,14 +315,14 @@ export VAULT_TOKEN='root'
 vault secrets enable -path=proxmox vault-plugin-secrets-proxmox
 ```
 
+**Production installation (distinct from the development server above):**
+
 For a production-style install, configure Vault with a real plugin directory,
 copy the binary there, calculate its SHA-256 digest from that exact file, and
 register it in the Vault plugin catalog. Put the following stanza in the Vault
 server configuration file (for example, `/etc/vault.d/vault.hcl`), then restart
 Vault for the setting to take effect. The directory must be configured as a
 real directory, not a symlink:
-
-**Production installation (distinct from the development server above):**
 
 ```hcl
 plugin_directory = "/etc/vault/plugins"
@@ -416,14 +440,14 @@ temporary `vaultacc-*@pve` users can be safely created, expired, renewed, and
 deleted. The suite targets the PVE 9.2.10 behavior documented in
 `docs/PVE_PROBES.md`.
 
-Create a dedicated acceptance provisioner identity instead of reusing a human or
-full-admin token. Run these commands as a Proxmox cluster administrator on an
-isolated/disposable test cluster, replacing only the example names if needed:
-
 This is an acceptance-only setup and is not a production runbook. For
 production, use the dedicated `vault-provisioner@pve` identity and the
 production procedure above; the acceptance identity and `vault-test-grp` must
 not be reused for production workloads.
+
+Create a dedicated acceptance provisioner identity instead of reusing a human or
+full-admin token. Run these commands as a Proxmox cluster administrator on an
+isolated/disposable test cluster, replacing only the example names if needed:
 
 ```bash
 # Dedicated API-token owner used only by Vault acceptance tests.
