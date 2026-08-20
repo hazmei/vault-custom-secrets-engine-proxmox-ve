@@ -1388,8 +1388,19 @@ not because a stale client was used).
 The canonical `make testacc` command was also preflighted without printing
 secrets. The exact missing variables were `PVE_BEHAVIORAL_PATH` and
 `PVE_BEHAVIORAL_MARKER`; these gate the required authorization-contract canary
-and are separate from the completed lifecycle smoke test. No PVE changes were
-made outside the disposable target.
+and are separate from the completed lifecycle smoke test. After those
+variables were configured, the targeted canary was run on 2026-08-20 against
+the configured disposable PVE target with:
+
+```text
+VAULT_ACC=1 go test -count=1 -v -timeout=30m ./... -run '^TestAccAuthorizationContractCanary$'
+```
+
+The test passed, including the positive behavioral-endpoint check and the
+expired-user authentication and renewal checks. The optional direct ACL
+anti-privilege-escalation and negative-authorization subtests skipped because
+their separately documented optional variables were not configured. No PVE
+changes were made outside the disposable target.
 
 **Tasks**:
 - [x] Build plugin: `make build` (output to `vault/plugins/`) — passed on
@@ -1403,6 +1414,11 @@ made outside the disposable target.
   `"no such user"`. The config GET also confirmed `token_secret` is omitted.
   The acceptance canary preflight separately identified missing
   `PVE_BEHAVIORAL_PATH` and `PVE_BEHAVIORAL_MARKER`.
+- [x] Run the required authorization-contract canary after configuring
+  `PVE_BEHAVIORAL_PATH` and `PVE_BEHAVIORAL_MARKER` — targeted command passed
+  on 2026-08-20 against the configured disposable PVE target. The positive
+  behavioral endpoint passed; the optional direct ACL and negative-authorization
+  subtests skipped because their optional variables were unset.
 - [x] Update `README.md` with: overview, build/install instructions,
   configuration example, role example, usage example, development/testing notes
 - [x] CI config (GitHub Actions or equivalent): normal PR CI runs build, unit
