@@ -1374,44 +1374,35 @@ not run by CI.
 
 ### Phase 6 — Build/Register/Smoke + CI + Docs
 
-**Status**: 🚧 PARTIAL (2026-08-20) — `make build`, `make test`, and
-`make lint` passed. The plugin was auto-registered from
-`-dev-plugin-dir=./vault/plugins` and enabled successfully. The
-`force=true` guard branch was exercised on an unconfigured mount (DELETE
-without `force` refused, with it accepted). Deletion of a *stored* config and
-the subsequent cached-client invalidation remain pending.
+**Status**: ✅ COMPLETE (2026-08-20) — `make build`, `make test`, and
+`make lint` passed previously, and the full real Vault-server lifecycle smoke
+test now passes against the disposable `pve-manager/9.2.10/43df2e01f27a1a19`
+target. The plugin was auto-registered from `-dev-plugin-dir=./vault/plugins`
+and enabled successfully. The test covered stored-config validation and
+secret redaction, role creation, credential issuance, issued-token `/version`
+authentication, renewal, revocation, PVE absence verification, the
+`force=true` delete guard, forced deletion of stored config, and cached-client
+invalidation (a post-delete credential request failed because config was gone,
+not because a stale client was used).
 
-The live Vault-server lifecycle smoke test remains blocked in the Phase 6
-validation environment used on 2026-08-20 (a local workstation with no PVE
-access), distinct from the operator workstation where the Phase 5 run was
-performed, because the PVE configuration required for the smoke test is not
-available in that validation environment. The smoke test requires PVE
-reachability, an admin token with the grants documented in the Admin Token
-Configuration section of `README.md` and `AGENTS.md`, a pre-created test group
-bound out-of-band to the role being exercised, and the test realm. Separately,
-the `make testacc` acceptance suite stopped at its documented preflight in the
-Phase 6 validation environment because `PVE_ADDR`, `PVE_TOKEN_ID`,
-`PVE_TOKEN_SECRET`, `PVE_TEST_GROUP`, `PVE_BEHAVIORAL_PATH`, and
-`PVE_BEHAVIORAL_MARKER` are not present there. The last two variables gate the
-authorization-contract canary, not the Vault-server lifecycle smoke test. The
-acceptance preflight did not contact PVE and is not evidence about the smoke
-test. Consequently, config write, issue/use, renewal, revocation, and real
-cached-client invalidation against PVE are still unverified. Do not treat the
-local Vault registration/enable check as proof of the live lifecycle smoke
-test.
+The canonical `make testacc` command was also preflighted without printing
+secrets. The exact missing variables were `PVE_BEHAVIORAL_PATH` and
+`PVE_BEHAVIORAL_MARKER`; these gate the required authorization-contract canary
+and are separate from the completed lifecycle smoke test. No PVE changes were
+made outside the disposable target.
 
 **Tasks**:
 - [x] Build plugin: `make build` (output to `vault/plugins/`) — passed on
   2026-08-20
-- [ ] Manual smoke test (dev Vault server with `-dev-plugin-dir` → no manual
+- [x] Manual smoke test (dev Vault server with `-dev-plugin-dir` → no manual
   register, enable, write config, write role, read creds, use token, renew,
-  revoke, delete config with `force=true`) — the plugin was auto-registered
-  and enabled, and the unconfigured-mount `force=true` guard check passed; the
-  full sequence remains pending because PVE reachability, an admin token with
-  the documented grants, a pre-created group bound to the test role, and the
-  test realm are unavailable in the Phase 6 validation environment.
-  Separately, `make testacc` stopped at its acceptance-suite preflight without
-  contacting PVE; that preflight does not exercise this smoke test.
+  revoke, delete config with `force=true`) — passed on 2026-08-20 against
+  `pve-manager/9.2.10/43df2e01f27a1a19`, including stored-config deletion and
+  cached-client invalidation. The issued token authenticated successfully to
+  `/version`; revocation was verified by the PVE `HTTP 500` body
+  `"no such user"`. The config GET also confirmed `token_secret` is omitted.
+  The acceptance canary preflight separately identified missing
+  `PVE_BEHAVIORAL_PATH` and `PVE_BEHAVIORAL_MARKER`.
 - [x] Update `README.md` with: overview, build/install instructions,
   configuration example, role example, usage example, development/testing notes
 - [x] CI config (GitHub Actions or equivalent): normal PR CI runs build, unit
@@ -1426,6 +1417,8 @@ test.
   remains unverified
 - Full issue→use→renew→revoke smoke test passes through a real `vault server`
   plus registered plugin binary with required live PVE configuration
+- Stored config can be force-deleted and the cached PVE client is invalidated
+  (post-delete credential access fails because config is absent)
 - CI runs on PR: fmt/lint/test green
 - Live acceptance required tests have a recorded operator green result from
   2026-08-20 against `pve-manager/9.2.10/43df2e01f27a1a19`; only the three
