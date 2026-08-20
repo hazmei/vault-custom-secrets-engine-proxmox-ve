@@ -105,8 +105,8 @@ func TestClientAuthHeaderFormat(t *testing.T) {
 	}
 }
 
-// TestGetPermissionsParsesTree asserts that GetPermissions correctly parses
-// the PVE permissions tree response and returns a PermissionTree.
+// TestGetPermissionsParsesTree parses captured Probe 1 permissions and
+// verifies the privileges and propagation needed by config and role checks.
 func TestGetPermissionsParsesTree(t *testing.T) {
 	t.Parallel()
 
@@ -114,17 +114,7 @@ func TestGetPermissionsParsesTree(t *testing.T) {
 		if r.URL.Path != "/api2/json/access/permissions" {
 			t.Errorf("unexpected path: %q", r.URL.Path)
 		}
-		_ = json.NewEncoder(w).Encode(map[string]interface{}{ //nolint:errcheck // httptest handler — write error not actionable
-			"data": map[string]interface{}{
-				"/access/groups": map[string]interface{}{
-					"User.Modify": 1,
-					"Sys.Audit":   1,
-				},
-				"/access/realm/pve": map[string]interface{}{
-					"Realm.AllocateUser": 1,
-				},
-			},
-		})
+		_, _ = w.Write([]byte(probe1PermissionsResponse)) //nolint:errcheck // httptest handler
 	}))
 	defer ts.Close()
 
@@ -142,6 +132,35 @@ func TestGetPermissionsParsesTree(t *testing.T) {
 	}
 	if !tree.HasPrivilege("/access/realm/pve", "Realm.AllocateUser") {
 		t.Error("expected Realm.AllocateUser at /access/realm/pve")
+	}
+	if !tree.HasPrivilege("/access/groups/vault-test-grp", "User.Modify") {
+		t.Error("expected User.Modify to propagate to /access/groups/vault-test-grp")
+	}
+}
+
+// TestProbeNonPropagatingPermissionsFixtureThroughRealClient replays captured
+// Probe 9 evidence and verifies that an exact-path privilege remains effective
+// while the same non-propagating grant is rejected for a child group path.
+func TestProbeNonPropagatingPermissionsFixtureThroughRealClient(t *testing.T) {
+	t.Parallel()
+
+	ts := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/api2/json/access/permissions" {
+			t.Errorf("request = %s %s; want GET /api2/json/access/permissions", r.Method, r.URL.Path)
+		}
+		_, _ = w.Write([]byte(probe9NonPropagatingResponse)) //nolint:errcheck // httptest handler
+	}))
+	defer ts.Close()
+
+	tree, err := makeTestClient(t, ts.URL, "admin@pve!tok", "secret").GetPermissions(context.Background())
+	if err != nil {
+		t.Fatalf("GetPermissions: %v", err)
+	}
+	if !tree.HasPrivilege("/access/groups", "User.Modify") {
+		t.Error("expected User.Modify at the exact /access/groups path")
+	}
+	if tree.HasPrivilege("/access/groups/vault-test-grp", "User.Modify") {
+		t.Error("did not expect User.Modify to propagate to /access/groups/vault-test-grp")
 	}
 }
 
@@ -498,6 +517,166 @@ func TestClassifyPVEErrorIntegration(t *testing.T) {
 			}
 			if !errors.Is(err, tc.wantErr) {
 				t.Errorf("got error %v; want errors.Is(%v)", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+type probeClientErrorCase struct {
+	name       string
+	status     int
+	body       string
+	wantMethod string
+	wantPath   string
+	call       func(Client) error
+	wantErr    error
+}
+
+var probeClientErrorCases = []probeClientErrorCase{
+	{name: "Probe 2 duplicate user", status: 500, body: probe2DuplicateUserResponse, wantMethod: http.MethodPost, wantPath: "/api2/json/access/users", call: func(client Client) error {
+		return client.CreateUser(context.Background(), CreateUserRequest{UserID: "probe-dup-52445741@pve", Groups: "grp", Expire: 1, Enable: true})
+	}, wantErr: ErrConflict},
+	{name: "Probe 3 missing user delete", status: 500, body: probe3MissingUserResponse, wantMethod: http.MethodDelete, wantPath: "/api2/json/access/users/probe-ghost-nonexistent@pve", call: func(client Client) error {
+		return client.DeleteUser(context.Background(), "probe-ghost-nonexistent@pve")
+	}, wantErr: ErrUserNotFound},
+	{name: "Probe 4 missing user get", status: 500, body: probe4MissingUserResponse, wantMethod: http.MethodGet, wantPath: "/api2/json/access/users/probe-ghost-nonexistent@pve", call: func(client Client) error {
+		_, err := client.GetUser(context.Background(), "probe-ghost-nonexistent@pve")
+		return err
+	}, wantErr: ErrUserNotFound},
+	{name: "Probe 5 missing group", status: 500, body: probe5MissingGroupResponse, wantMethod: http.MethodGet, wantPath: "/api2/json/access/groups/definitely-not-a-real-group", call: func(client Client) error {
+		return client.GetGroup(context.Background(), "definitely-not-a-real-group")
+	}, wantErr: ErrGroupNotFound},
+	{name: "Probe 6b duplicate token", status: 400, body: probe6bDuplicateTokenResponse, wantMethod: http.MethodPost, wantPath: "/api2/json/access/users/probe-ps-52445741@pve/token/vault", call: func(client Client) error {
+		_, err := client.CreateToken(context.Background(), "probe-ps-52445741@pve", "vault")
+		return err
+	}, wantErr: ErrConflict},
+}
+
+func runProbeClientError(t *testing.T, tc probeClientErrorCase) {
+	t.Helper()
+	ts := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != tc.wantMethod || r.URL.Path != tc.wantPath {
+			t.Errorf("request = %s %s; want %s %s", r.Method, r.URL.Path, tc.wantMethod, tc.wantPath)
+		}
+		w.WriteHeader(tc.status)
+		_, _ = w.Write([]byte(tc.body)) //nolint:errcheck // httptest handler
+	}))
+	defer ts.Close()
+	err := tc.call(makeTestClient(t, ts.URL, "admin@pve!tok", "secret"))
+	if !errors.Is(err, tc.wantErr) {
+		t.Fatalf("error = %v; want errors.Is(%v)", err, tc.wantErr)
+	}
+}
+
+// TestProbeErrorFixturesThroughRealClient replays the verbatim error bodies
+// from PVE_PROBES.md through the corresponding real-client methods. The
+// classifier-only table preserves generalized malformed/status coverage.
+func TestProbeErrorFixturesThroughRealClient(t *testing.T) {
+	t.Parallel()
+	for _, tc := range probeClientErrorCases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) { t.Parallel(); runProbeClientError(t, tc) })
+	}
+}
+
+// assertPermissionTree verifies every captured permission path and privilege.
+func assertPermissionTree(t *testing.T, got, want PermissionTree) {
+	t.Helper()
+	if len(got) != len(want) {
+		t.Fatalf("permission paths = %d; want %d", len(got), len(want))
+	}
+	for path, wantPrivileges := range want {
+		gotPrivileges, ok := got[path]
+		if !ok {
+			t.Fatalf("missing permission path %q", path)
+		}
+		if len(gotPrivileges) != len(wantPrivileges) {
+			t.Fatalf("privileges at %q = %#v; want %#v", path, gotPrivileges, wantPrivileges)
+		}
+		for privilege, wantFlag := range wantPrivileges {
+			if gotPrivileges[privilege] != wantFlag {
+				t.Errorf("permission %q at %q = %d; want %d", privilege, path, gotPrivileges[privilege], wantFlag)
+			}
+		}
+	}
+}
+
+// TestProbePermissionsFixturesThroughRealClient parses the exact Probe 1 and
+// Probe 6 permissions responses and asserts every captured permission entry.
+func TestProbePermissionsFixturesThroughRealClient(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name, body string
+		want       PermissionTree
+	}{
+		{name: "Probe 1 permissions", body: probe1PermissionsResponse, want: PermissionTree{
+			"/access/realm/pve": {"Realm.AllocateUser": 1, "User.Modify": 1, "Sys.Audit": 1},
+			"/access/groups":    {"Realm.AllocateUser": 1, "User.Modify": 1, "Sys.Audit": 1},
+		}},
+		{name: "Probe 6 empty permissions (unscoped response)", body: probe6EmptyPermissionsResponse, want: PermissionTree{}},
+	}
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			ts := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != http.MethodGet || r.URL.Path != "/api2/json/access/permissions" {
+					t.Errorf("request = %s %s; want GET /api2/json/access/permissions", r.Method, r.URL.Path)
+				}
+				_, _ = w.Write([]byte(tc.body)) //nolint:errcheck // httptest handler
+			}))
+			defer ts.Close()
+			tree, err := makeTestClient(t, ts.URL, "admin@pve!tok", "secret").GetPermissions(context.Background())
+			if err != nil {
+				t.Fatalf("GetPermissions: %v", err)
+			}
+			assertPermissionTree(t, tree, tc.want)
+		})
+	}
+}
+
+// TestProbeUserFixturesThroughRealClient replays GROUPADD, COMMENT, and
+// RENEWAL-PRESERVE user responses and asserts all fields consumed by the
+// issuance and renewal read-back checks.
+func TestProbeUserFixturesThroughRealClient(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name        string
+		body        string
+		wantGroups  []string
+		wantEnable  bool
+		wantExpire  int64
+		wantComment string
+	}{
+		{name: "GROUPADD user read-back", body: groupAddUserResponse, wantGroups: []string{"vault-test-grp"}, wantEnable: true, wantExpire: 1786972261},
+		{name: "COMMENT after create", body: commentAfterCreateResponse, wantGroups: []string{"vault-test-grp"}, wantEnable: true, wantExpire: 1787108586, wantComment: probeComment},
+		{name: "COMMENT after renewal", body: commentAfterRenewalResponse, wantGroups: []string{"vault-test-grp"}, wantEnable: true, wantExpire: 1787112186, wantComment: probeComment},
+		{name: "RENEWAL-PRESERVE before", body: renewalPreserveBeforeResponse, wantGroups: []string{"vault-test-grp"}, wantEnable: true, wantExpire: 1786986804},
+		{name: "RENEWAL-PRESERVE after", body: renewalPreserveAfterResponse, wantGroups: []string{"vault-test-grp"}, wantEnable: true, wantExpire: 1786990429},
+	}
+
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			ts := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != http.MethodGet || r.URL.Path != "/api2/json/access/users/probe@pve" {
+					t.Errorf("request = %s %s; want GET /api2/json/access/users/probe@pve", r.Method, r.URL.Path)
+				}
+				_, _ = w.Write([]byte(tc.body)) //nolint:errcheck // httptest handler
+			}))
+			defer ts.Close()
+
+			info, err := makeTestClient(t, ts.URL, "admin@pve!tok", "secret").GetUser(context.Background(), "probe@pve")
+			if err != nil {
+				t.Fatalf("GetUser: %v", err)
+			}
+			if !slices.Equal(info.Groups, tc.wantGroups) || info.Enable != tc.wantEnable || info.Expire != tc.wantExpire {
+				t.Fatalf("user info = %#v; want groups=%#v enable=%t expire=%d", info, tc.wantGroups, tc.wantEnable, tc.wantExpire)
+			}
+			if info.Comment != tc.wantComment {
+				t.Errorf("comment = %q; want %q", info.Comment, tc.wantComment)
 			}
 		})
 	}

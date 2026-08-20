@@ -25,7 +25,7 @@ func TestClassifyPVEError(t *testing.T) {
 		{
 			name:   "user already exists (HTTP 500, message field)",
 			status: 500,
-			body:   []byte(`{"data":null,"message":"create user failed: user 'vault-test@pve' already exists\n"}`),
+			body:   []byte(probe2DuplicateUserResponse),
 			want:   ErrConflict,
 		},
 		{
@@ -33,7 +33,7 @@ func TestClassifyPVEError(t *testing.T) {
 			// NOT in the top-level message field.  This is THE critical case.
 			name:   "token already exists (HTTP 400, errors.tokenid NOT message)",
 			status: 400,
-			body:   []byte(`{"message":"Parameter verification failed.\n","data":null,"errors":{"tokenid":"Token already exists."}}`),
+			body:   []byte(probe6bDuplicateTokenResponse),
 			want:   ErrConflict,
 		},
 		// ── ErrUserNotFound / ErrGroupNotFound cases (DR-2) ─────────────────
@@ -41,14 +41,14 @@ func TestClassifyPVEError(t *testing.T) {
 			// DR-2: "no such user" maps to ErrUserNotFound specifically.
 			name:   "no such user (HTTP 500) → ErrUserNotFound",
 			status: 500,
-			body:   []byte(`{"data":null,"message":"no such user ('vault-test@pve')\n"}`),
+			body:   []byte(probe3MissingUserResponse),
 			want:   ErrUserNotFound,
 		},
 		{
 			// DR-2: "does not exist" (group GET) maps to ErrGroupNotFound specifically.
 			name:   "group does not exist (HTTP 500) → ErrGroupNotFound",
 			status: 500,
-			body:   []byte(`{"data":null,"message":"group 'vault-test-grp' does not exist\n"}`),
+			body:   []byte(probe5MissingGroupResponse),
 			want:   ErrGroupNotFound,
 		},
 		{
