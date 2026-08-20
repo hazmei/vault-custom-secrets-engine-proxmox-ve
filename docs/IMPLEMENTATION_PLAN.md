@@ -1375,13 +1375,23 @@ not run by CI.
 ### Phase 6 — Build/Register/Smoke + CI + Docs
 
 **Status**: 🚧 PARTIAL (2026-08-20) — `make build`, `make test`, and
-`make lint` passed on the dedicated Phase 6 branch. A fresh local Vault dev
-server run with `-dev-plugin-dir=./vault/plugins` also registered and enabled
-the plugin successfully. The live Vault-server lifecycle smoke test remains
-blocked because the required `PVE_*` configuration is not present in this
-environment; `make testacc` stopped at its documented preflight for
+`make lint` passed on 2026-08-20. The plugin was auto-registered from
+`-dev-plugin-dir=./vault/plugins` and enabled successfully. The
+`force=true` guard branch was exercised on an unconfigured mount (DELETE
+without `force` refused, with it accepted). Deletion of a *stored* config and
+the subsequent cached-client invalidation remain pending.
+
+The live Vault-server lifecycle smoke test remains blocked in this branch's
+working environment, distinct from the operator workstation where the Phase 5
+run of 2026-08-20 was performed, because the PVE configuration required for
+the smoke test is not present here. The smoke test requires PVE reachability,
+an admin token, a pre-created test group, and the test realm. Separately, the
+`make testacc` acceptance suite stopped at its documented preflight because
 `PVE_ADDR`, `PVE_TOKEN_ID`, `PVE_TOKEN_SECRET`, `PVE_TEST_GROUP`,
-`PVE_BEHAVIORAL_PATH`, and `PVE_BEHAVIORAL_MARKER`. Consequently, config
+`PVE_BEHAVIORAL_PATH`, and `PVE_BEHAVIORAL_MARKER` are not present in this
+environment. The last two variables gate the authorization-contract canary,
+not the Vault-server lifecycle smoke test. The acceptance preflight did not
+contact PVE and is not evidence about the smoke test. Consequently, config
 write, issue/use, renewal, revocation, stored-config deletion, and real
 cached-client invalidation against PVE are still unverified. Do not treat the
 local Vault registration/enable check as proof of the live lifecycle smoke
@@ -1392,10 +1402,12 @@ test.
   2026-08-20
 - [ ] Manual smoke test (dev Vault server with `-dev-plugin-dir` → no manual
   register, enable, write config, write role, read creds, use token, renew,
-  revoke, delete config with `force=true`) — fresh local registration/enable
-  passed; the full sequence remains pending because the required `PVE_*`
-  variables are unavailable. `make testacc` was run and stopped at its
-  documented preflight, without contacting PVE.
+  revoke, delete config with `force=true`) — the plugin was auto-registered
+  and enabled, and the unconfigured-mount `force=true` guard check passed; the
+  full sequence remains pending because the PVE reachability, admin token,
+  pre-created group, and realm required by the smoke test are unavailable.
+  Separately, `make testacc` stopped at its acceptance-suite preflight without
+  contacting PVE; that preflight does not exercise this smoke test.
 - [x] Update `README.md` with: overview, build/install instructions,
   configuration example, role example, usage example, development/testing notes
 - [x] CI config (GitHub Actions or equivalent): normal PR CI runs build, unit
