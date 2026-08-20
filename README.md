@@ -193,13 +193,75 @@ temporary `vaultacc-*@pve` users can be safely created, expired, renewed, and
 deleted. The suite targets the PVE 9.2.10 behavior documented in
 `docs/PVE_PROBES.md`.
 
+Create a dedicated acceptance provisioner identity instead of reusing a human or
+full-admin token. Run these commands as a Proxmox cluster administrator on an
+isolated/disposable test cluster, replacing only the example names if needed:
+
+```bash
+# Dedicated API-token owner used only by Vault acceptance tests.
+pveum user add vault-acc@pve --comment "Vault acceptance test provisioner"
+
+# Custom role with the privileges the engine validates and uses.
+pveum role add VaultAccProvisioner \
+  --privs "User.Modify Realm.AllocateUser Sys.Audit"
+
+# The /access/groups grant must propagate to /access/groups/<PVE_TEST_GROUP>.
+pveum acl modify /access/groups \
+  --user vault-acc@pve \
+  --role VaultAccProvisioner \
+  --propagate 1
+
+# Realm allocation is validated per role. Keep it scoped to the test realm.
+pveum acl modify /access/realm/pve \
+  --user vault-acc@pve \
+  --role VaultAccProvisioner \
+  --propagate 1
+
+# Create the API token with privsep=0 so it inherits vault-acc@pve ACLs.
+pveum user token add vault-acc@pve acceptance \
+  --privsep 0 \
+  --comment "Vault acceptance test token"
+```
+
+The final command prints the token secret one time. PVE token IDs use the form
+`user@realm!tokenid`; in the example above, the token **ID** is
+`vault-acc@pve!acceptance`. The token **secret** is the generated `value` field.
+The ID alone is not a usable credential; the secret is the sensitive half of the
+`Authorization: PVEAPIToken=<id>=<secret>` pair. Copy the secret directly into
+your local shell or secret manager, do not commit it, and do not paste it into
+logs, issues, PRs, or documentation.
+
+`PVE_TEST_GROUP` must also be pre-created and bound by a cluster administrator
+to the role/path you want issued test credentials to exercise. The engine does
+not create PVE groups. The acceptance suite will create temporary users in this
+group, then verify that an issued token can access `PVE_BEHAVIORAL_PATH` and
+that the response contains `PVE_BEHAVIORAL_MARKER`. For example, on a disposable
+cluster only:
+
+```bash
+pveum group add vault-test-grp --comment "Vault acceptance test group"
+
+# Example only: choose a role/path appropriate for your disposable test cluster
+# and make PVE_BEHAVIORAL_PATH point at an endpoint protected by this binding.
+pveum acl modify / \
+  --group vault-test-grp \
+  --role PVEAuditor \
+  --propagate 1
+```
+
+With the example `PVE_BEHAVIORAL_PATH` and `PVE_BEHAVIORAL_MARKER` below, the
+test cluster must have at least one qemu VM visible through the group-role
+binding. A stopped stub VM is sufficient; an empty cluster returns HTTP 200 with
+an empty `/cluster/resources?type=vm` list, which does not prove the issued
+token has the delegated authorization and will fail the marker canary.
+
 Required environment:
 
 ```bash
 export VAULT_ACC=1
 export PVE_ADDR="https://pve.example.com:8006"
-export PVE_TOKEN_ID="vault-admin@pve!tokenid"
-export PVE_TOKEN_SECRET="..."
+export PVE_TOKEN_ID="vault-acc@pve!acceptance"
+export PVE_TOKEN_SECRET="<one-time-secret-from-pveum-user-token-add>"
 export PVE_TEST_GROUP="vault-test-grp"
 export PVE_BEHAVIORAL_PATH="/cluster/resources?type=vm"
 export PVE_BEHAVIORAL_MARKER='"type":"qemu"'
