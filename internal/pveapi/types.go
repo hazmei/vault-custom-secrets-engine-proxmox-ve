@@ -3,6 +3,7 @@
 package pveapi
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 )
@@ -139,6 +140,54 @@ type UserInfo struct {
 	Comment string
 }
 
+// userGroups decodes PVE's GET /access/users/{userid} groups field.
+//
+// PVE 9.2.10 returns groups as a JSON array. Null is accepted for empty group
+// sets. A CSV string is also accepted defensively so an unexpected string shape
+// preserves the security-critical read-back membership assertion instead of
+// hard-failing issuance or renewal. Malformed shapes are rejected explicitly.
+type userGroups []string
+
+// UnmarshalJSON normalizes PVE user group responses into a string slice.
+func (g *userGroups) UnmarshalJSON(raw []byte) error {
+	if string(raw) == "null" {
+		*g = nil
+		return nil
+	}
+
+	var arrayGroups []string
+	if err := json.Unmarshal(raw, &arrayGroups); err == nil {
+		*g = normalizeGroups(arrayGroups)
+		return nil
+	}
+
+	var csvGroups string
+	if err := json.Unmarshal(raw, &csvGroups); err == nil {
+		*g = splitGroupCSV(csvGroups)
+		return nil
+	}
+
+	return fmt.Errorf("groups must be a JSON array, CSV string, or null")
+}
+
+func normalizeGroups(groups []string) []string {
+	normalized := make([]string, 0, len(groups))
+	for _, group := range groups {
+		group = strings.TrimSpace(group)
+		if group != "" {
+			normalized = append(normalized, group)
+		}
+	}
+	return normalized
+}
+
+func splitGroupCSV(groups string) []string {
+	if groups == "" {
+		return nil
+	}
+	return normalizeGroups(strings.Split(groups, ","))
+}
+
 // versionResponse is the JSON shape of GET /version.
 type versionResponse struct {
 	Data struct {
@@ -167,10 +216,10 @@ type pveErrorBody struct {
 // userResponse is the JSON shape of GET /access/users/{userid}.
 type userResponse struct {
 	Data struct {
-		Groups  string `json:"groups"` // comma-separated group list
-		Enable  int    `json:"enable"`
-		Expire  int64  `json:"expire"`
-		Comment string `json:"comment"` // free-text annotation; used for WAL nonce ownership check
+		Groups  userGroups `json:"groups"`
+		Enable  int        `json:"enable"`
+		Expire  int64      `json:"expire"`
+		Comment string     `json:"comment"` // free-text annotation; used for WAL nonce ownership check
 	} `json:"data"`
 }
 
