@@ -1310,12 +1310,13 @@ and asserts the parsed `PermissionTree` matches the expected structure. No live 
 
 ### Phase 5 — Full Unit Suite + Acceptance Tests
 
-**Status**: ✅ IMPLEMENTED — unit tests and gated acceptance test code are present. Live
-`VAULT_ACC=1 make testacc` remains environment-dependent and is not implied by the normal unit
-test run.
+**Status**: ✅ LOCAL VERIFICATION PASSED (2026-08-20) — unit tests and gated acceptance
+test code are present. Phase 5 local checks (`go build ./...`, `go test ./...`, and
+`make lint`) pass. Live `VAULT_ACC=1 make testacc` remains environment-dependent and is
+not implied by the normal unit test run.
 
 **Tasks**:
-- [x] Ensure all unit tests (`*_test.go`) pass: `make test` green
+- [x] Ensure Phase 5 local verification passes: `go build ./...`, `make test`, and `make lint` green
 - [x] Implement `acceptance_test.go` with env gating (`VAULT_ACC=1`) and test scenarios:
   - [x] `TestAccLifecycle` (config→role→creds→use token→renew→revoke→verify deleted by asserting "no such user" body (HTTP 500), not a 404)
   - [x] `TestAccAuthorizationContractCanary` (4 assertions: PUT /access/acl unheld role→403, group-add confers role verified by read-back + ?userid= resolve, expired-user token→401, renewal re-sends groups (full-replace))
