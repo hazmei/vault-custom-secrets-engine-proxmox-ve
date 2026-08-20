@@ -484,6 +484,21 @@ and confirm the swap.
 
 ### Error Handling
 
+The PVE HTTP client caps every response body at 1 MiB with an N+1 read. Any
+response larger than `maxResponseBodyBytes` returns `ErrResponseTooLarge` before
+JSON parsing or body-string business-error classification. This is deliberately
+fail-closed: an oversized `DELETE /access/users/{userid}` response containing
+`"no such user"` is **not** treated as idempotent success, because the client
+does not classify truncated or partial bodies. Vault will see a hard revocation
+error and can retry rather than silently leaving a PVE user live.
+
+This creates an intentional classification asymmetry: status-only auth failures
+(`401` → `ErrUnauthenticated`, `403` → `ErrForbidden`) are operationally distinct
+from PVE business errors, but business errors (`ErrUserNotFound`,
+`ErrGroupNotFound`, `ErrConflict`) require a complete bounded body before they
+can be trusted. Oversized bodies therefore win over body-string business-error
+classification.
+
 - `595`/`5xx` from Proxmox on user/token create → surface as Vault
   internal error, no partial state left (if the token-creation step
   fails after user creation, best-effort delete the user before

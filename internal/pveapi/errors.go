@@ -50,4 +50,10 @@ var (
 	// revoked, or otherwise invalid. This is operationally distinct from 403:
 	// the token is not authenticated, not merely missing a privilege.
 	ErrUnauthenticated = errors.New("pveapi: unauthenticated")
+
+	// ErrResponseTooLarge is returned when a PVE response body exceeds the hard
+	// client read cap. The client returns this before JSON parsing or business
+	// error body-string classification, so callers must treat it as a hard,
+	// fail-closed error rather than as an idempotent business condition.
+	ErrResponseTooLarge = errors.New("pveapi: response body too large")
 )
