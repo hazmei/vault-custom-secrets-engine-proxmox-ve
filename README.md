@@ -87,6 +87,160 @@ The engine requires a Proxmox API token with privileges to manage users, tokens,
 
 **Blast radius and threat model**: See the Security Considerations section in `docs/ARCHITECTURE.md` for the complete threat model analysis, including the cluster-wide user administration blast radius, self-escalation primitives in the compromise case (both the admin-self-modification route and the quieter new-user-in-privileged-group route), honest comparison to full-admin, and partial containment recommendations.
 
+### Production Proxmox Prerequisites and Runbook
+
+The following is the production setup path. It is intentionally separate from
+the disposable-cluster [acceptance test setup](#acceptance-test-prerequisites),
+which uses `vault-acc@pve` and test-only groups. Do not reuse the acceptance
+identity, a human identity, or `root@pam` for a production mount.
+
+#### 1. Create a dedicated provisioner identity
+
+Run these commands as a Proxmox cluster administrator. Substitute the target
+realm and group names for your environment; do not put a token secret in this
+file, shell history, logs, tickets, or chat.
+
+```bash
+# Dedicated non-human identity used only by this Vault mount.
+pveum user add vault-provisioner@pve --comment "Vault Proxmox provisioner"
+
+# The role contains only the privileges required by the engine.
+pveum role add VaultProvisioner \
+  --privs "User.Modify Realm.AllocateUser Sys.Audit"
+
+# User.Modify and Sys.Audit are required at the parent groups path.
+# Propagation is mandatory: creation checks /access/groups/<group>.
+pveum acl modify /access/groups \
+  --user vault-provisioner@pve \
+  --role VaultProvisioner \
+  --propagate 1
+
+# Realm allocation is scoped to the realm used by Vault roles.
+pveum acl modify /access/realm/pve \
+  --user vault-provisioner@pve \
+  --role VaultProvisioner \
+  --propagate 1
+```
+
+The required privilege paths are exact:
+
+- `User.Modify` on `/access/groups` (parent path), with propagation enabled.
+  Creation effectively checks `/access/groups/<group>`; renewal and revocation
+  check the parent path. A non-propagating grant (`--propagate 0`) is an invalid
+  partial setup: renewal and revocation may work while issuance fails with 403.
+- `Sys.Audit` on `/access/groups` for role-write group-existence validation.
+- `Realm.AllocateUser` on `/access/realm/<realm>`, validated for each Vault role.
+
+#### 2. Pre-create groups and bind their roles
+
+The engine does not create groups or ACL bindings. A cluster administrator must
+create each target group and bind it to the intended PVE role(s) at the intended
+path(s) before the corresponding Vault role is written. Prefer one PVE group per
+Vault role/use case; changing a group's bindings changes the effective access of
+all outstanding credentials in that group immediately.
+
+```bash
+pveum group add vault-production-readers \
+  --comment "Vault production read-only lease group"
+
+# Example only: choose the role and ACL path appropriate for your policy.
+pveum acl modify / \
+  --group vault-production-readers \
+  --role PVEAuditor \
+  --propagate 1
+```
+
+The example binding is illustrative, not a claim about the correct production
+authorization for every cluster. Confirm the desired role/path with your PVE
+administrators and security review. Then configure a Vault role using the
+already-existing group; role writes validate group existence and the realm
+allocation privilege.
+
+#### 3. Create the provisioner API token
+
+Create the token only after the user, role, ACL grants, and target groups are in
+place. **`privsep=0` is mandatory.** Without it, Proxmox's default `privsep=1`
+gives the token a separate empty ACL and the engine cannot provision usable
+credentials.
+
+```bash
+pveum user token add vault-provisioner@pve vault \
+  --privsep 0 \
+  --comment "Vault production provisioner token"
+```
+
+Proxmox prints the token secret only once. Capture the complete one-time secret
+directly into an approved secret manager or protected operator session. The
+provisioner token is the **engine's administrative credential** and is distinct
+from generated lease credentials:
+
+- Provisioner token: configured at `<mount>/config`; it creates, renews, and
+  revokes synthetic users and must never be issued to workloads.
+- Lease token: returned by `<mount>/creds/:role`; it belongs to one disposable
+  user, has the target group's effective access, and is revoked with that user.
+
+The token ID (`vault-provisioner@pve!vault`) is not secret; the token secret is.
+Do not expose the secret in command output captures, CI logs, shell history,
+support bundles, issues, pull requests, or documentation.
+
+#### 4. Configure and verify the production mount
+
+Use the protected secret when writing the mount configuration. Prefer a trusted
+CA bundle over `tls_skip_verify=true`.
+
+```bash
+vault write proxmox/config \
+  address="https://pve.example.com:8006" \
+  token_id="vault-provisioner@pve!vault" \
+  token_secret="<one-time-secret>" \
+  tls_skip_verify=false \
+  ca_cert=@/path/to/pve-ca.pem \
+  default_ttl=3600 \
+  default_max_ttl=86400
+
+vault write proxmox/roles/production-readers \
+  group="vault-production-readers" \
+  user_prefix="vault" \
+  realm="pve" \
+  ttl=3600 \
+  max_ttl=86400
+```
+
+The config write checks connectivity and the provisioner's permissions; the
+role write checks the target group, realm allocation, and effective propagated
+`User.Modify` at the per-group path. Issue a test lease only after reviewing
+the returned group's authorization, then revoke it and confirm the temporary
+PVE user is gone. Keep production issuance and revocation monitoring in the
+normal Vault/PVE change and audit process.
+
+#### 5. Rotate the provisioner token safely
+
+Root-token rotation is out of scope for v1 and must be performed manually:
+
+1. Create a replacement token for the same dedicated provisioner user, again
+   with explicit `--privsep 0`.
+2. Verify its secret is captured safely and test it against a maintenance or
+   controlled mount/configuration path without exposing the secret.
+3. Update `<mount>/config` with the replacement `token_id` and one-time secret.
+4. Confirm the config and a controlled lease lifecycle, then revoke/delete the
+   old token out-of-band in Proxmox.
+
+Changing or deleting the configured provisioner token can strand outstanding
+leases: their PVE users and lease tokens remain on the cluster, but the engine
+may no longer be able to renew or revoke them. Revoke outstanding leases before
+rotation where possible, and retain an approved recovery procedure for manual
+cleanup. Similarly, do not delete the mount configuration while leases remain;
+`DELETE <mount>/config` requires `force=true` and makes those leases
+non-renewable and non-revocable by the engine.
+
+The required `/access/groups` grant is intentionally cluster-wide user
+administration. A compromised provisioner token can modify or delete arbitrary
+PVE users and can create a new user in any privileged group, reaching the
+privilege ceiling of roles bound to groups. This is not true least privilege in
+the compromise case; see the [full threat model](docs/ARCHITECTURE.md#threat-model-admin-token-compromise)
+and apply containment controls such as network restriction, token protection,
+short finite TTLs, alerting, and regular audit review.
+
 **Why group membership instead of direct ACL grants?** Proxmox enforces
 anti-privilege-escalation on `PUT /access/acl`: a principal cannot grant
 roles it does not hold (confirmed on PVE 9.2.10: a token lacking
@@ -144,6 +298,8 @@ server configuration file (for example, `/etc/vault.d/vault.hcl`), then restart
 Vault for the setting to take effect. The directory must be configured as a
 real directory, not a symlink:
 
+**Production installation (distinct from the development server above):**
+
 ```hcl
 plugin_directory = "/etc/vault/plugins"
 ```
@@ -162,7 +318,9 @@ For this production-style path, provide `VAULT_ADDR` and an authenticated
 `VAULT_TOKEN` for the target Vault server before running the CLI commands.
 
 The production catalog registration path has not been live-verified in this
-repository.
+repository. The commands above are a documented production-style procedure,
+not evidence that catalog registration has been validated in a live production
+Vault deployment.
 
 ## Configuration Example
 
@@ -261,6 +419,11 @@ deleted. The suite targets the PVE 9.2.10 behavior documented in
 Create a dedicated acceptance provisioner identity instead of reusing a human or
 full-admin token. Run these commands as a Proxmox cluster administrator on an
 isolated/disposable test cluster, replacing only the example names if needed:
+
+This is an acceptance-only setup and is not a production runbook. For
+production, use the dedicated `vault-provisioner@pve` identity and the
+production procedure above; the acceptance identity and `vault-test-grp` must
+not be reused for production workloads.
 
 ```bash
 # Dedicated API-token owner used only by Vault acceptance tests.
