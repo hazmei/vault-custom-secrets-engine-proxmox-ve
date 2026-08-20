@@ -139,19 +139,27 @@ vault secrets enable -path=proxmox vault-plugin-secrets-proxmox
 
 For a production-style install, configure Vault with a real plugin directory,
 copy the binary there, calculate its SHA-256 digest from that exact file, and
-register it in the Vault plugin catalog. The directory must be configured as a
+register it in the Vault plugin catalog. Put the following stanza in the Vault
+server configuration file (for example, `/etc/vault.d/vault.hcl`), then restart
+Vault for the setting to take effect. The directory must be configured as a
 real directory, not a symlink:
 
 ```hcl
 plugin_directory = "/etc/vault/plugins"
 ```
 
+Copy the built binary into that directory and make it executable:
+
 ```bash
+sudo install -m 0755 vault/plugins/vault-plugin-secrets-proxmox /etc/vault/plugins/
 SHA256=$(shasum -a 256 /etc/vault/plugins/vault-plugin-secrets-proxmox | cut -d' ' -f1)
 vault plugin register -sha256="$SHA256" \
   secret vault-plugin-secrets-proxmox
 vault secrets enable -path=proxmox vault-plugin-secrets-proxmox
 ```
+
+For this production-style path, provide `VAULT_ADDR` and an authenticated
+`VAULT_TOKEN` for the target Vault server before running the CLI commands.
 
 The production catalog registration path has not been live-verified in this
 repository.
