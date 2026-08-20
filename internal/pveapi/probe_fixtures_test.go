@@ -10,12 +10,12 @@ import (
 	"testing"
 )
 
-// These fixtures are copied byte-for-byte from the raw evidence blocks in
-// docs/PVE_PROBES.md. Keep them as raw strings: JSON re-encoding would hide
-// changes to field order, escaped newlines, or whitespace in PVE responses.
 // probeComment is an expected decoded value, not a captured response body.
 const probeComment = "vault-wal:PROBECOMMENT12345"
 
+// These fixtures are copied byte-for-byte from the raw evidence blocks in
+// docs/PVE_PROBES.md. Keep them as raw strings: JSON re-encoding would hide
+// changes to field order, escaped newlines, or whitespace in PVE responses.
 const (
 	probe1PermissionsResponse = `{"data":{"/access/realm/pve":{"Realm.AllocateUser":1,"User.Modify":1,"Sys.Audit":1},"/access/groups":{"Realm.AllocateUser":1,"User.Modify":1,"Sys.Audit":1}}}`
 
