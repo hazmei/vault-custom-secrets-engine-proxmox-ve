@@ -17,7 +17,8 @@ const probeComment = "vault-wal:PROBECOMMENT12345"
 // docs/PVE_PROBES.md. Keep them as raw strings: JSON re-encoding would hide
 // changes to field order, escaped newlines, or whitespace in PVE responses.
 const (
-	probe1PermissionsResponse = `{"data":{"/access/realm/pve":{"Realm.AllocateUser":1,"User.Modify":1,"Sys.Audit":1},"/access/groups":{"Realm.AllocateUser":1,"User.Modify":1,"Sys.Audit":1}}}`
+	probe1PermissionsResponse    = `{"data":{"/access/realm/pve":{"Realm.AllocateUser":1,"User.Modify":1,"Sys.Audit":1},"/access/groups":{"Realm.AllocateUser":1,"User.Modify":1,"Sys.Audit":1}}}`
+	probe9NonPropagatingResponse = `{"data":{"/access/groups":{"Realm.AllocateUser":0,"User.Modify":0,"Sys.Audit":0}}}`
 
 	probe2DuplicateUserResponse = `{"data":null,"message":"create user failed: user 'probe-dup-52445741@pve' already exists\n"}`
 	// Probes 3 and 4 genuinely returned the same body for different methods.
@@ -50,6 +51,7 @@ func TestProbeFixturesRemainRawJSON(t *testing.T) {
 		body string
 	}{
 		{name: "Probe 1", body: probe1PermissionsResponse},
+		{name: "Probe 9 non-propagating permissions", body: probe9NonPropagatingResponse},
 		{name: "Probe 2", body: probe2DuplicateUserResponse},
 		{name: "Probe 3", body: probe3MissingUserResponse},
 		{name: "Probe 4", body: probe4MissingUserResponse},

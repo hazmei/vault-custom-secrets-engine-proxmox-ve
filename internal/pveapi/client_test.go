@@ -105,8 +105,8 @@ func TestClientAuthHeaderFormat(t *testing.T) {
 	}
 }
 
-// TestGetPermissionsParsesTree asserts that GetPermissions correctly parses
-// the PVE permissions tree response and returns a PermissionTree.
+// TestGetPermissionsParsesTree parses captured Probe 1 permissions and
+// verifies the privileges and propagation needed by config and role checks.
 func TestGetPermissionsParsesTree(t *testing.T) {
 	t.Parallel()
 
@@ -135,6 +135,32 @@ func TestGetPermissionsParsesTree(t *testing.T) {
 	}
 	if !tree.HasPrivilege("/access/groups/vault-test-grp", "User.Modify") {
 		t.Error("expected User.Modify to propagate to /access/groups/vault-test-grp")
+	}
+}
+
+// TestProbeNonPropagatingPermissionsFixtureThroughRealClient replays captured
+// Probe 9 evidence and verifies that an exact-path privilege remains effective
+// while the same non-propagating grant is rejected for a child group path.
+func TestProbeNonPropagatingPermissionsFixtureThroughRealClient(t *testing.T) {
+	t.Parallel()
+
+	ts := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/api2/json/access/permissions" {
+			t.Errorf("request = %s %s; want GET /api2/json/access/permissions", r.Method, r.URL.Path)
+		}
+		_, _ = w.Write([]byte(probe9NonPropagatingResponse)) //nolint:errcheck // httptest handler
+	}))
+	defer ts.Close()
+
+	tree, err := makeTestClient(t, ts.URL, "admin@pve!tok", "secret").GetPermissions(context.Background())
+	if err != nil {
+		t.Fatalf("GetPermissions: %v", err)
+	}
+	if !tree.HasPrivilege("/access/groups", "User.Modify") {
+		t.Error("expected User.Modify at the exact /access/groups path")
+	}
+	if tree.HasPrivilege("/access/groups/vault-test-grp", "User.Modify") {
+		t.Error("did not expect User.Modify to propagate to /access/groups/vault-test-grp")
 	}
 }
 
