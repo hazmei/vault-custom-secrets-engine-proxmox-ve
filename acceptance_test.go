@@ -446,7 +446,11 @@ func TestValidateAccBehaviorEnvRejectsVersionSentinelWithSpecificMessage(t *test
 	if err == nil {
 		t.Fatal("expected /version behavioral path sentinel to fail")
 	}
-	if !strings.Contains(err.Error(), "must be a group-role-gated endpoint, not /version") {
+	want := "TestAccAuthorizationContractCanary requires PVE_BEHAVIORAL_PATH to be a group-role-gated endpoint, not /version and PVE_BEHAVIORAL_MARKER so group-derived privilege is proven by a behavioral endpoint response marker"
+	if err.Error() != want {
+		t.Fatalf("validation error = %q; want %q", err.Error(), want)
+	}
+	if !strings.Contains(err.Error(), "to be a group-role-gated endpoint, not /version") {
 		t.Fatalf("validation error = %q; want /version-specific guidance", err.Error())
 	}
 	if !strings.Contains(err.Error(), accBehaviorMarkerEnv) {
@@ -465,7 +469,7 @@ func validateAccBehavioralCanaryEnv(env accEnv) error {
 	missing := []string{}
 	switch env.BehaviorPath {
 	case accDefaultBehavior:
-		missing = append(missing, accBehaviorPathEnv+" must be a group-role-gated endpoint, not /version")
+		missing = append(missing, accBehaviorPathEnv+" to be a group-role-gated endpoint, not /version")
 	case "":
 		missing = append(missing, accBehaviorPathEnv)
 	}
