@@ -131,7 +131,19 @@ test:
 
 .PHONY: testacc
 testacc:
-	VAULT_ACC=1 go test -v ./... -run TestAcc
+	@missing=""; \
+	[ -n "$$PVE_ADDR" ] || missing="$$missing PVE_ADDR"; \
+	[ -n "$$PVE_TOKEN_ID" ] || missing="$$missing PVE_TOKEN_ID"; \
+	[ -n "$$PVE_TOKEN_SECRET" ] || missing="$$missing PVE_TOKEN_SECRET"; \
+	[ -n "$$PVE_TEST_GROUP" ] || missing="$$missing PVE_TEST_GROUP"; \
+	[ -n "$$PVE_BEHAVIORAL_PATH" ] || missing="$$missing PVE_BEHAVIORAL_PATH"; \
+	[ -n "$$PVE_BEHAVIORAL_MARKER" ] || missing="$$missing PVE_BEHAVIORAL_MARKER"; \
+	if [ -n "$$missing" ]; then \
+		echo "missing required acceptance environment variables:$$missing" >&2; \
+		echo "set these before running make testacc; optional variables are not required" >&2; \
+		exit 1; \
+	fi
+	VAULT_ACC=1 go test -count=1 -v ./... -run TestAcc
 
 .PHONY: fmt
 fmt:
@@ -150,7 +162,7 @@ clean:
 	rm -rf $(PLUGIN_DIR) bin/ dist/
 ```
 
-Targets: `build` → compile to `vault/plugins/`; `test` → unit tests; `testacc` → acceptance tests (gated by `VAULT_ACC=1`); `fmt` → `gofmt`; `lint` → `golangci-lint run`; `tidy` → `go mod tidy`.
+Targets: `build` → compile to `vault/plugins/`; `test` → unit tests; `testacc` → operator-run live acceptance tests with required env preflight (`VAULT_ACC=1`, verbose, non-cached `TestAcc` run); `fmt` → `gofmt`; `lint` → `golangci-lint run`; `tidy` → `go mod tidy`.
 
 ### `.golangci.yml`
 
@@ -555,7 +567,7 @@ Unit test files (one per source file: `path_config_test.go`, `path_roles_test.go
 
 ### `acceptance_test.go`
 
-Acceptance tests gated by `VAULT_ACC=1`. Environment variables: `PVE_ADDR`, `PVE_TOKEN_ID`, `PVE_TOKEN_SECRET`, `PVE_TEST_GROUP` (operator must pre-create this group on the test PVE cluster).
+Acceptance tests gated by `VAULT_ACC=1` and run only by an operator via `make testacc`. Required environment variables: `PVE_ADDR`, `PVE_TOKEN_ID`, `PVE_TOKEN_SECRET`, `PVE_TEST_GROUP` (operator must pre-create this group on the test PVE cluster), `PVE_BEHAVIORAL_PATH`, and `PVE_BEHAVIORAL_MARKER`.
 
 **Key tests** (see Testing Plan below).
 
@@ -934,12 +946,14 @@ recorded a `DeleteUser` for the just-created userid. No live PVE needed.
 - `PVE_TOKEN_ID` — admin token ID (e.g., `vault-admin@pve!root-token`)
 - `PVE_TOKEN_SECRET` — admin token secret
 - `PVE_TEST_GROUP` — operator-pre-created PVE group bound to a test role (operator must create this out-of-band before running tests)
+- `PVE_BEHAVIORAL_PATH` — group-role-gated endpoint for the authorization canary
+- `PVE_BEHAVIORAL_MARKER` — response marker required from the behavioral endpoint
 
-**Gating**: Tests prefixed `TestAcc*` run ONLY when `VAULT_ACC=1` (HashiCorp convention).
+**Gating**: Tests prefixed `TestAcc*` run ONLY when `VAULT_ACC=1` (HashiCorp convention). The canonical operator command is `make testacc`, which preflights only the required variables above and then runs `VAULT_ACC=1 go test -count=1 -v ./... -run TestAcc`.
 
 **Harness (concrete)**:
 - **Vault instantiation**: acceptance tests DO NOT spin up a real Vault server. They construct the backend directly with `logical.TestBackendConfig()` + in-memory `logical.Storage`, call `Factory(ctx, config)`, and drive it through `logical.Request`s (same pattern as unit tests). The difference from unit tests is that the *pveapi.Client is the REAL client pointed at a live PVE cluster (not the mock). A full `vault server -dev` end-to-end run is the manual smoke test (Build & Run section), not an automated `TestAcc`.
-- **PVE cluster source**: OPERATOR-PROVIDED and MANUAL. There is no official Proxmox VE container image suitable for CI, so the target 9.2.10 cluster is stood up out-of-band by the operator (or a nightly self-hosted runner) and supplied via `PVE_ADDR`/`PVE_TOKEN_ID`/`PVE_TOKEN_SECRET`/`PVE_TEST_GROUP`. Local tests skip (not fail) when `VAULT_ACC` is unset OR the env vars are absent. The GitHub Actions acceptance workflow performs a preflight and fails when required live secrets are absent because it is explicitly a live acceptance job.
+- **PVE cluster source**: OPERATOR-PROVIDED and MANUAL. There is no official Proxmox VE container image suitable for CI, so the target 9.2.10 cluster is stood up out-of-band by the operator and supplied via `PVE_ADDR`/`PVE_TOKEN_ID`/`PVE_TOKEN_SECRET`/`PVE_TEST_GROUP` plus the behavioral canary variables. Local tests skip (not fail) when `VAULT_ACC` is unset OR the env vars are absent. `make testacc` intentionally fails during preflight when required live variables are absent so operators do not accidentally run a degraded live suite.
 
 **Test scenarios**:
 
@@ -1310,10 +1324,11 @@ and asserts the parsed `PermissionTree` matches the expected structure. No live 
 
 ### Phase 5 — Full Unit Suite + Acceptance Tests
 
-**Status**: ✅ LOCAL VERIFICATION PASSED (2026-08-20) — unit tests and gated acceptance
-test code are present. Phase 5 local checks (`go build ./...`, `go test ./...`, and
-`make lint`) pass. Live `VAULT_ACC=1 make testacc` remains environment-dependent and is
-not implied by the normal unit test run.
+**Status**: ✅ LOCAL VERIFICATION PASSED (2026-08-20) — unit tests and
+operator-run acceptance test code are present. Phase 5 local checks (`go build
+./...`, `go test ./...`, and `make lint`) pass. Live `make testacc` remains
+incomplete until an operator runs it against a disposable/dev PVE cluster; it is
+not run by CI and is not implied by the normal unit test run.
 
 **Tasks**:
 - [x] Ensure Phase 5 local verification passes: `go build ./...`, `make test`, and `make lint` green
@@ -1326,7 +1341,7 @@ not implied by the normal unit test run.
   - [x] `TestAccDeleteConfigGuard` (DELETE without force=true refused; with force=true succeeds)
 - [x] Document required test env vars in `acceptance_test.go` comment header (PVE_ADDR, PVE_TOKEN_ID, PVE_TOKEN_SECRET, PVE_TEST_GROUP, plus behavioral marker requirements for the canary)
 - [ ] Run acceptance tests against an operator-provided disposable/dev PVE 9.2.10 cluster: `make testacc` green
-- [x] Add gated GitHub Actions live acceptance workflow (`.github/workflows/acceptance.yml`) with required-secret preflight; normal PR CI remains unchanged
+- [x] Keep live acceptance operator-run only; no GitHub Actions acceptance workflow is present, and normal PR CI remains unchanged
 
 **Acceptance Criteria**:
 - `make test` passes (all unit tests green)
@@ -1343,14 +1358,14 @@ not implied by the normal unit test run.
 - [ ] Build plugin: `make build` (output to `vault/plugins/`) — `main.go` already exists from Phase 1
 - [ ] Manual smoke test (dev Vault server with `-dev-plugin-dir` → no manual register, enable, write config, write role, read creds, use token, renew, revoke, delete config with `force=true`)
 - [ ] Update `README.md` with: overview, build/install instructions, configuration example, role example, usage example, development/testing notes
-- [x] CI config (GitHub Actions or equivalent): nightly/manual job runs `make testacc`/`go test -run TestAcc` with PVE secrets from CI env; normal PR CI remains unchanged unless/ until a separate PR workflow is added
+- [x] CI config (GitHub Actions or equivalent): normal PR CI runs build, unit tests, and lint only; live acceptance is operator-run only and never run by CI
 - [ ] Verify `AGENTS.md` and `docs/ARCHITECTURE.md` are accurate and up-to-date
 
 **Acceptance Criteria**:
 - Clean build (`make build` succeeds)
 - Plugin registers, enables, and smoke test passes (issue→use→renew→revoke)
 - CI runs on PR: fmt/lint/test green
-- CI nightly/manual job: testacc green when live PVE secrets are configured (workflow exists; live execution remains environment-dependent)
+- Live acceptance remains incomplete until an operator runs `make testacc` against a disposable/dev PVE cluster and records a green result
 - `README.md` has build, config, and usage examples
 
 **Architecture References**: `docs/ARCHITECTURE.md` Root Rotation section (manual operation), Build & Run commands above.

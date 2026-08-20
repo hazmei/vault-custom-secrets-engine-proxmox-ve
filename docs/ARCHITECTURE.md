@@ -677,6 +677,9 @@ Rollback section of `docs/IMPLEMENTATION_PLAN.md` for full detail.
 ### Acceptance Tests
 - **Environment gating** — tests prefixed `TestAcc*` run only when
   `VAULT_ACC=1` is set (HashiCorp convention)
+- **Operator-run only** — live acceptance is never run by CI. Operators run
+  `make testacc`, which preflights the required live PVE variables before
+  executing the verbose, non-cached `TestAcc` suite.
 - **Test environment** — run against an operator-provided disposable/dev
   Proxmox VE 9.2.10 instance with a test admin token; the suite mutates the
   cluster by creating, expiring, renewing, and deleting temporary users
@@ -738,9 +741,9 @@ Rollback section of `docs/IMPLEMENTATION_PLAN.md` for full detail.
   behavior section)
 - **Cluster failure modes** — test behavior under Proxmox quorum loss and
   ACL lock contention (should surface as retryable errors)
-- **CI integration** — acceptance tests require live Proxmox credentials,
-  so they run in a gated CI job (e.g., manual trigger or nightly), not on
-  every PR
+- **Status** — live acceptance remains incomplete until an operator actually
+  runs `make testacc` against a disposable/dev PVE cluster and records the
+  result.
 
 ## Security Considerations
 

@@ -35,8 +35,8 @@ jobs:
         with:
           go-version-file: go.mod
       - run: go test ./...
-        # Unit tests only. Acceptance tests (TestAcc*) are gated by VAULT_ACC=1
-        # and require a live/containerized PVE — not run here.
+        # Unit tests only. Acceptance tests (TestAcc*) are operator-run only
+        # against a disposable/dev PVE cluster via make testacc — never run here.
 
   lint:
     runs-on: ubuntu-latest

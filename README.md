@@ -10,7 +10,7 @@ This secrets engine implements Vault's dynamic secrets pattern for Proxmox VE. E
 
 ## Project Status
 
-🚧 **Active implementation** — Core plugin code, unit tests, and gated live acceptance tests are present. The current focus is hardening dynamic credential issuance, renewal/revocation, WAL rollback safety, and Proxmox VE 9.2.10 acceptance coverage before a v1 release.
+🚧 **Active implementation** — Core plugin code, unit tests, and operator-run live acceptance tests are present. The current focus is hardening dynamic credential issuance, renewal/revocation, WAL rollback safety, and Proxmox VE 9.2.10 acceptance coverage before a v1 release.
 
 ## How It Works
 
@@ -183,7 +183,7 @@ Key points:
 - Failure coverage: idempotent revocation after an issued PVE user is deleted out-of-band, WAL rollback, delete-config guard, configurable concurrent issuance, and optional insufficient-privilege config validation in `TestAccInsufficientPrivileges`.
 - Unit tests cover deterministic mid-provisioning network/error injection and WAL-delete failure paths. The live acceptance suite does not inject network failures, quorum loss, or ACL lock contention.
 - Run against an operator-provided disposable/dev Proxmox VE 9.2.10 cluster with a test admin token. These tests mutate the cluster by creating, renewing, expiring, and deleting temporary `vaultacc-*@pve` users.
-- CI integration: `.github/workflows/acceptance.yml` is gated to manual dispatch and nightly schedule due to live credentials requirement. Normal PR CI is unchanged.
+- Live acceptance tests are operator-run only and are never run by CI. Normal PR CI runs build, unit tests, and lint only.
 
 #### Acceptance Test Prerequisites
 
@@ -201,6 +201,8 @@ export PVE_ADDR="https://pve.example.com:8006"
 export PVE_TOKEN_ID="vault-admin@pve!tokenid"
 export PVE_TOKEN_SECRET="..."
 export PVE_TEST_GROUP="vault-test-grp"
+export PVE_BEHAVIORAL_PATH="/cluster/resources?type=vm"
+export PVE_BEHAVIORAL_MARKER='"type":"qemu"'
 ```
 
 `PVE_TEST_GROUP` must already exist. The admin token must pass the engine's
@@ -209,9 +211,9 @@ propagation to `/access/groups/<PVE_TEST_GROUP>`, `Sys.Audit` at
 `/access/groups`, and `Realm.AllocateUser` at `/access/realm/pve`.
 
 The lifecycle test always uses `GET /version` as an authentication smoke check
-only. To run the authoritative authorization canary, configure an endpoint
-protected by the test group's role and a response marker that must appear in the
-body; bare HTTP 200 is not treated as proof:
+only. The canonical `make testacc` preflight requires an endpoint protected by
+the test group's role and a response marker that must appear in the body for the
+authoritative authorization canary; bare HTTP 200 is not treated as proof:
 
 ```bash
 export PVE_BEHAVIORAL_PATH="/cluster/resources?type=vm"
@@ -265,9 +267,12 @@ Run with:
 make testacc
 ```
 
-The repository's live acceptance workflow requires the same required variables
-as GitHub Actions secrets, plus `PVE_BEHAVIORAL_PATH` and
-`PVE_BEHAVIORAL_MARKER` so the canary cannot silently degrade to `/version`.
+`make testacc` is the canonical operator command. It preflights only the
+required variables (`PVE_ADDR`, `PVE_TOKEN_ID`, `PVE_TOKEN_SECRET`,
+`PVE_TEST_GROUP`, `PVE_BEHAVIORAL_PATH`, and `PVE_BEHAVIORAL_MARKER`) before
+running the verbose, non-cached `TestAcc` suite with `VAULT_ACC=1`; optional
+variables remain optional. Do not point this at production unless temporary
+test users can be safely created, renewed, expired, and deleted.
 
 ## License
 
