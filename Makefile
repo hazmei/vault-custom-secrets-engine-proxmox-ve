@@ -30,7 +30,7 @@ testacc:
 	[ -n "$$PVE_BEHAVIORAL_PATH" ] && [ "$$PVE_BEHAVIORAL_PATH" != "/version" ] || missing="$$missing PVE_BEHAVIORAL_PATH"; \
 	[ -n "$$PVE_BEHAVIORAL_MARKER" ] || missing="$$missing PVE_BEHAVIORAL_MARKER"; \
 	if [ -n "$$missing" ]; then \
-		echo "missing required acceptance environment variables:$$missing" >&2; \
+		echo "missing or invalid required acceptance environment variables:$$missing" >&2; \
 		echo "set these before running make testacc; optional variables are not required" >&2; \
 		exit 1; \
 	fi
