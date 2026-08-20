@@ -677,37 +677,58 @@ Rollback section of `docs/IMPLEMENTATION_PLAN.md` for full detail.
 ### Acceptance Tests
 - **Environment gating** — tests prefixed `TestAcc*` run only when
   `VAULT_ACC=1` is set (HashiCorp convention)
-- **Test environment** — run against a containerized or dev Proxmox VE
-  instance with a test admin token
+- **Test environment** — run against an operator-provided disposable/dev
+  Proxmox VE 9.2.10 instance with a test admin token; the suite mutates the
+  cluster by creating, expiring, renewing, and deleting temporary users
 - **Full lifecycle coverage** — pre-create a PVE group bound to a test
-  role; create credential → use the issued token to verify it can perform
-  its scoped actions and **cannot** exceed them. **The primary privilege oracle is BEHAVIORAL**: call a group-role-gated endpoint with the issued token (e.g. `GET /cluster/resources?type=vm`, expect 200) — this is the only confounder-free proof (Probe GROUPADD / 6-fix-E). The `GET /access/permissions?userid=<userid>&path=/` server-side dump is OPTIONAL and requires a TEMPORARY cluster-wide `Sys.Audit` grant on the admin token; under the least-privilege admin it returns `403 (/access, Sys.Audit)` (Probe 6-fix-C/D, Probe CLEAN 5-B). If used, tear the grant down with the BARE `--delete` flag (`pveum acl modify / --user X --role Y --delete`, NOT `--delete 1`). The token's BARE `/access/permissions` reflects only the authenticating principal and is NOT evidence of the synthetic user's group-derived privileges (Probe 6). → renew the lease → revoke and confirm the user/token are deleted by asserting the `"no such user"` body (HTTP 500), not a 404.
+  role; create credential → use the issued token for a `/version` authentication
+  smoke check → renew the lease → revoke and confirm the user/token are deleted
+  by asserting the `"no such user"` body (HTTP 500), not a 404.
+- **Authoritative behavioral authorization coverage** lives in the authorization
+  canary, not the lifecycle smoke test. It must call a group-role-gated endpoint
+  with the issued token (e.g. `GET /cluster/resources?type=vm`) and require a
+  configured response marker (`PVE_BEHAVIORAL_MARKER`) in the body. A bare HTTP
+  200 is not proof of group-derived privilege. The `GET
+  /access/permissions?userid=<userid>&path=/` server-side dump is OPTIONAL and
+  requires a TEMPORARY cluster-wide `Sys.Audit` grant on the admin token; under
+  the least-privilege admin it returns `403 (/access, Sys.Audit)` (Probe
+  6-fix-C/D, Probe CLEAN 5-B). If used, tear the grant down with the BARE
+  `--delete` flag (`pveum acl modify / --user X --role Y --delete`, NOT
+  `--delete 1`). The token's BARE `/access/permissions` reflects only the
+  authenticating principal and is NOT evidence of the synthetic user's
+  group-derived privileges (Probe 6).
 - **Authorization contract canary** — assert the confirmed PVE 9.2.10
-  behavior the design depends on: (a) direct `PUT /access/acl` of an
-  unheld role by the admin token returns 403; (b) group-membership add
-  succeeds and confers the group's role(s); (c) a token whose owning
+  behavior the design depends on: (a) group-membership add succeeds and confers
+  the group's role(s), proven by the required behavioral marker check; (b) a token whose owning
   USER has an `expire` in the past is rejected at authentication (401);
-  (d) after a renewal (`PUT /access/users/{userid}` re-sending `expire`+`groups`+`enable`+`append=1`),
+  (c) after a renewal (`PUT /access/users/{userid}` re-sending `expire`+`groups`+`enable`+`append=1`),
   the issued token still holds the group's roles (read-back confirms `groups` preserved).
   PVE PUT is full-replace (Probe 7): an expire-only PUT WIPES groups; the canary guards
   against a regression to expire-only renewal. Add a control: expire-only PUT on a throwaway
-  user leaves `groups:[]`. These four assertions guard against
+  user leaves `groups:[]`. Optional negative/ACL probes assert direct `PUT /access/acl` of an
+  unheld role by the admin token returns 403 and that a configured forbidden endpoint remains
+  forbidden. These assertions guard against
   a future PVE version silently changing the authorization or expiry
   enforcement model the engine relies on. The user-level `expire`
   backstop behavior and the full-replace wipe behavior are confirmed on PVE 9.2.10;
-  canary (d) serves as a regression guard in the acceptance suite (the decisive live evidence
+  the renewal canary serves as a regression guard in the acceptance suite (the decisive live evidence
   for the preserve path is Probe RENEWAL-PRESERVE, 17 Aug 2026 — groups `["vault-test-grp"]`
   read back, expire advanced 1786986804→1786990429). The control sub-assertion (expire-only PUT
   leaves `groups:[]`) guards against a future regression to expire-only renewal.
-- **Failure injection** — simulate mid-provisioning failures (network
-  error after user creation but before/during token creation) and
-  verify best-effort cleanup; inject a `framework.DeleteWAL` failure at
-  step 4 and assert (a) issuance returns an error (no Secret), and (b) the
-  just-created PVE user is cleaned up (best-effort delete ran); test
-  idempotent revocation (PVE body `"no such user"` (HTTP 500) treated as success); test root token
-  lacking required privileges
+- **Failure and idempotency coverage** — live acceptance tests issue a
+  credential, delete the PVE user out-of-band, then revoke the Vault secret and
+  require success (PVE body `"no such user"` (HTTP 500) treated as success).
+  Deterministic mid-provisioning network failure and `framework.DeleteWAL`
+  failure injection remain unit-test scope because they require mocked storage or
+  client seams rather than a live PVE cluster. The optional insufficient-privilege
+  live canary writes config with a limited token and asserts the privilege error
+  is surfaced clearly.
 - **Concurrent issuance** — test concurrent credential issuance to verify
-  suffix-collision retry handling works correctly under load
+  suffix-collision retry handling works correctly under load. The default is 10
+  workers, all of which must succeed; lower `PVE_CONCURRENT_WORKERS` only when a
+  disposable/dev cluster cannot safely sustain that create/delete load. Every
+  issued credential is revoked and absence-verified, with WAL rollback cleanup
+  attempted on all test paths.
 - **WAL rollback** — simulate process death mid-provision (e.g., after user
   creation but before lease write) and verify WAL rollback sweeps the
   orphaned user

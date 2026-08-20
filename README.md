@@ -178,12 +178,12 @@ Key points:
 
 ### Acceptance Tests
 - Environment gating: `VAULT_ACC=1` (HashiCorp convention)
-- Full lifecycle: pre-create a PVE group bound to a test role → issue credential → run a configured positive token endpoint → renew lease → revoke and confirm cleanup.
-- Authorization contract canary: exercises only safely configured live assertions. Optional subtests cover direct `PUT /access/acl` anti-privilege-escalation (configured unheld role must return 403), positive behavioral authorization with a required response marker, and negative authorization with expected 403. Unconfigured live-only subtests skip with explicit prerequisites rather than assuming full-admin or cluster-specific endpoints.
-- Failure coverage: idempotent revocation, WAL rollback, delete-config guard, configurable concurrent issuance, and optional insufficient-privilege config validation in `TestAccInsufficientPrivileges`.
-- Unit tests cover deterministic mid-provisioning and WAL failure paths. The live acceptance suite does not currently inject network failures, quorum loss, or ACL lock contention.
-- Run against containerized or dev Proxmox VE instance with test admin token
-- CI integration: gated job (manual trigger or nightly) due to live credentials requirement
+- Full lifecycle: pre-create a safe PVE group bound to a test role → issue credential → run a `/version` authentication smoke check with the issued token → renew lease → revoke and confirm cleanup.
+- Authorization contract canary: requires `PVE_BEHAVIORAL_PATH` and `PVE_BEHAVIORAL_MARKER`; the issued token must receive HTTP 200 from that group-role-gated endpoint and the body must contain the marker. Optional subtests cover direct `PUT /access/acl` anti-privilege-escalation (configured unheld role must return 403) and negative authorization with expected 403. Unconfigured optional subtests skip with explicit prerequisites rather than assuming full-admin or cluster-specific endpoints.
+- Failure coverage: idempotent revocation after an issued PVE user is deleted out-of-band, WAL rollback, delete-config guard, configurable concurrent issuance, and optional insufficient-privilege config validation in `TestAccInsufficientPrivileges`.
+- Unit tests cover deterministic mid-provisioning network/error injection and WAL-delete failure paths. The live acceptance suite does not inject network failures, quorum loss, or ACL lock contention.
+- Run against an operator-provided disposable/dev Proxmox VE 9.2.10 cluster with a test admin token. These tests mutate the cluster by creating, renewing, expiring, and deleting temporary `vaultacc-*@pve` users.
+- CI integration: `.github/workflows/acceptance.yml` is gated to manual dispatch and nightly schedule due to live credentials requirement. Normal PR CI is unchanged.
 
 #### Acceptance Test Prerequisites
 
@@ -208,10 +208,10 @@ normal config and role validation: `User.Modify` at `/access/groups` with
 propagation to `/access/groups/<PVE_TEST_GROUP>`, `Sys.Audit` at
 `/access/groups`, and `Realm.AllocateUser` at `/access/realm/pve`.
 
-By default the positive token check uses `GET /version` as authentication smoke
-only. To prove group-derived privilege, configure an endpoint protected by the
-test group's role and a response marker that must appear in the body; bare HTTP
-200 is not treated as proof:
+The lifecycle test always uses `GET /version` as an authentication smoke check
+only. To run the authoritative authorization canary, configure an endpoint
+protected by the test group's role and a response marker that must appear in the
+body; bare HTTP 200 is not treated as proof:
 
 ```bash
 export PVE_BEHAVIORAL_PATH="/cluster/resources?type=vm"
@@ -236,10 +236,12 @@ export PVE_ACL_CANARY_UNHELD_ROLE="PVEVMAdmin"
 export PVE_ACL_CANARY_TARGET_USER="some-test-user@pve"
 ```
 
-Optional concurrent issuance load (validated range 1–10; default 5):
+Optional concurrent issuance load (validated range 1–10; default 10). Lower this
+only for a disposable/dev cluster that cannot safely sustain the default user
+create/delete load:
 
 ```bash
-export PVE_CONCURRENT_WORKERS=5
+export PVE_CONCURRENT_WORKERS=10
 ```
 
 Optional TLS settings:
@@ -262,6 +264,10 @@ Run with:
 ```bash
 make testacc
 ```
+
+The repository's live acceptance workflow requires the same required variables
+as GitHub Actions secrets, plus `PVE_BEHAVIORAL_PATH` and
+`PVE_BEHAVIORAL_MARKER` so the canary cannot silently degrade to `/version`.
 
 ## License
 
