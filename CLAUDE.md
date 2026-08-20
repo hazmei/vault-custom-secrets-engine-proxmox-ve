@@ -12,7 +12,7 @@ No build/test/lint config exists yet — the repo is docs-only. Once `go.mod` ex
 go build ./...
 go test ./...                              # unit tests (mocked Proxmox client)
 go test ./... -run TestXxx -v              # single test
-VAULT_ACC=1 go test ./... -run TestAcc -v  # acceptance tests (needs live/dev Proxmox)
+make testacc                              # operator-run acceptance tests (needs disposable/dev Proxmox)
 golangci-lint run
 ```
 

@@ -1,3 +1,14 @@
+// Package proxmox contains the Vault Proxmox VE secrets engine implementation.
+//
+// Acceptance tests in this file are gated by VAULT_ACC=1 and mutate a live
+// operator-provided Proxmox VE 9.2.10 cluster. Required environment variables
+// are PVE_ADDR, PVE_TOKEN_ID, PVE_TOKEN_SECRET, and PVE_TEST_GROUP. The test
+// group must be pre-created and safely bound to a test-only role/path before
+// running the suite. The authorization canary additionally requires
+// PVE_BEHAVIORAL_PATH and PVE_BEHAVIORAL_MARKER so group-derived privilege is
+// proven by response content, not by a bare 200 from /version. Operators must
+// not edit vaultacc-* user comments while acceptance tests are running because
+// WAL cleanup ownership relies on the vault-wal: comment marker.
 package proxmox
 
 import (
@@ -22,16 +33,17 @@ import (
 )
 
 const (
-	accRoleName         = "acc"
-	accUserPrefix       = "vaultacc"
-	accDefaultTTL       = 300
-	accDefaultMaxTTL    = 900
-	accBehaviorPathEnv  = "PVE_BEHAVIORAL_PATH"
-	accDefaultBehavior  = "/version"
-	accTestTimeout      = 2 * time.Minute
-	accPastExpireBuffer = 60
-	accDefaultWorkers   = 5
-	accMaxWorkers       = 10
+	accRoleName          = "acc"
+	accUserPrefix        = "vaultacc"
+	accDefaultTTL        = 300
+	accDefaultMaxTTL     = 900
+	accBehaviorPathEnv   = "PVE_BEHAVIORAL_PATH"
+	accBehaviorMarkerEnv = "PVE_BEHAVIORAL_MARKER"
+	accDefaultBehavior   = "/version"
+	accTestTimeout       = 2 * time.Minute
+	accPastExpireBuffer  = 60
+	accDefaultWorkers    = 10
+	accMaxWorkers        = 10
 )
 
 type accEnv struct {
@@ -72,11 +84,16 @@ func TestAccLifecycle(t *testing.T) {
 
 	writeAccConfig(t, ctx, h)
 	writeAccRole(t, ctx, h)
+	t.Cleanup(func() {
+		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), accTestTimeout)
+		defer cleanupCancel()
+		rollbackRemainingAccWAL(t, cleanupCtx, h)
+	})
 	issued := issueAccCreds(t, ctx, h)
 
 	registerAccUserCleanup(t, h.Client, issued.UserID)
 
-	assertAccPositiveBehavior(t, ctx, h.Env, issued.TokenID, issued.TokenSecret)
+	assertAccVersionSmoke(t, ctx, h.Env, issued.TokenID, issued.TokenSecret)
 
 	renewed := renewAccSecret(t, ctx, h, issued.Secret, 120*time.Second)
 	if renewed.Secret == nil || renewed.Secret.TTL <= 0 {
@@ -91,6 +108,7 @@ func TestAccLifecycle(t *testing.T) {
 
 func TestAccAuthorizationContractCanary(t *testing.T) {
 	h := newAccHarness(t)
+	requireAccBehavioralCanaryEnv(t, h.Env)
 	ctx, cancel := context.WithTimeout(context.Background(), accTestTimeout)
 	defer cancel()
 
@@ -145,16 +163,18 @@ func TestAccAuthorizationContractCanary(t *testing.T) {
 	}
 }
 
-func TestAccFailureInjection(t *testing.T) {
+func TestAccRevocationIdempotencyAfterOutOfBandDelete(t *testing.T) {
 	h := newAccHarness(t)
 	ctx, cancel := context.WithTimeout(context.Background(), accTestTimeout)
 	defer cancel()
 
 	writeAccConfig(t, ctx, h)
-	req := makeAccRevokeRequest(h.Storage, accUserID(t, "missing"))
-	if _, err := h.Backend.secretTokenRevoke(ctx, req, nil); err != nil {
-		t.Fatalf("missing-user revoke should be idempotent: %v", err)
-	}
+	writeAccRole(t, ctx, h)
+	issued := issueAccCreds(t, ctx, h)
+	registerAccUserCleanup(t, h.Client, issued.UserID)
+	deleteAccUser(t, ctx, h.Client, issued.UserID)
+	assertAccUserMissing(t, ctx, h.Client, issued.UserID)
+	revokeAccSecret(t, ctx, h, issued.Secret)
 }
 
 func TestAccInsufficientPrivileges(t *testing.T) {
@@ -257,6 +277,11 @@ func TestAccConcurrentIssuance(t *testing.T) {
 
 	writeAccConfig(t, ctx, h)
 	writeAccRole(t, ctx, h)
+	t.Cleanup(func() {
+		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), accTestTimeout)
+		defer cleanupCancel()
+		rollbackRemainingAccWAL(t, cleanupCtx, h)
+	})
 
 	workers := accConcurrentWorkers(t)
 	var wg sync.WaitGroup
@@ -298,11 +323,11 @@ func TestAccConcurrentIssuance(t *testing.T) {
 	for err := range errs {
 		errMsgs = append(errMsgs, err.Error())
 	}
-	if len(issued) == 0 {
-		t.Fatalf("all concurrent issuances failed: %s", strings.Join(errMsgs, "; "))
-	}
 	if len(errMsgs) > 0 {
-		t.Logf("%d/%d concurrent issuances failed; this can be environment-sensitive PVE cluster contention/quorum behavior: %s", len(errMsgs), workers, strings.Join(errMsgs, "; "))
+		t.Fatalf("%d/%d concurrent issuances failed; lower PVE_CONCURRENT_WORKERS only if the test cluster cannot safely sustain default load: %s", len(errMsgs), workers, strings.Join(errMsgs, "; "))
+	}
+	if len(issued) != workers {
+		t.Fatalf("issued %d credentials; want %d", len(issued), workers)
 	}
 }
 
@@ -375,10 +400,7 @@ func requireAccEnv(t *testing.T) accEnv {
 		t.Fatalf("PVE_TLS_SKIP_VERIFY must parse as bool: %v", err)
 	}
 	behaviorPath := envDefault(accBehaviorPathEnv, accDefaultBehavior)
-	behaviorMarker := os.Getenv("PVE_BEHAVIORAL_MARKER")
-	if err := validateAccBehaviorEnv(os.Getenv(accBehaviorPathEnv), behaviorPath, behaviorMarker); err != nil {
-		t.Fatal(err)
-	}
+	behaviorMarker := os.Getenv(accBehaviorMarkerEnv)
 	return accEnv{
 		Address:                 os.Getenv("PVE_ADDR"),
 		TokenID:                 os.Getenv("PVE_TOKEN_ID"),
@@ -400,24 +422,62 @@ func requireAccEnv(t *testing.T) accEnv {
 }
 
 func TestValidateAccBehaviorEnvRequiresMarkerForCustomPath(t *testing.T) {
-	err := validateAccBehaviorEnv("/nodes", "/nodes", "")
+	err := validateAccBehavioralCanaryEnv(accEnv{BehaviorPath: "/nodes"})
 	if err == nil {
-		t.Fatal("expected custom PVE_BEHAVIORAL_PATH without marker to fail")
+		t.Fatal("expected PVE_BEHAVIORAL_PATH without marker to fail")
 	}
-	if !strings.Contains(err.Error(), "PVE_BEHAVIORAL_MARKER") || !strings.Contains(err.Error(), "TestAccLifecycle") {
-		t.Fatalf("validation error = %q; want marker and lifecycle context", err.Error())
-	}
-}
-
-func TestValidateAccBehaviorEnvAllowsDefaultSmokeWithoutMarker(t *testing.T) {
-	if err := validateAccBehaviorEnv("", accDefaultBehavior, ""); err != nil {
-		t.Fatalf("default behavior without marker should remain an auth smoke test: %v", err)
+	if !strings.Contains(err.Error(), accBehaviorMarkerEnv) || !strings.Contains(err.Error(), "TestAccAuthorizationContractCanary") {
+		t.Fatalf("validation error = %q; want marker and canary context", err.Error())
 	}
 }
 
-func validateAccBehaviorEnv(rawPath, behaviorPath, behaviorMarker string) error {
-	if rawPath != "" && behaviorPath != accDefaultBehavior && behaviorMarker == "" {
-		return fmt.Errorf("%s=%q requires PVE_BEHAVIORAL_MARKER so TestAccLifecycle cannot skip after credential issuance", accBehaviorPathEnv, behaviorPath)
+func TestValidateAccBehaviorEnvRequiresPathForMarker(t *testing.T) {
+	err := validateAccBehavioralCanaryEnv(accEnv{BehaviorMarker: "marker"})
+	if err == nil {
+		t.Fatal("expected PVE_BEHAVIORAL_MARKER without path to fail")
+	}
+	if !strings.Contains(err.Error(), accBehaviorPathEnv) {
+		t.Fatalf("validation error = %q; want behavioral path", err.Error())
+	}
+}
+
+func TestValidateAccBehaviorEnvRejectsVersionSentinelWithSpecificMessage(t *testing.T) {
+	err := validateAccBehavioralCanaryEnv(accEnv{BehaviorPath: accDefaultBehavior})
+	if err == nil {
+		t.Fatal("expected /version behavioral path sentinel to fail")
+	}
+	want := "TestAccAuthorizationContractCanary requires PVE_BEHAVIORAL_PATH to be a group-role-gated endpoint, not /version and PVE_BEHAVIORAL_MARKER so group-derived privilege is proven by a behavioral endpoint response marker"
+	if err.Error() != want {
+		t.Fatalf("validation error = %q; want %q", err.Error(), want)
+	}
+	if !strings.Contains(err.Error(), "to be a group-role-gated endpoint, not /version") {
+		t.Fatalf("validation error = %q; want /version-specific guidance", err.Error())
+	}
+	if !strings.Contains(err.Error(), accBehaviorMarkerEnv) {
+		t.Fatalf("validation error = %q; want missing marker reported with /version path", err.Error())
+	}
+}
+
+func requireAccBehavioralCanaryEnv(t *testing.T, env accEnv) {
+	t.Helper()
+	if err := validateAccBehavioralCanaryEnv(env); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func validateAccBehavioralCanaryEnv(env accEnv) error {
+	missing := []string{}
+	switch env.BehaviorPath {
+	case accDefaultBehavior:
+		missing = append(missing, accBehaviorPathEnv+" to be a group-role-gated endpoint, not /version")
+	case "":
+		missing = append(missing, accBehaviorPathEnv)
+	}
+	if env.BehaviorMarker == "" {
+		missing = append(missing, accBehaviorMarkerEnv)
+	}
+	if len(missing) > 0 {
+		return fmt.Errorf("TestAccAuthorizationContractCanary requires %s so group-derived privilege is proven by a behavioral endpoint response marker", strings.Join(missing, " and "))
 	}
 	return nil
 }
@@ -576,13 +636,6 @@ func revokeAccSecret(t *testing.T, ctx context.Context, h accHarness, secret *lo
 	}
 }
 
-func makeAccRevokeRequest(storage logical.Storage, userid string) *logical.Request {
-	secret := &logical.Secret{InternalData: map[string]interface{}{"pve_userid": userid, "group": "unused", "effective_max_ttl": int64(time.Hour)}}
-	req := logical.RevokeRequest("creds/"+accRoleName, secret, nil)
-	req.Storage = storage
-	return req
-}
-
 func createAccUser(t *testing.T, ctx context.Context, client pveapi.Client, userid, group string, expire int64, comment string) {
 	t.Helper()
 	if err := client.CreateUser(ctx, pveapi.CreateUserRequest{UserID: userid, Groups: group, Expire: expire, Enable: true, Comment: comment}); err != nil {
@@ -697,15 +750,16 @@ func assertAccPositiveBehavior(t *testing.T, ctx context.Context, env accEnv, to
 	t.Helper()
 	_, body := assertAccTokenStatus(t, ctx, env, tokenID, tokenSecret, env.BehaviorMethod, env.BehaviorPath, http.StatusOK)
 	if env.BehaviorMarker == "" {
-		if env.BehaviorPath == accDefaultBehavior {
-			t.Logf("positive behavior marker not configured; %s %s is auth smoke only, not proof of group-derived privilege", env.BehaviorMethod, env.BehaviorPath)
-			return
-		}
-		t.Fatalf("unreachable acceptance behavior state: %s=%q is custom but PVE_BEHAVIORAL_MARKER is empty; requireAccEnv should have rejected custom behavior paths without a marker", accBehaviorPathEnv, env.BehaviorPath)
+		t.Fatalf("%s is required for TestAccAuthorizationContractCanary", accBehaviorMarkerEnv)
 	}
 	if !strings.Contains(string(body), env.BehaviorMarker) {
 		t.Fatalf("positive behavior endpoint %s %s response did not contain PVE_BEHAVIORAL_MARKER %q; body=%s", env.BehaviorMethod, env.BehaviorPath, env.BehaviorMarker, redactBody(body))
 	}
+}
+
+func assertAccVersionSmoke(t *testing.T, ctx context.Context, env accEnv, tokenID, tokenSecret string) {
+	t.Helper()
+	assertAccTokenStatus(t, ctx, env, tokenID, tokenSecret, http.MethodGet, accDefaultBehavior, http.StatusOK)
 }
 
 func assertAccNegativeAuthorization(t *testing.T, ctx context.Context, env accEnv, tokenID, tokenSecret string) {

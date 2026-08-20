@@ -22,7 +22,19 @@ test:
 
 .PHONY: testacc
 testacc:
-	VAULT_ACC=1 go test -v ./... -run TestAcc
+	@missing=""; \
+	[ -n "$$PVE_ADDR" ] || missing="$$missing PVE_ADDR"; \
+	[ -n "$$PVE_TOKEN_ID" ] || missing="$$missing PVE_TOKEN_ID"; \
+	[ -n "$$PVE_TOKEN_SECRET" ] || missing="$$missing PVE_TOKEN_SECRET"; \
+	[ -n "$$PVE_TEST_GROUP" ] || missing="$$missing PVE_TEST_GROUP"; \
+	[ -n "$$PVE_BEHAVIORAL_PATH" ] && [ "$$PVE_BEHAVIORAL_PATH" != "/version" ] || missing="$$missing PVE_BEHAVIORAL_PATH"; \
+	[ -n "$$PVE_BEHAVIORAL_MARKER" ] || missing="$$missing PVE_BEHAVIORAL_MARKER"; \
+	if [ -n "$$missing" ]; then \
+		echo "missing or invalid required acceptance environment variables:$$missing" >&2; \
+		echo "set these before running make testacc; optional variables are not required" >&2; \
+		exit 1; \
+	fi
+	VAULT_ACC=1 go test -count=1 -v -timeout=30m ./... -run TestAcc
 
 .PHONY: fmt
 fmt:

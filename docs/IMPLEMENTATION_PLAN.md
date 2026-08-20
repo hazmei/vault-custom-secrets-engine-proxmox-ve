@@ -131,7 +131,19 @@ test:
 
 .PHONY: testacc
 testacc:
-	VAULT_ACC=1 go test -v ./... -run TestAcc
+	@missing=""; \
+	[ -n "$$PVE_ADDR" ] || missing="$$missing PVE_ADDR"; \
+	[ -n "$$PVE_TOKEN_ID" ] || missing="$$missing PVE_TOKEN_ID"; \
+	[ -n "$$PVE_TOKEN_SECRET" ] || missing="$$missing PVE_TOKEN_SECRET"; \
+	[ -n "$$PVE_TEST_GROUP" ] || missing="$$missing PVE_TEST_GROUP"; \
+	[ -n "$$PVE_BEHAVIORAL_PATH" ] && [ "$$PVE_BEHAVIORAL_PATH" != "/version" ] || missing="$$missing PVE_BEHAVIORAL_PATH"; \
+	[ -n "$$PVE_BEHAVIORAL_MARKER" ] || missing="$$missing PVE_BEHAVIORAL_MARKER"; \
+	if [ -n "$$missing" ]; then \
+		echo "missing or invalid required acceptance environment variables:$$missing" >&2; \
+		echo "set these before running make testacc; optional variables are not required" >&2; \
+		exit 1; \
+	fi
+	VAULT_ACC=1 go test -count=1 -v -timeout=30m ./... -run TestAcc
 
 .PHONY: fmt
 fmt:
@@ -150,7 +162,7 @@ clean:
 	rm -rf $(PLUGIN_DIR) bin/ dist/
 ```
 
-Targets: `build` → compile to `vault/plugins/`; `test` → unit tests; `testacc` → acceptance tests (gated by `VAULT_ACC=1`); `fmt` → `gofmt`; `lint` → `golangci-lint run`; `tidy` → `go mod tidy`.
+Targets: `build` → compile to `vault/plugins/`; `test` → unit tests; `testacc` → operator-run live acceptance tests with required env preflight (`PVE_BEHAVIORAL_PATH` must be set to a group-role-gated endpoint, not `/version`) and a 30-minute Go test timeout (`VAULT_ACC=1`, verbose, non-cached `TestAcc` run); `fmt` → `gofmt`; `lint` → `golangci-lint run`; `tidy` → `go mod tidy`.
 
 ### `.golangci.yml`
 
@@ -555,7 +567,7 @@ Unit test files (one per source file: `path_config_test.go`, `path_roles_test.go
 
 ### `acceptance_test.go`
 
-Acceptance tests gated by `VAULT_ACC=1`. Environment variables: `PVE_ADDR`, `PVE_TOKEN_ID`, `PVE_TOKEN_SECRET`, `PVE_TEST_GROUP` (operator must pre-create this group on the test PVE cluster).
+Acceptance tests gated by `VAULT_ACC=1` and run only by an operator via `make testacc`. Required environment variables: `PVE_ADDR`, `PVE_TOKEN_ID`, `PVE_TOKEN_SECRET`, `PVE_TEST_GROUP` (operator must pre-create this group on the test PVE cluster), `PVE_BEHAVIORAL_PATH`, and `PVE_BEHAVIORAL_MARKER`.
 
 **Key tests** (see Testing Plan below).
 
@@ -934,22 +946,24 @@ recorded a `DeleteUser` for the just-created userid. No live PVE needed.
 - `PVE_TOKEN_ID` — admin token ID (e.g., `vault-admin@pve!root-token`)
 - `PVE_TOKEN_SECRET` — admin token secret
 - `PVE_TEST_GROUP` — operator-pre-created PVE group bound to a test role (operator must create this out-of-band before running tests)
+- `PVE_BEHAVIORAL_PATH` — group-role-gated endpoint for the authorization canary
+- `PVE_BEHAVIORAL_MARKER` — response marker required from the behavioral endpoint
 
-**Gating**: Tests prefixed `TestAcc*` run ONLY when `VAULT_ACC=1` (HashiCorp convention).
+**Gating**: Tests prefixed `TestAcc*` run ONLY when `VAULT_ACC=1` (HashiCorp convention). The canonical operator command is `make testacc`, which preflights only the required variables above (`PVE_BEHAVIORAL_PATH` must be a group-role-gated endpoint, not `/version`) and then runs `VAULT_ACC=1 go test -count=1 -v -timeout=30m ./... -run TestAcc`.
 
 **Harness (concrete)**:
 - **Vault instantiation**: acceptance tests DO NOT spin up a real Vault server. They construct the backend directly with `logical.TestBackendConfig()` + in-memory `logical.Storage`, call `Factory(ctx, config)`, and drive it through `logical.Request`s (same pattern as unit tests). The difference from unit tests is that the *pveapi.Client is the REAL client pointed at a live PVE cluster (not the mock). A full `vault server -dev` end-to-end run is the manual smoke test (Build & Run section), not an automated `TestAcc`.
-- **PVE cluster source**: OPERATOR-PROVIDED and MANUAL. There is no official Proxmox VE container image suitable for CI, so the target 9.2.10 cluster is stood up out-of-band by the operator (or a nightly self-hosted runner) and supplied via `PVE_ADDR`/`PVE_TOKEN_ID`/`PVE_TOKEN_SECRET`/`PVE_TEST_GROUP`. Tests skip (not fail) when `VAULT_ACC` is unset OR the env vars are absent.
+- **PVE cluster source**: OPERATOR-PROVIDED and MANUAL. There is no official Proxmox VE container image suitable for CI, so the target 9.2.10 cluster is stood up out-of-band by the operator and supplied via `PVE_ADDR`/`PVE_TOKEN_ID`/`PVE_TOKEN_SECRET`/`PVE_TEST_GROUP` plus the behavioral canary variables. Local tests skip (not fail) when `VAULT_ACC` is unset OR the env vars are absent. `make testacc` intentionally fails during preflight when required live variables are absent so operators do not accidentally run a degraded live suite.
 
 **Test scenarios**:
 
 | Test | Assertions |
 |------|-----------|
-| `TestAccLifecycle` | Write config → write role → read creds → use issued token to call PVE API (verify it works) → renew → verify renewed → revoke → verify user deleted by asserting `GET /access/users/{userid}` returns the PVE body "no such user" (HTTP 500, NOT 404). Do NOT assert status 404. |
-| `TestAccAuthorizationContractCanary` | **Four critical assertions** (see `docs/ARCHITECTURE.md` Acceptance Tests section — Authorization contract canary):<br/>a. Admin token attempts `PUT /access/acl` to grant an unheld role → 403<br/>b. Create user with `groups=<group>` (single CSV field); assert membership via read-back (`GET /access/users/{id}.groups` contains the group OR `GET /access/groups/{id}.members` contains the user). **PRIMARY privilege check = BEHAVIORAL**: use the issued privsep=0 token to call a group-role-gated endpoint (e.g. `GET /cluster/resources?type=vm`, gated by PVEVMAdmin) and assert HTTP 200 — this is the only oracle that cannot be confounded (Probe GROUPADD / Probe 6-fix-E). **The `GET /access/permissions?userid=<userid>&path=/` server-side dump is OPTIONAL and requires a documented TEMPORARY cluster-wide `Sys.Audit` grant on the admin token** — under the least-privilege admin it returns `403 Permission check failed (/access, Sys.Audit)` (Probe 6-fix-C/D, Probe CLEAN 5-B). If the harness wants the dump, apply and TEAR DOWN the grant: `pveum acl modify / --user <admin> --role <auditrole> --propagate 1` then teardown with the BARE `--delete` flag: `pveum acl modify / --user <admin> --role <auditrole> --delete` (NOT `--delete 1`, which fails "400 Unable to parse option" — Probe CLEAN Step 8-B / Probe GROUPADD). Do NOT rely on the token's BARE `/access/permissions` (reflects principal only, Probe 6).<br/>c. Create user with `expire` in the past, verify token authentication returns 401<br/>d. Create user, renew with `PUT /access/users/{userid}` re-sending `expire`+`groups`+`enable`+`append=1` (full-replace — expire-only WIPES groups, Probe 7). Assert via read-back that `groups` still contains the group after renewal. Add a CONTROL: an expire-only PUT on a throwaway user leaves `groups:[]`. |
-| `TestAccFailureInjection` | (a) Simulate network error after CreateUser but before CreateToken (kill connection) → verify user cleaned up (best-effort delete ran);<br/>(b) Issue credential, delete user out-of-band, revoke → verify PVE body "no such user" (HTTP 500) treated as success;<br/>(c) Write config with insufficient-privilege token → assert 403 surfaced clearly.<br/>(DeleteWAL-failure injection moved to `path_creds_test.go` — no PVE required) |
+| `TestAccLifecycle` | Write config → write role → read creds → use issued token for `/version` authentication smoke (not proof of group privilege) → renew → verify renewed → revoke → verify user deleted by asserting `GET /access/users/{userid}` returns the PVE body "no such user" (HTTP 500, NOT 404). Do NOT assert status 404. |
+| `TestAccAuthorizationContractCanary` | **Required behavioral canary plus optional negative/ACL probes** (see `docs/ARCHITECTURE.md` Acceptance Tests section — Authorization contract canary):<br/>a. Require `PVE_BEHAVIORAL_PATH` and `PVE_BEHAVIORAL_MARKER`; use the issued privsep=0 token to call the group-role-gated endpoint and assert HTTP 200 plus marker in the body. This is the authoritative oracle; bare `/version` success is only an auth smoke check.<br/>b. Optional: admin token attempts `PUT /access/acl` to grant an unheld role → 403 when `PVE_ACL_CANARY_*` variables are configured.<br/>c. Create user with `expire` in the past, verify token authentication returns 401.<br/>d. Create user, renew with `PUT /access/users/{userid}` re-sending `expire`+`groups`+`enable`+`append=1` (full-replace — expire-only WIPES groups, Probe 7). Assert via read-back that `groups` still contains the group after renewal. Add a CONTROL: an expire-only PUT on a throwaway user leaves `groups:[]`.<br/>e. Optional: negative authorization endpoint returns 403 when `PVE_NEGATIVE_AUTH_PATH` is configured. |
+| `TestAccRevocationIdempotencyAfterOutOfBandDelete` | Issue credential, delete the issued PVE user out-of-band, then revoke the Vault secret → verify PVE body "no such user" (HTTP 500) is treated as success. Live acceptance does NOT inject network failures; mid-provisioning network/error injection and DeleteWAL-failure injection live in unit tests (`path_creds_test.go`) with mock client/storage seams. |
 | `TestAccWALRollback` | Write config+role → create `nonce := walCommentPrefix + <8-char-random>` → manually `framework.PutWAL(ctx, storage, walTypeUser, walUser{UserID: userid, Nonce: nonce})` → manually `client.CreateUser(userid)` with `comment=nonce` → **invoke `b.walRollback(ctx, req, walTypeUser, walEntryData)` DIRECTLY** (there is NO `PeriodicFunc` on this backend — rollback is registered via `backend.WALRollback`, and in a live Vault it fires on the rollback manager's schedule; the test calls the func directly rather than waiting) → verify `DeleteUser` ran and the user is gone on PVE (assert `GET` returns body "no such user"). Because `walRollback` receives `data interface{}` holding a `map[string]interface{}`, construct the call arg the same JSON-round-tripped way core would (see wal.go decode note). |
-| `TestAccConcurrentIssuance` | Spawn 10 goroutines, each calls `creds/:role` concurrently → verify all succeed (no collision errors, ErrConflict retry works). Expect PVE cluster-lock contention here; if it proves flaky, assert "no orphaned users left behind" rather than "zero transient errors" |
+| `TestAccConcurrentIssuance` | Spawn 10 goroutines by default (configurable 1–10 with `PVE_CONCURRENT_WORKERS`), each calls `creds/:role` concurrently → verify all succeed (no collision errors, ErrConflict retry works). Every issued credential is revoked and absence-verified, and WAL rollback cleanup is attempted on all paths. If a disposable/dev cluster cannot safely sustain default load, lower the worker env var rather than weakening the success assertion. |
 | `TestAccDeleteConfigGuard` | Write config → DELETE without `force=true` → assert refused with clear error;<br/>DELETE with `force=true` → assert succeeds and config gone. Also confirms `force` actually reaches the handler as a query param through whatever client the test uses |
 
 **References**: `docs/ARCHITECTURE.md` — Testing Strategy section, Acceptance Tests — authorization contract canary, failure injection, DELETE config guard.
@@ -1310,26 +1324,28 @@ and asserts the parsed `PermissionTree` matches the expected structure. No live 
 
 ### Phase 5 — Full Unit Suite + Acceptance Tests
 
-**Status**: ✅ LOCAL VERIFICATION PASSED (2026-08-20) — unit tests and gated acceptance
-test code are present. Phase 5 local checks (`go build ./...`, `go test ./...`, and
-`make lint`) pass. Live `VAULT_ACC=1 make testacc` remains environment-dependent and is
-not implied by the normal unit test run.
+**Status**: ✅ LOCAL VERIFICATION PASSED (2026-08-20) — unit tests and
+operator-run acceptance test code are present. Phase 5 local checks (`go build
+./...`, `go test ./...`, and `make lint`) pass. Live `make testacc` remains
+incomplete until an operator runs it against a disposable/dev PVE cluster; it is
+not run by CI and is not implied by the normal unit test run.
 
 **Tasks**:
 - [x] Ensure Phase 5 local verification passes: `go build ./...`, `make test`, and `make lint` green
 - [x] Implement `acceptance_test.go` with env gating (`VAULT_ACC=1`) and test scenarios:
-  - [x] `TestAccLifecycle` (config→role→creds→use token→renew→revoke→verify deleted by asserting "no such user" body (HTTP 500), not a 404)
-  - [x] `TestAccAuthorizationContractCanary` (4 assertions: PUT /access/acl unheld role→403, group-add confers role verified by read-back + ?userid= resolve, expired-user token→401, renewal re-sends groups (full-replace))
-  - [x] `TestAccFailureInjection` (mid-provision cleanup, idempotent revoke (PVE body "no such user" HTTP 500 → success), insufficient-privilege token — DeleteWAL-fail lives in `path_creds_test.go`)
+  - [x] `TestAccLifecycle` (config→role→creds→`/version` auth smoke→renew→revoke→verify deleted by asserting "no such user" body (HTTP 500), not a 404)
+  - [x] `TestAccAuthorizationContractCanary` (authoritative behavioral marker canary requires `PVE_BEHAVIORAL_PATH` + `PVE_BEHAVIORAL_MARKER`; optional ACL/negative probes are clearly labeled; expired-user token→401; renewal re-sends groups (full-replace))
+  - [x] `TestAccRevocationIdempotencyAfterOutOfBandDelete` (issued user deleted out-of-band, revoke treats PVE body "no such user" HTTP 500 as success; live network-failure injection remains unit-test scope)
   - [x] `TestAccWALRollback` (manual WAL entry + rollback sweep)
   - [x] `TestAccConcurrentIssuance` (10 goroutines, verify collision retry works)
   - [x] `TestAccDeleteConfigGuard` (DELETE without force=true refused; with force=true succeeds)
-- [x] Document required test env vars in `acceptance_test.go` comment header (PVE_ADDR, PVE_TOKEN_ID, PVE_TOKEN_SECRET, PVE_TEST_GROUP)
-- [ ] Run acceptance tests against containerized/dev PVE: `make testacc` green
+- [x] Document required test env vars in `acceptance_test.go` comment header (PVE_ADDR, PVE_TOKEN_ID, PVE_TOKEN_SECRET, PVE_TEST_GROUP, plus behavioral marker requirements for the canary)
+- [ ] Run acceptance tests against an operator-provided disposable/dev PVE 9.2.10 cluster: `make testacc` green
+- [x] Keep live acceptance operator-run only; no GitHub Actions acceptance workflow is present, and normal PR CI remains unchanged
 
 **Acceptance Criteria**:
 - `make test` passes (all unit tests green)
-- `make testacc` passes (all acceptance tests green against live PVE)
+- `make testacc` passes (all acceptance tests green against live PVE; not satisfied by local unit-only verification)
 - 4-assertion authorization contract canary passes (guards against PVE version changes)
 
 **Architecture References**: `docs/ARCHITECTURE.md` Testing Strategy section, Acceptance Tests — authorization contract canary.
@@ -1342,14 +1358,14 @@ not implied by the normal unit test run.
 - [ ] Build plugin: `make build` (output to `vault/plugins/`) — `main.go` already exists from Phase 1
 - [ ] Manual smoke test (dev Vault server with `-dev-plugin-dir` → no manual register, enable, write config, write role, read creds, use token, renew, revoke, delete config with `force=true`)
 - [ ] Update `README.md` with: overview, build/install instructions, configuration example, role example, usage example, development/testing notes
-- [ ] CI config (GitHub Actions or equivalent): on PR run `make fmt`, `make lint`, `make test`; nightly/manual job runs `make testacc` with PVE secrets from CI env
+- [x] CI config (GitHub Actions or equivalent): normal PR CI runs build, unit tests, and lint only; live acceptance is operator-run only and never run by CI
 - [ ] Verify `AGENTS.md` and `docs/ARCHITECTURE.md` are accurate and up-to-date
 
 **Acceptance Criteria**:
 - Clean build (`make build` succeeds)
 - Plugin registers, enables, and smoke test passes (issue→use→renew→revoke)
 - CI runs on PR: fmt/lint/test green
-- CI nightly/manual job: testacc green
+- Live acceptance remains incomplete until an operator runs `make testacc` against a disposable/dev PVE cluster and records a green result
 - `README.md` has build, config, and usage examples
 
 **Architecture References**: `docs/ARCHITECTURE.md` Root Rotation section (manual operation), Build & Run commands above.
