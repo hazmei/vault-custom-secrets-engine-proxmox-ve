@@ -15,6 +15,28 @@ acceptance tests, and a working `make build` are present. Current Phase 5 and
 Phase 6 validation status is tracked in
 [`docs/IMPLEMENTATION_PLAN.md`](docs/IMPLEMENTATION_PLAN.md#phased-task-list).
 
+### Recorded Validation
+
+The following validation passed on 2026-08-20 against disposable Proxmox VE
+`pve-manager/9.2.10/43df2e01f27a1a19`:
+
+- `make build` completed successfully.
+- Vault `server -dev` plugin auto-registration via
+  `-dev-plugin-dir=./vault/plugins` and secrets-engine enablement passed.
+- The full real-Vault issue → use → renew → revoke lifecycle passed, including
+  stored-config validation/redaction, forced config deletion, PVE absence
+  verification, and cached-client invalidation.
+- The required positive authorization canary passed, including the
+  group-role-gated endpoint, expired-user rejection, and renewal group
+  preservation checks.
+
+Production-style catalog registration with
+`vault plugin register -sha256=<hash>` remains unverified. DR-5 and DR-6 are
+deferred, and this project must not be treated as production-ready based on the
+validation above. Optional insufficient-privilege, direct-ACL, and negative-
+authorization canaries were skipped where their separately documented
+prerequisites were unset; those skips are not completed tests.
+
 ## How It Works
 
 ### Credential Lifecycle
