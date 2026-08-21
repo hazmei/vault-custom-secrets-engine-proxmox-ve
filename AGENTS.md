@@ -6,7 +6,7 @@ Instructions for AI coding agents working on this Vault secrets engine plugin.
 
 - **Active implementation** through Phase 6 partial validation. Current phase
   validation status, including the recorded PVE build, optional acceptance-test
-  skip gates, and pending Vault-server smoke-test scope, is tracked in
+  skip gates, and unverified production catalog registration status, is tracked in
   `docs/IMPLEMENTATION_PLAN.md`. `docs/ARCHITECTURE.md` and
   `docs/IMPLEMENTATION_PLAN.md` are the authoritative design/status — READ THEM
   before extending.

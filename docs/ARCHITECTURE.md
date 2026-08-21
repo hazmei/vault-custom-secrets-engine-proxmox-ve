@@ -23,8 +23,8 @@ The authoritative phase and deferred-review status is maintained in
 **partially complete**. Development-mode registration via
 `-dev-plugin-dir` and the real Vault lifecycle smoke test are verified;
 production-style catalog registration with
-`vault plugin register -sha256=<hash>` remains unverified. DR-1 through DR-4
-are complete, and DR-5/DR-6 remain pending. The required positive
+`vault plugin register -sha256=<hash>` remains unverified. DR-1 through DR-6
+are complete, and no deferred review items remain. The required positive
 authorization canary passed, while the optional insufficient-privilege,
 direct-ACL, and negative-authorization canaries were explicitly skipped on
 2026-08-20 because their optional prerequisites were unset. These skips do
