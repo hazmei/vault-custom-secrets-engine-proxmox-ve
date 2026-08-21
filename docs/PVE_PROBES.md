@@ -703,9 +703,12 @@ agree. Step 6-D is expected to show groups WIPED (confirms replace semantics —
 
 **REDACTION NOTE (5-C):** the `value` UUID in the 5-C token-dump row is
 **synthetic**, not the captured secret. The original was a real PVE API token
-secret; it belonged to a throwaway user on the disposable probe cluster that
-this probe's own cleanup step deleted, but keeping real token secrets out of
-documentation and source is the repo's stated rule, so it was replaced with
+secret; it remains reachable in Git history. Redaction prevents that secret's
+further propagation in the current documentation and source; it does not
+erase existing history, and no rotation is requested. It belonged to a
+throwaway user on the disposable probe cluster that this probe's own cleanup
+step deleted, but keeping real token secrets out of documentation and source
+is the repo's stated rule, so it was replaced with
 `11111111-2222-4333-8444-555555555555`. The recorded finding — that the token
 secret arrives in `value`, alongside `full-tokenid` and a string-typed
 `info.privsep` — is unaffected by which UUID sits in the field. Every other byte

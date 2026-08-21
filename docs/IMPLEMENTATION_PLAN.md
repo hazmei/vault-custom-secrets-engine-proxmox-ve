@@ -1307,16 +1307,20 @@ collision entirely — note the trade-off (non-standard name vs. less confusion)
 
 #### DR-6 — Probe-fixture tests (upgrade unit tests to verbatim PVE bodies)
 
-**Status**: ✅ COMPLETE — every captured PVE body the engine's parsing or
-classification depends on is now replayed byte-for-byte from `PVE_PROBES.md`
-through the real client, and fixture drift is itself a test failure.
+**Status**: ✅ COMPLETE — the fixture guard covers the captured PVE bodies used
+by the engine's parsing and classification, with explicit occurrence counts for
+ambiguous bodies and capture-specific anchors where labels share a line with
+the body. The CLEAN 5-C fixture intentionally uses the synthetic value
+documented in the redaction note in `docs/PVE_PROBES.md`.
 
-**Verification**: `internal/pveapi/probe_fixtures_test.go` holds the captured
+**Verification**: `internal/pveapi/probe_fixtures_test.go` holds the fixture
 bodies as raw string constants. `TestProbeFixturesRemainRawJSON` re-reads
-`docs/PVE_PROBES.md` at test time and fails if any fixture no longer appears in
-it byte-for-byte (it also rejects literal line endings and invalid JSON), so
-drift between the plan's assumptions and recorded PVE output cannot pass
-silently. The replays:
+`docs/PVE_PROBES.md` at test time, verifies each body appears on the expected
+number of lines, and verifies every declared anchor shares a line with that
+body (it also rejects literal line endings and invalid JSON). The CLEAN 5-C
+value is synthetic as described by the redaction note in `docs/PVE_PROBES.md`;
+the test protects the documented fixture shape without retaining the original
+secret.
 
 | Captured body | Replayed through | Asserts |
 |---|---|---|

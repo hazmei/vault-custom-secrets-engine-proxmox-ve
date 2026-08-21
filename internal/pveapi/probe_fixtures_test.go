@@ -119,12 +119,11 @@ func TestProbeFixturesRemainRawJSON(t *testing.T) {
 		name string
 		body string
 		// anchors are probe-label substrings; each must occur on a line that
-		// also contains body. Use when the label shares the body's line.
+		// also contains body. This check composes with wantMatches.
 		anchors []string
 		// wantMatches is the exact number of lines the body must appear on.
-		// Use where the label is NOT on the body's line (a "| Body string |"
-		// row under a probe heading, or a raw-JSON block), so anchoring is
-		// impossible but deletion is still detectable as a count change.
+		// Apply it whenever a fixture has a known occurrence count, including
+		// fixtures that also declare anchors.
 		wantMatches int
 	}{
 		// Probe 1 is recorded twice: the table's "Body string" row and the
@@ -157,8 +156,8 @@ func TestProbeFixturesRemainRawJSON(t *testing.T) {
 			"7-fix-A PUT", "7-fix-C propagate-0", "2-A POST create", "6-A renewal PUT",
 		}},
 		{name: "root path present but empty", body: cleanRootEmptyPermissionsResponse, anchors: []string{
-			"6-fix-A ", "5-B ADMIN HTTP",
-		}},
+			"6-fix-A `?path=/`", "5-B ADMIN HTTP",
+		}, wantMatches: 4},
 		{name: "Probe 7 groups wiped", body: probe7GroupsWipedResponse},
 		{name: "Probe 7-fix groups still empty", body: probe7fixGroupsWipedResponse},
 		{name: "Probe CLEAN 3-A groups empty at create", body: cleanCreateGroupsEmptyResponse},
@@ -204,7 +203,6 @@ func TestProbeFixturesRemainRawJSON(t *testing.T) {
 					t.Fatalf("body matches %d lines %v but declares neither anchors nor wantMatches; "+
 						"pin the fixture to its own capture", len(matched), matched)
 				}
-				return
 			}
 
 			// Every declared capture must still exist, label and body together.
