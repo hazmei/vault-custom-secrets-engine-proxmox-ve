@@ -11,6 +11,29 @@ credentials or token secrets.
 These are optional follow-ups to the required positive authorization and lifecycle
 checks described in [`docs/PRODUCTION_VERIFICATION.md`](docs/PRODUCTION_VERIFICATION.md).
 
+- [ ] **Production Vault catalog and multi-node cluster verification**
+  - Build one approved plugin artifact, distribute it to every Vault node, and
+    verify the executable and SHA-256 digest are identical on every node.
+  - Register the catalog entry with the verified digest, using
+    `vault plugin register -sha256=<hash> secret vault-plugin-secrets-proxmox`,
+    then verify the catalog entry and mount persist across restart.
+  - Verify requests through the normal cluster address are forwarded from
+    standby to active before any PVE mutation; exercise controlled failover,
+    issue/renew/revoke after failover, restart recovery, and complete cleanup.
+  - Confirm the plugin distribution, catalog digest, mount state, leases, WAL
+    recovery behavior, and audit evidence remain consistent across nodes. Record
+    pass/fail results without credentials, token secrets, Authorization headers,
+    or sensitive command output.
+  - A local `vault server -dev` run with `-dev-plugin-dir` auto-registers the
+    plugin and does **not** prove production catalog registration, distribution,
+    persistence, HA forwarding, failover, restart recovery, or cleanup.
+  - Follow the operator procedure in
+    [`docs/PRODUCTION_VERIFICATION.md`](docs/PRODUCTION_VERIFICATION.md).
+
+Note: `[no test files]` for `cmd/vault-plugin-secrets-proxmox/main.go` is
+expected because the file only wires the plugin server and contains no
+meaningful business logic; it does not indicate a test failure.
+
 - [ ] **Insufficient-privilege canary**
   - Configure a deliberately limited PVE identity and confirm configuration
     validation fails clearly when required privileges are absent.
