@@ -386,6 +386,11 @@ vault secrets enable -path=proxmox vault-plugin-secrets-proxmox
 
 **Production installation (distinct from the development server above):**
 
+For the focused operator checklist covering artifact distribution, production
+catalog registration, least-privilege policies, lifecycle verification, and
+HA/failover checks, see the [Production Vault Verification
+Procedure](docs/PRODUCTION_VERIFICATION.md).
+
 For a production-style install, configure Vault with a real plugin directory,
 copy the binary there, calculate its SHA-256 digest from that exact file, and
 register it in the Vault plugin catalog. Put the following stanza in the Vault
@@ -512,6 +517,11 @@ Key points:
 - **[docs/RECOMMENDED_ROLES.md](docs/RECOMMENDED_ROLES.md)** — A starter set of
   roles for first-time setup: the PVE group and ACL bindings behind each one,
   suggested TTLs, per-team scoping, and the userid length budget
+
+- **[docs/PRODUCTION_VERIFICATION.md](docs/PRODUCTION_VERIFICATION.md)** — The
+  production verification procedure for artifact integrity, catalog
+  registration, Vault policy checks, PVE-backed lifecycle checks, cleanup, and
+  HA/failover validation
 
 ## Testing Strategy
 
