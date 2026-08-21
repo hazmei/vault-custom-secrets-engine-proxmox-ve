@@ -31,11 +31,15 @@ The following validation passed on 2026-08-20 against disposable Proxmox VE
   preservation checks.
 
 Production-style catalog registration with
-`vault plugin register -sha256=<hash>` remains unverified. DR-5 and DR-6 are
-deferred, and this project must not be treated as production-ready based on the
-validation above. Optional insufficient-privilege, direct-ACL, and negative-
-authorization canaries were skipped where their separately documented
-prerequisites were unset; those skips are not completed tests.
+`vault plugin register -sha256=<hash>` remains unverified, and this project must
+not be treated as production-ready based on the validation above. Optional
+insufficient-privilege, direct-ACL, and negative-authorization canaries were
+skipped where their separately documented prerequisites were unset; those skips
+are not completed tests.
+
+The Phase 2 deferred review backlog (DR-1 … DR-6) is fully resolved; no deferred
+review items remain. That backlog is independent of the caveats above — it does
+not make the project production-ready.
 
 ## How It Works
 

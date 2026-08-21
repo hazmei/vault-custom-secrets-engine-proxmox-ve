@@ -16,8 +16,8 @@ make lint                                # pinned golangci-lint via Makefile
 ```
 
 Current phase validation status, including the recorded PVE build, optional
-acceptance-test skip gates, unverified production catalog registration, and
-deferred review scope, is tracked in `docs/IMPLEMENTATION_PLAN.md`.
+acceptance-test skip gates, and unverified production catalog registration, is
+tracked in `docs/IMPLEMENTATION_PLAN.md`.
 
 Recorded validation (2026-08-20) against disposable PVE
 `pve-manager/9.2.10/43df2e01f27a1a19` includes a successful `make build`, Vault
@@ -25,11 +25,15 @@ Recorded validation (2026-08-20) against disposable PVE
 `-dev-plugin-dir=./vault/plugins`, engine enablement, and the full real-Vault
 issue/use/renew/revoke lifecycle. The required positive authorization canary
 also passed. Production-style catalog registration with
-`vault plugin register -sha256=<hash>` remains unverified; DR-5 and DR-6 are
-deferred. Do not describe the project as production-ready. Optional
-insufficient-privilege, direct-ACL, and negative-authorization canaries may be
-skipped only when their documented prerequisites are unset, and such skips are
-not completed tests.
+`vault plugin register -sha256=<hash>` remains unverified. Do not describe the
+project as production-ready. Optional insufficient-privilege, direct-ACL, and
+negative-authorization canaries may be skipped only when their documented
+prerequisites are unset, and such skips are not completed tests.
+
+The Phase 2 deferred review backlog (DR-1 … DR-6) is fully resolved; no deferred
+review items remain. This does NOT change the production-readiness position
+above — unverified production catalog registration and the optional canary skip
+gates are independent of that backlog.
 
 ## Constraints beyond AGENTS.md
 
