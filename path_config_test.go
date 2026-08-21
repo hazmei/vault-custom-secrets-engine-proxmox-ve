@@ -513,15 +513,20 @@ func TestConfigForceFieldDocumentsCLIFlagCollision(t *testing.T) {
 	t.Parallel()
 	b, _ := newTestBackend(t, nil)
 
+	// Pin to the config path explicitly. Taking the first path that happens to
+	// declare a `force` field would let this assertion silently relocate to a
+	// different path if one ever adds its own `force`, and then pass (or fail)
+	// for the wrong reason.
 	var forceField *framework.FieldSchema
 	for _, p := range b.Paths {
-		if f, ok := p.Fields["force"]; ok {
-			forceField = f
-			break
+		if p.Pattern != "config" {
+			continue
 		}
+		forceField = p.Fields["force"]
+		break
 	}
 	if forceField == nil {
-		t.Fatal("no path declares a `force` field")
+		t.Fatal("the `config` path does not declare a `force` field")
 	}
 
 	for _, want := range []string{

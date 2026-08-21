@@ -686,7 +686,7 @@ agree. Step 6-D is expected to show groups WIPED (confirms replace semantics —
    }
 } |
 | 5-B ADMIN HTTP `?userid={u}&path=/` — HTTP status + VM.* present? | HTTP 200 + {"data":{"/":{}}} |
-| 5-C TOKEN `?userid={u}!vault&path=/` — VM.* present? (privsep=0 inherit) | {"data":{"full-tokenid":"probe-clean-dcq47dxi@pve!vault","info":{"privsep":"0"},"value":"625f6f0a-4179-4796-99b9-3f3f71eb2ce0"}}
+| 5-C TOKEN `?userid={u}!vault&path=/` — VM.* present? (privsep=0 inherit) | {"data":{"full-tokenid":"probe-clean-dcq47dxi@pve!vault","info":{"privsep":"0"},"value":"11111111-2222-4333-8444-555555555555"}}
 >>> HTTP 200
 {"data":{"/":{}}}
 >>> HTTP 200 |
@@ -700,6 +700,18 @@ agree. Step 6-D is expected to show groups WIPED (confirms replace semantics —
 | Correct create `groups` encoding confirmed | |
 | Correct renewal params confirmed (expire+groups+enable+append?) | |
 | Notes | Group membership NEVER landed (3-A/4-A/6-B all groups:[]); 5-B/5-C synthetic-user dumps EMPTY. 5-A's large privilege set was root@pam/admin (USERID cell reads "Root"), NOT the probe user — confounded. Root cause: PVE `groups` is a pve-groupid-list that silently drops unresolvable entries with HTTP 200. Superseded by Probe GROUPADD. Also: Step 8-B revert failed — `--delete 1` is wrong; --delete is a bare flag (see GROUPADD teardown). |
+
+**REDACTION NOTE (5-C):** the `value` UUID in the 5-C token-dump row is
+**synthetic**, not the captured secret. The original was a real PVE API token
+secret; it belonged to a throwaway user on the disposable probe cluster that
+this probe's own cleanup step deleted, but keeping real token secrets out of
+documentation and source is the repo's stated rule, so it was replaced with
+`11111111-2222-4333-8444-555555555555`. The recorded finding — that the token
+secret arrives in `value`, alongside `full-tokenid` and a string-typed
+`info.privsep` — is unaffected by which UUID sits in the field. Every other byte
+of the capture is verbatim. The matching fixture in
+`internal/pveapi/probe_fixtures_test.go` carries the same synthetic value, so
+the `TestProbeFixturesRemainRawJSON` drift guard still compares the two.
 
 **Raw JSON (paste each response):**
 

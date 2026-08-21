@@ -1330,7 +1330,7 @@ silently. The replays:
 | Probe CLEAN 5-C token create | `CreateToken` | the `value` field is returned as the secret (not `full-tokenid`, not the string-typed `info.privsep`) |
 | `{"data":null}` (7-fix A/C, CLEAN 2-A/6-A) | `CreateUser`/`UpdateUser`/`DeleteUser` | mutating success is not a parse failure |
 | GROUPADD, COMMENT, RENEWAL-PRESERVE | `GetUser` | groups/enable/expire/comment round-trip for the read-back assertions |
-| Probe 7, 7-fix B, CLEAN 3-A/4-A/6-B (the empty-`groups` family) | `GetUser` | every capture where PVE reported NO membership parses to an empty `Groups` — the exact trip condition of the issuance and renewal read-back assertions, proven against real wire output rather than a hand-authored `groups: []`, and across varying key order and `tokens` (null vs populated) |
+| Probe 7, 7-fix B, CLEAN 3-A/4-A/6-B (the empty-`groups` family) | `GetUser` | every capture where PVE reported NO membership decodes to an empty `Groups`, across varying key order and `tokens` (null vs populated). This is the PRECONDITION the issuance and renewal read-back assertions depend on, not those assertions themselves — they live in `path_creds.go`/`secret_token.go` and are covered separately in `path_creds_test.go`/`secret_token_test.go` against a mock returning an empty `Groups` |
 | Probe 9 non-propagating | `HasPrivilege` | ancestor grant with propagate=0 → false |
 
 Two captured bodies are deliberately NOT fixtured: `{"data":[]}` (Probe 6-fix E,

@@ -58,11 +58,18 @@ const (
 	probe6fixForbiddenKeyOrderResponse = `{"message":"Permission check failed (/access, Sys.Audit)\n","data":null}`
 
 	// Probe CLEAN 5-C — POST /access/users/{userid}/token/{tokenid} success.
-	// `value` carries the one-time token secret. This particular secret belongs
-	// to a throwaway user on the disposable probe cluster that the probe's own
-	// cleanup step deleted; it is already recorded in docs/PVE_PROBES.md.
+	// `value` carries the one-time token secret.
+	//
+	// REDACTED: the `value` UUID is synthetic, not the captured one. The real
+	// secret was replaced here AND at the same spot in docs/PVE_PROBES.md (see
+	// the redaction note there). Keeping a real token secret out of source and
+	// docs is the repo's own stated rule, and the secret's specific value is not
+	// evidence of anything — the recorded finding is that the secret arrives in
+	// `value`, which this fixture still demonstrates. Every other byte of the
+	// capture, including field order, is verbatim.
+	//
 	// Note `info.privsep` echoes back as the STRING "0", not the number 0.
-	cleanTokenCreateResponse = `{"data":{"full-tokenid":"probe-clean-dcq47dxi@pve!vault","info":{"privsep":"0"},"value":"625f6f0a-4179-4796-99b9-3f3f71eb2ce0"}}`
+	cleanTokenCreateResponse = `{"data":{"full-tokenid":"probe-clean-dcq47dxi@pve!vault","info":{"privsep":"0"},"value":"11111111-2222-4333-8444-555555555555"}}`
 
 	// Mutating endpoints (POST/PUT/DELETE) answer HTTP 200 with a null data
 	// field — captured at Probe 7-fix A/C and Probe CLEAN 2-A/6-A.
@@ -77,10 +84,14 @@ const (
 	// read-back in which PVE reported the user as holding NO group membership
 	// — Probe 7 (expire-only PUT wiped groups), Probe 7-fix B (still empty
 	// after re-sending groups=), and Probe CLEAN 3-A/4-A/6-B (membership never
-	// landed at creation). These are the exact wire shapes the issuance and
-	// renewal read-back assertions exist to catch, so they are replayed through
-	// GetUser to prove the assertions fire on real PVE output. Note the family
-	// varies both in key order and in `tokens` (null vs a populated object).
+	// landed at creation). These are the wire shapes the issuance and renewal
+	// read-back assertions exist to catch. Replaying them through GetUser
+	// establishes the PRECONDITION those assertions depend on — that each real
+	// capture decodes to an empty Groups — across varying key order and
+	// `tokens` (null vs a populated object). It does not exercise the
+	// assertions themselves: those live in path_creds.go and secret_token.go
+	// and are covered separately in path_creds_test.go and secret_token_test.go
+	// with a mock returning an empty Groups.
 	probe7GroupsWipedResponse       = `{"data":{"expire":1786966464,"enable":1,"groups":[],"tokens":{"vault":{"expire":0,"privsep":0}}}}`
 	probe7fixGroupsWipedResponse    = `{"data":{"groups":[],"tokens":null,"enable":1,"expire":1786968440}}`
 	cleanCreateGroupsEmptyResponse  = `{"data":{"groups":[],"tokens":null,"expire":1786970429,"enable":1}}`
@@ -90,18 +101,42 @@ const (
 
 // TestProbeFixturesRemainRawJSON guards against fixture drift from the raw
 // evidence in docs/PVE_PROBES.md, as well as accidental line-ending changes.
+//
+// A bare substring search over the whole file is too weak an anchor for the
+// short, generic bodies: `{"data":null}` alone appears on four unrelated rows,
+// so all four cited captures could be deleted and the guard would stay green as
+// long as any one of them survived somewhere. Fixtures therefore declare the
+// probe labels they claim to come from, and each label must appear on the SAME
+// LINE as the body — which is what pins a fixture to its specific capture.
+//
+// The rule is self-enforcing: a body that matches more than one line WITHOUT
+// declared anchors fails, so a future ambiguous fixture cannot be added with
+// the weak check.
 func TestProbeFixturesRemainRawJSON(t *testing.T) {
 	t.Parallel()
 
 	fixtures := []struct {
 		name string
 		body string
+		// anchors are probe-label substrings; each must occur on a line that
+		// also contains body. Use when the label shares the body's line.
+		anchors []string
+		// wantMatches is the exact number of lines the body must appear on.
+		// Use where the label is NOT on the body's line (a "| Body string |"
+		// row under a probe heading, or a raw-JSON block), so anchoring is
+		// impossible but deletion is still detectable as a count change.
+		wantMatches int
 	}{
-		{name: "Probe 1", body: probe1PermissionsResponse},
+		// Probe 1 is recorded twice: the table's "Body string" row and the
+		// section's raw-JSON block. Neither carries the label inline.
+		{name: "Probe 1", body: probe1PermissionsResponse, wantMatches: 2},
 		{name: "Probe 9 non-propagating permissions", body: probe9NonPropagatingResponse},
 		{name: "Probe 2", body: probe2DuplicateUserResponse},
-		{name: "Probe 3", body: probe3MissingUserResponse},
-		{name: "Probe 4", body: probe4MissingUserResponse},
+		// Probes 3 and 4 genuinely captured the SAME body in two sections, and
+		// both rows read "| Body string | ... |", so no inline label separates
+		// them. The count is what detects either row being dropped.
+		{name: "Probe 3", body: probe3MissingUserResponse, wantMatches: 2},
+		{name: "Probe 4", body: probe4MissingUserResponse, wantMatches: 2},
 		{name: "Probe 5", body: probe5MissingGroupResponse},
 		{name: "Probe 6 empty permissions (unscoped response)", body: probe6EmptyPermissionsResponse},
 		{name: "Probe 6b", body: probe6bDuplicateTokenResponse},
@@ -116,8 +151,14 @@ func TestProbeFixturesRemainRawJSON(t *testing.T) {
 		{name: "Probe 6-fix forbidden", body: probe6fixForbiddenResponse},
 		{name: "Probe 6-fix forbidden (key order swapped)", body: probe6fixForbiddenKeyOrderResponse},
 		{name: "Probe CLEAN token create", body: cleanTokenCreateResponse},
-		{name: "mutation success (data:null)", body: mutationSuccessResponse},
-		{name: "root path present but empty", body: cleanRootEmptyPermissionsResponse},
+		// Each cited capture is pinned by its own label, so deleting any one of
+		// the four rows fails even while the other three survive.
+		{name: "mutation success (data:null)", body: mutationSuccessResponse, anchors: []string{
+			"7-fix-A PUT", "7-fix-C propagate-0", "2-A POST create", "6-A renewal PUT",
+		}},
+		{name: "root path present but empty", body: cleanRootEmptyPermissionsResponse, anchors: []string{
+			"6-fix-A ", "5-B ADMIN HTTP",
+		}},
 		{name: "Probe 7 groups wiped", body: probe7GroupsWipedResponse},
 		{name: "Probe 7-fix groups still empty", body: probe7fixGroupsWipedResponse},
 		{name: "Probe CLEAN 3-A groups empty at create", body: cleanCreateGroupsEmptyResponse},
@@ -128,6 +169,7 @@ func TestProbeFixturesRemainRawJSON(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read probe source: %v", err)
 	}
+	docLines := strings.Split(string(docs), "\n")
 
 	for _, fixture := range fixtures {
 		fixture := fixture
@@ -139,8 +181,45 @@ func TestProbeFixturesRemainRawJSON(t *testing.T) {
 			if strings.ContainsAny(fixture.body, "\r\n") {
 				t.Fatal("fixture contains a literal line ending; preserve the documented bytes")
 			}
-			if !strings.Contains(string(docs), fixture.body) {
+
+			var matched []int
+			for i, line := range docLines {
+				if strings.Contains(line, fixture.body) {
+					matched = append(matched, i+1)
+				}
+			}
+			if len(matched) == 0 {
 				t.Fatal("fixture no longer appears byte-for-byte in docs/PVE_PROBES.md")
+			}
+
+			if fixture.wantMatches > 0 && len(matched) != fixture.wantMatches {
+				t.Fatalf("body appears on %d lines %v; want exactly %d — a cited capture was added or removed",
+					len(matched), matched, fixture.wantMatches)
+			}
+
+			if len(fixture.anchors) == 0 {
+				// Unambiguous bodies need no anchor, but ambiguous ones must
+				// declare where they came from or the guard proves nothing.
+				if len(matched) > 1 && fixture.wantMatches == 0 {
+					t.Fatalf("body matches %d lines %v but declares neither anchors nor wantMatches; "+
+						"pin the fixture to its own capture", len(matched), matched)
+				}
+				return
+			}
+
+			// Every declared capture must still exist, label and body together.
+			for _, anchor := range fixture.anchors {
+				found := false
+				for _, line := range docLines {
+					if strings.Contains(line, fixture.body) && strings.Contains(line, anchor) {
+						found = true
+						break
+					}
+				}
+				if !found {
+					t.Errorf("no line in docs/PVE_PROBES.md carries both anchor %q and this body; "+
+						"that capture was moved, relabelled, or deleted", anchor)
+				}
 			}
 		})
 	}
@@ -205,7 +284,7 @@ func TestProbeTokenCreateFixtureThroughRealClient(t *testing.T) {
 
 	const (
 		userid    = "probe-clean-dcq47dxi@pve"
-		wantValue = "625f6f0a-4179-4796-99b9-3f3f71eb2ce0"
+		wantValue = "11111111-2222-4333-8444-555555555555"
 	)
 
 	client := serveFixture(t, http.StatusOK, cleanTokenCreateResponse,
@@ -302,12 +381,17 @@ func TestProbeMutationSuccessFixtureThroughRealClient(t *testing.T) {
 // TestProbeEmptyGroupsFixturesThroughRealClient replays every captured
 // read-back in which PVE reported the user as holding NO group membership.
 //
-// This is the load-bearing case for the issuance and renewal read-back
-// assertions: PVE answers HTTP 200 while silently dropping the group, so the
-// ONLY signal is an empty `groups` array in the body. Replaying the real
-// captures proves the assertions fire on actual PVE wire output rather than on
-// a hand-authored `groups: []`. The family also varies in key order and in
-// `tokens` (null vs a populated object), so parsing must not depend on either.
+// PVE answers HTTP 200 while silently dropping the group, so the ONLY signal
+// available to the issuance and renewal read-back assertions is an empty
+// `groups` array in the body.
+//
+// SCOPE: this test covers PARSING, not those assertions. It establishes that
+// each real capture decodes to an empty Groups — the precondition the
+// assertions rely on — across varying key order and `tokens` (null vs a
+// populated object). The assertions themselves live in path_creds.go and
+// secret_token.go and are covered in path_creds_test.go and
+// secret_token_test.go against a mock returning an empty Groups. Nothing here
+// would fail if one of those assertions were deleted.
 func TestProbeEmptyGroupsFixturesThroughRealClient(t *testing.T) {
 	t.Parallel()
 
@@ -335,7 +419,8 @@ func TestProbeEmptyGroupsFixturesThroughRealClient(t *testing.T) {
 				t.Fatalf("GetUser: %v", err)
 			}
 
-			// The read-back assertion's trip condition.
+			// The condition the read-back assertions key on (see SCOPE above:
+			// this asserts the decode, not the assertions).
 			if len(info.Groups) != 0 {
 				t.Errorf("groups = %#v; want empty (this capture recorded a dropped membership)", info.Groups)
 			}
