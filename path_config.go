@@ -75,9 +75,25 @@ func pathConfig(b *backend) *framework.Path {
 			},
 			// force is declared as a TypeBool so Vault CLI can pass it as
 			// a query parameter on DELETE: vault delete proxmox/config force=true
+			//
+			// NAME COLLISION (DR-5): `vault delete -force` is a real Vault CLI
+			// FLAG (skip the interactive confirmation prompt) and is NOT this
+			// data parameter. The flag transmits no `force` value to the
+			// backend, so `vault delete -force proxmox/config` still fails the
+			// guard below. The field keeps the name `force` because the
+			// documented API surface (README, AGENTS.md, docs/ARCHITECTURE.md)
+			// and existing operator runbooks already use `force=true`; the
+			// collision is resolved by documentation rather than by a
+			// non-standard field name.
 			"force": {
-				Type:        framework.TypeBool,
-				Description: "Required on DELETE to confirm deletion of config (force=true).",
+				Type: framework.TypeBool,
+				Description: "Required on DELETE to confirm deletion of config (force=true). " +
+					"NOTE: this is a DATA parameter, not the `vault delete -force` CLI flag. " +
+					"`-force` only skips the CLI confirmation prompt and sends no force value, " +
+					"so `vault delete -force <mount>/config` is REJECTED by this guard. " +
+					"Correct invocations: `vault delete <mount>/config force=true` (Vault CLI >= 1.11, " +
+					"which sends K=V pairs on DELETE as query parameters), or " +
+					"`curl -X DELETE -H \"X-Vault-Token: $VAULT_TOKEN\" \"$VAULT_ADDR/v1/<mount>/config?force=true\"`.",
 			},
 		},
 		Operations: map[logical.Operation]framework.OperationHandler{
@@ -265,10 +281,17 @@ func (b *backend) configRead(ctx context.Context, req *logical.Request, _ *frame
 // Requires force=true to prevent accidental deletion while leases are active.
 // Outstanding leases become non-revocable after config deletion (the engine
 // cannot reach PVE to delete users without the admin token).
+//
+// The rejection message names the `vault delete -force` CLI flag explicitly
+// (DR-5): that flag only skips the CLI confirmation prompt and sends no force
+// value, so an operator who passed it lands here with no other clue why the
+// flag they just typed appeared to be ignored.
 func (b *backend) configDelete(ctx context.Context, req *logical.Request, d *framework.FieldData) (*logical.Response, error) {
 	force, ok := d.GetOk("force")
 	if !ok || !force.(bool) {
-		return logical.ErrorResponse("DELETE <mount>/config requires force=true; outstanding leases become non-revocable after config deletion — revoke all leases first, then re-run with force=true"), nil
+		return logical.ErrorResponse("DELETE <mount>/config requires force=true; outstanding leases become non-revocable after config deletion — revoke all leases first, then re-run with force=true. " +
+			"Note: the `vault delete -force` CLI flag only skips the confirmation prompt and does NOT set this parameter — pass it as data instead: " +
+			"`vault delete <mount>/config force=true` (Vault CLI >= 1.11), or `curl -X DELETE -H \"X-Vault-Token: $VAULT_TOKEN\" \"$VAULT_ADDR/v1/<mount>/config?force=true\"`"), nil
 	}
 
 	if err := req.Storage.Delete(ctx, "config"); err != nil {

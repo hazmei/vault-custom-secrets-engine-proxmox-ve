@@ -15,6 +15,32 @@ acceptance tests, and a working `make build` are present. Current Phase 5 and
 Phase 6 validation status is tracked in
 [`docs/IMPLEMENTATION_PLAN.md`](docs/IMPLEMENTATION_PLAN.md#phased-task-list).
 
+### Recorded Validation
+
+The following validation passed on 2026-08-20 against disposable Proxmox VE
+`pve-manager/9.2.10/43df2e01f27a1a19`:
+
+- `make build` completed successfully.
+- Vault `server -dev` plugin auto-registration via
+  `-dev-plugin-dir=./vault/plugins` and secrets-engine enablement passed.
+- The full real-Vault issue → use → renew → revoke lifecycle passed, including
+  stored-config validation/redaction, forced config deletion, PVE absence
+  verification, and cached-client invalidation.
+- The required positive authorization canary passed, including the
+  group-role-gated endpoint, expired-user rejection, and renewal group
+  preservation checks.
+
+Production-style catalog registration with
+`vault plugin register -sha256=<hash>` remains unverified, and this project must
+not be treated as production-ready based on the validation above. Optional
+insufficient-privilege, direct-ACL, and negative-authorization canaries were
+skipped where their separately documented prerequisites were unset; those skips
+are not completed tests.
+
+The Phase 2 deferred review backlog (DR-1 … DR-6) is fully resolved; no deferred
+review items remain. That backlog is independent of the caveats above — it does
+not make the project production-ready.
+
 ## How It Works
 
 ### Credential Lifecycle
@@ -46,7 +72,7 @@ Phase 6 validation status is tracked in
 
 | Path | Operations | Description |
 |------|-----------|-------------|
-| `<mount>/config` | POST, GET, DELETE | Configure Proxmox connection (address, admin token, TLS, default TTLs); GET returns `address`, `tls_skip_verify`, `ca_cert`, `default_ttl`, `default_max_ttl`, `token_id`; `token_secret` never returned; DELETE requires `force=true` — outstanding leases become non-revocable and non-renewable (renewal also loads config to reach PVE, so it fails immediately too; revoke them first) |
+| `<mount>/config` | POST, GET, DELETE | Configure Proxmox connection (address, admin token, TLS, default TTLs); GET returns `address`, `tls_skip_verify`, `ca_cert`, `default_ttl`, `default_max_ttl`, `token_id`; `token_secret` never returned; DELETE requires `force=true` as a **data parameter** (not the `vault delete -force` CLI flag — see [Deleting the Configuration](#deleting-the-configuration-forcetrue-is-a-data-parameter-not--force)) — outstanding leases become non-revocable and non-renewable (renewal also loads config to reach PVE, so it fails immediately too; revoke them first) |
 | `<mount>/roles/:name` | POST, GET, LIST, DELETE | Define credential roles with group name, TTLs, and user prefix; DELETE does not revoke outstanding leases |
 | `<mount>/creds/:role` | GET | Issue a new dynamic credential (returns `user_id`, `token_id`, `token_secret`) |
 | `<mount>/rotate-root` | — | **Out of scope for v1** — root token rotation is manual (documented as create new token → update config → delete old token) |
@@ -304,7 +330,9 @@ may no longer be able to renew or revoke them. Revoke outstanding leases before
 rotation where possible, and retain an approved recovery procedure for manual
 cleanup. Similarly, do not delete the mount configuration while leases remain;
 `DELETE <mount>/config` requires `force=true` and makes those leases
-non-renewable and non-revocable by the engine.
+non-renewable and non-revocable by the engine. Note that `force=true` is a data
+parameter and the `vault delete -force` CLI flag does not satisfy it — see
+[Deleting the Configuration](#deleting-the-configuration-forcetrue-is-a-data-parameter-not--force).
 
 #### Provisioner token blast radius
 
@@ -403,6 +431,34 @@ vault write proxmox/config \
 
 The example intentionally uses a placeholder for the one-time token secret.
 Keep real token secrets out of shell history, logs, issues, and documentation.
+
+### Deleting the Configuration (`force=true` is a data parameter, not `-force`)
+
+`DELETE <mount>/config` always requires `force=true`. The engine cannot reliably
+track outstanding leases, so `force=true` is the explicit operator
+acknowledgement that any leases still outstanding become non-revocable and
+non-renewable once the admin credential is gone. Revoke outstanding leases
+first.
+
+> **Watch out:** `vault delete -force` is a Vault **CLI flag** that only skips
+> the interactive confirmation prompt. It sends **no** `force` value to the
+> plugin, so `vault delete -force proxmox/config` is still rejected with
+> `requires force=true`. The `force` here is a **data parameter** and must be
+> passed as a `K=V` pair.
+
+```bash
+# Correct — data parameter (Vault CLI >= 1.11 sends K=V pairs on DELETE
+# as query parameters)
+vault delete proxmox/config force=true
+
+# Correct — explicit query parameter, works with any CLI version
+curl -sS -X DELETE -H "X-Vault-Token: $VAULT_TOKEN" \
+  "$VAULT_ADDR/v1/proxmox/config?force=true"
+
+# WRONG — `-force` is the CLI's skip-confirmation flag, not this parameter.
+# This is rejected with "DELETE <mount>/config requires force=true".
+vault delete -force proxmox/config
+```
 
 ## Role and Usage Example
 
