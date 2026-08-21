@@ -184,6 +184,12 @@ administrators and security review. Then configure a Vault role using the
 already-existing group; role writes validate group existence and the realm
 allocation privilege.
 
+For a starting set of group/binding/role triples covering common access
+patterns — read-only auditing, VM operation, VM administration, backup jobs,
+and image pipelines — see
+[docs/RECOMMENDED_ROLES.md](docs/RECOMMENDED_ROLES.md). Those are starting
+points to adapt, subject to the same review as the example above.
+
 #### 3. Create the provisioner API token
 
 The token may be created after the dedicated user exists; before issuing a
@@ -446,6 +452,10 @@ Key points:
   - TTL precedence rules and renewal behavior
   - Security considerations and threat model
   - Proxmox cluster considerations (quorum, lock contention)
+
+- **[docs/RECOMMENDED_ROLES.md](docs/RECOMMENDED_ROLES.md)** — A starter set of
+  roles for first-time setup: the PVE group and ACL bindings behind each one,
+  suggested TTLs, per-team scoping, and the userid length budget
 
 ## Testing Strategy
 
