@@ -1031,6 +1031,17 @@ vault delete proxmox/config force=true
 # Fallback for older CLIs:
 curl -sS -X DELETE -H "X-Vault-Token: $VAULT_TOKEN" \
   "$VAULT_ADDR/v1/proxmox/config?force=true"
+
+# NAME COLLISION (DR-5): `vault delete -force` is a Vault CLI FLAG that only
+# skips the interactive confirmation prompt. It sends NO `force` data value, so
+# the command below is REJECTED by the guard with "requires force=true":
+#   vault delete -force proxmox/config          # WRONG — flag, not data param
+# The `force` here is a DATA parameter and must be passed as a K=V pair (or as
+# an explicit query parameter via curl). The field keeps the name `force`
+# because the documented API surface (README, AGENTS.md, ARCHITECTURE.md) and
+# operator runbooks already use `force=true`; the collision is resolved by
+# documentation (field Description + README + the guard's rejection message)
+# rather than by a non-standard field name such as `confirm_delete`.
 ```
 
 ### Smoke Test
@@ -1123,6 +1134,11 @@ annotations elsewhere. No code deliverable — this phase gated the design.
 These items were surfaced during the PR #3 Jester consensus review of Phase 1 and intentionally
 deferred to a later phase. They are tracked here so they are not lost. Each item must be resolved
 before or during the phase where its call site is introduced.
+
+**Backlog status: ✅ ALL RESOLVED.** DR-1 through DR-4 were closed alongside the
+phases that introduced their call sites; DR-5 (CLI collision documentation) and
+DR-6 (verbatim probe fixtures) were the last two open items and are now complete
+— see each item's Status and Verification below. No deferred review items remain.
 
 ---
 
@@ -1236,9 +1252,36 @@ Unit tests cover the boundary sizes and confirm an oversized HTTP 500 DELETE bod
 
 #### DR-5 — `force` / `-force` CLI collision documentation
 
-**Status**: ⏳ PENDING — the operator-facing CLI collision documentation has
-not yet been completed. Do not mark this item complete based on the existing
-`force=true` implementation or smoke-test coverage.
+**Status**: ✅ COMPLETE — the collision is documented in all three places DR-5
+names, and the guidance is locked in by unit tests rather than left as prose.
+
+**Verification**:
+- The `force` field `Description` in `pathConfig` (`path_config.go`) states that
+  `force` is a DATA parameter, that `vault delete -force` is a CLI
+  skip-confirmation flag which sends no force value and is therefore REJECTED,
+  and gives both correct invocations (`vault delete <mount>/config force=true`
+  for Vault CLI ≥ 1.11, and the `curl -X DELETE ".../config?force=true"` form).
+- The guard's own rejection message (`configDelete`) now names the flag
+  collision too — that message is what an operator who just typed `-force`
+  actually sees, and previously gave no hint why the flag appeared ignored.
+- `README.md` gains a "Deleting the Configuration" section with correct and
+  WRONG invocations side by side, cross-referenced from the Vault API Paths
+  table and from the provisioner-rotation section.
+- The `Build & Run` section of this plan carries the same warning.
+- `TestConfigDelete_WithoutForce_ExplainsCLIFlagCollision` and
+  `TestConfigForceFieldDocumentsCLIFlagCollision` (`path_config_test.go`) assert
+  the guard message and the field Description each mention `vault delete
+  -force`, `force=true`, and the `?force=true` query form, so the documentation
+  cannot silently regress.
+
+**Rename evaluation (the optional half of the acceptance criterion)**: the field
+KEEPS the name `force`. Renaming to `confirm_delete` would remove the collision
+outright, but `force=true` is already the documented API surface in `README.md`,
+`AGENTS.md`, `docs/ARCHITECTURE.md`, and operator runbooks, so a rename is a
+breaking change to a published parameter in exchange for a confusion that three
+lines of documentation and a self-explaining error message resolve. Trade-off
+recorded here and in the `path_config.go` field comment; revisit only if a
+future major version is already breaking the config API.
 
 **What**: `DELETE <mount>/config` requires a `force=true` **data parameter**, but
 `vault delete -force <path>` is a real Vault CLI **flag** (skip-confirmation prompt) that
@@ -1264,8 +1307,36 @@ collision entirely — note the trade-off (non-standard name vs. less confusion)
 
 #### DR-6 — Probe-fixture tests (upgrade unit tests to verbatim PVE bodies)
 
-**Status**: ⏳ PENDING — the unit tests still use representative bodies rather
-than a complete verbatim fixture set from `PVE_PROBES.md`.
+**Status**: ✅ COMPLETE — every captured PVE body the engine's parsing or
+classification depends on is now replayed byte-for-byte from `PVE_PROBES.md`
+through the real client, and fixture drift is itself a test failure.
+
+**Verification**: `internal/pveapi/probe_fixtures_test.go` holds the captured
+bodies as raw string constants. `TestProbeFixturesRemainRawJSON` re-reads
+`docs/PVE_PROBES.md` at test time and fails if any fixture no longer appears in
+it byte-for-byte (it also rejects literal line endings and invalid JSON), so
+drift between the plan's assumptions and recorded PVE output cannot pass
+silently. The replays:
+
+| Captured body | Replayed through | Asserts |
+|---|---|---|
+| Probe 0 version | `GetVersion` | version string `9.2.10` extracted |
+| Probe 1 permissions | `GetPermissions` | full `PermissionTree` incl. propagate flags |
+| Probe 1b `?path=` | `GetPermissions` + `HasPrivilege` | PVE echoes a TRAILING-SLASH key, so the scoped form does NOT answer the ancestor walk — the recorded reason the engine parses the unscoped dump |
+| Probe 2 / 3 / 4 / 5 / 6b | `CreateUser`/`DeleteUser`/`GetUser`/`GetGroup`/`CreateToken` | `ErrConflict`, `ErrUserNotFound`, `ErrGroupNotFound` (6b asserts the match reads `errors.tokenid`, not `message`) |
+| Probe 6 empty permissions | `GetPermissions` | empty tree parses, is not an error |
+| Probe 6-fix C **and** D (403) | `GetPermissions` + `classifyPVEError` | `ErrForbidden` from the status before body matching, independent of JSON key order |
+| Probe 6-fix A / CLEAN 5-B `{"data":{"/":{}}}` | `GetPermissions` + `HasPrivilege` | a present-but-empty path is NOT privilege possession |
+| Probe CLEAN 5-C token create | `CreateToken` | the `value` field is returned as the secret (not `full-tokenid`, not the string-typed `info.privsep`) |
+| `{"data":null}` (7-fix A/C, CLEAN 2-A/6-A) | `CreateUser`/`UpdateUser`/`DeleteUser` | mutating success is not a parse failure |
+| GROUPADD, COMMENT, RENEWAL-PRESERVE | `GetUser` | groups/enable/expire/comment round-trip for the read-back assertions |
+| Probe 7, 7-fix B, CLEAN 3-A/4-A/6-B (the empty-`groups` family) | `GetUser` | every capture where PVE reported NO membership parses to an empty `Groups` — the exact trip condition of the issuance and renewal read-back assertions, proven against real wire output rather than a hand-authored `groups: []`, and across varying key order and `tokens` (null vs populated) |
+| Probe 9 non-propagating | `HasPrivilege` | ancestor grant with propagate=0 → false |
+
+Two captured bodies are deliberately NOT fixtured: `{"data":[]}` (Probe 6-fix E,
+a `/cluster/resources` VM list) and the CLEAN 3-B group-member list, both from
+endpoints the engine never calls — `GetGroup` discards its response body and
+checks only the status/error contract.
 
 **What**: The 9 verbatim-captured PVE response bodies in `docs/PVE_PROBES.md` (Probes 2–6b,
 GROUPADD, RENEWAL-PRESERVE, etc.) should be replayed as test fixtures through

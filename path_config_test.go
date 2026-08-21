@@ -15,6 +15,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/hashicorp/vault/sdk/framework"
 	"github.com/hashicorp/vault/sdk/logical"
 	pveapi "github.com/hazmei/vault-plugin-secrets-proxmox/internal/pveapi"
 )
@@ -468,6 +469,69 @@ func TestConfigDelete_WithoutForce_Rejected(t *testing.T) {
 	}
 	if !resp.IsError() {
 		t.Fatal("expected error response for DELETE without force=true")
+	}
+}
+
+// TestConfigDelete_WithoutForce_ExplainsCLIFlagCollision covers DR-5: an
+// operator who runs `vault delete -force <mount>/config` passes a CLI
+// skip-confirmation FLAG that transmits no `force` data value, so they land on
+// this rejection with no other clue why the flag they typed was ignored. The
+// message must name the collision and both correct invocations.
+func TestConfigDelete_WithoutForce_ExplainsCLIFlagCollision(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	b, storage := newTestBackend(t, defaultMock())
+
+	if _, err := writeConfig(ctx, b, storage, validConfigData()); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	resp, err := deleteConfig(ctx, b, storage, false)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !resp.IsError() {
+		t.Fatal("expected error response for DELETE without force=true")
+	}
+
+	msg := resp.Error().Error()
+	for _, want := range []string{
+		"force=true",          // the required data parameter
+		"vault delete -force", // the colliding CLI flag, named explicitly
+		"?force=true",         // the curl / query-parameter fallback
+	} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("delete guard message missing %q; got: %s", want, msg)
+		}
+	}
+}
+
+// TestConfigForceFieldDocumentsCLIFlagCollision covers the DR-5 acceptance
+// criterion that the `force` field Description itself (what `vault path-help`
+// renders) states the flag does not satisfy the parameter.
+func TestConfigForceFieldDocumentsCLIFlagCollision(t *testing.T) {
+	t.Parallel()
+	b, _ := newTestBackend(t, nil)
+
+	var forceField *framework.FieldSchema
+	for _, p := range b.Paths {
+		if f, ok := p.Fields["force"]; ok {
+			forceField = f
+			break
+		}
+	}
+	if forceField == nil {
+		t.Fatal("no path declares a `force` field")
+	}
+
+	for _, want := range []string{
+		"vault delete -force",
+		"force=true",
+		"?force=true",
+	} {
+		if !strings.Contains(forceField.Description, want) {
+			t.Errorf("force field Description missing %q; got: %s", want, forceField.Description)
+		}
 	}
 }
 
