@@ -335,8 +335,9 @@ Revoke the lease and verify cleanup:
 vault lease revoke <LEASE_ID>
 ```
 
-Confirm the PVE user and its token are gone. Repeat the revoke (or revoke after
-out-of-band deletion) and confirm it succeeds idempotently: PVE's missing-user
+Confirm the PVE user and its token are gone. To exercise revoke idempotency,
+issue a credential, delete its PVE user out-of-band, confirm the user is
+missing, and then revoke that still-active Vault lease. PVE's missing-user
 response is HTTP 500 with body `"no such user"`, which the engine treats as
 success. Confirm the issued token no longer authenticates.
 
