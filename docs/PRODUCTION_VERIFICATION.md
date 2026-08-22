@@ -383,19 +383,27 @@ Run these checks with the cluster owners and an approved failure plan:
    ```
 
    Use the Vault audit log and the corresponding PVE log entry as the recorded
-   evidence for forwarding. Stop if the source address is a standby or if the
-   request cannot be correlated.
+   evidence for forwarding. This source-address check is conclusive only when
+   Vault nodes reach PVE with distinct source addresses; SNAT/NAT gateways,
+   shared egress proxies, outbound VIPs, and node-level pod-network
+   masquerading can make every node appear identical. When addresses are
+   shared, use the file audit device on each Vault node instead: only the node
+   that handled the request records the request/response pair for
+   `<MOUNT>/creds/<ROLE>`, while a standby that forwarded the request records
+   the request without a backend response. Record the node that produced the
+   pair and treat the check as inconclusive if neither source identity nor
+   per-node audit evidence is available. Stop if the source address is a
+   standby or if the request cannot be correlated.
 3. During a controlled active-node failover, verify that an already-issued
    lease can be renewed and revoked through the surviving cluster address.
 4. Perform one controlled issue after failover, use its behavioral endpoint,
    renew it, and revoke it. Verify no duplicate/orphan PVE user is left behind.
 5. If the Vault version or operational design permits a restart between issue
    and cleanup, verify that the persisted mount, role, lease, catalog entry,
-   and WAL rollback behavior are available after restart. For WAL rollback,
-   use an approved disposable-target failure injection that leaves an in-flight
-   WAL entry, then record the rollback-manager evidence that the nonce-matched
-   orphan `vault-*` PVE user was deleted (or that no such orphan remains).
-   Do not simulate a crash in production without an approved plan.
+   and WAL-backed lease state are available after restart. Confirm that no
+   orphan `vault-*` PVE users remain; this is a read-only check and does not
+   require failure injection. Do not simulate a crash in production without an
+   approved plan.
 6. Review Vault audit logs and PVE audit logs for the expected calls, with no
    token secrets or Authorization headers exposed. Match the issue request to
    the PVE `POST /api2/json/access/users` entry from step 2, and match the

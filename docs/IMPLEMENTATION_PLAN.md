@@ -1569,6 +1569,10 @@ engine therefore continues to send explicit `append=1` with `expire` +
   failover, and issue/renew/revoke through the cluster address after failover.
 - [ ] Verify restart recovery for leases, WAL cleanup, PVE users/tokens,
   catalog state, mount state, and audit evidence across nodes.
+- [ ] On an approved disposable target, inject a failure between WAL creation
+   and cleanup, then record rollback-manager evidence that the nonce-matched
+   orphan `vault-*` PVE user was deleted. Do not make production adoption
+   depend on this destructive failure-injection test.
 
 ### Password Credential Support (gated future feature)
 
