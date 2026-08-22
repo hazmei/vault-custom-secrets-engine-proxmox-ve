@@ -93,6 +93,14 @@ verify the digest independently and verify ownership, mode, and path:
 fail=0
 EXPECTED_SHA="<SHA256_FROM_CHANGE_TICKET>"
 EXPECTED_OWNER="vault:vault"  # approved service user/group
+for tool in sha256sum stat find; do
+  if command -v "$tool" >/dev/null; then
+    echo "OK: $tool is available"
+  else
+    echo "FAIL: $tool is not available; use the platform equivalent"
+    fail=1
+  fi
+done
 if [ "$(sha256sum /etc/vault/plugins/vault-plugin-secrets-proxmox | cut -d' ' -f1)" = "$EXPECTED_SHA" ]; then
   echo "OK: digest matches the approved artifact"
 else
@@ -150,7 +158,9 @@ else
 fi
 ```
 
-On platforms without `sha256sum` or GNU `stat`, use the platform equivalents.
+On platforms without `sha256sum` or GNU `stat`, use the platform equivalents
+after adapting the preflight checks above (for example, `shasum -a 256` and
+`stat -f '%Su:%Sg %Lp'` on BSD/macOS).
 The digest must match on all nodes before registration. If any node differs,
 stop and correct distribution; do not register a mixed artifact set.
 
