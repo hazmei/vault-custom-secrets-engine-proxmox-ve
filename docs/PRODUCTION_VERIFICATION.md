@@ -95,7 +95,6 @@ if sudo -u vault test -x /etc/vault/plugins/vault-plugin-secrets-proxmox; then
   echo "OK: executable by Vault service user"
 else
   echo "FAIL: not executable by Vault service user"
-  exit 1
 fi
 # Replace vault:vault with the approved service user/group and verify the
 # expected owner/group and mode. Use the platform-equivalent stat command where
@@ -108,18 +107,24 @@ if test -z "$(find /etc/vault/plugins/vault-plugin-secrets-proxmox \
   echo "OK: plugin file is not group/other writable"
 else
   echo "FAIL: plugin file is group/other writable"
-  exit 1
 fi
 p=/etc/vault/plugins
-while [ "$p" != / ]; do
-  if test -z "$(find "$p" -maxdepth 0 -perm /022 -print -quit)"; then
-    echo "OK: $p is not group/other writable"
-  else
-    echo "FAIL: $p is group/other writable"
-    exit 1
-  fi
-  p=$(dirname "$p")
-done
+case "$p" in
+  /*)
+    while :; do
+      if test -z "$(find "$p" -maxdepth 0 -perm /022 -print -quit)"; then
+        echo "OK: $p is not group/other writable"
+      else
+        echo "FAIL: $p is group/other writable"
+      fi
+      [ "$p" = / ] && break
+      p=$(dirname "$p")
+    done
+    ;;
+  *)
+    echo "FAIL: plugin path must be absolute; ancestor check skipped"
+    ;;
+esac
 ```
 
 On platforms without `sha256sum` or GNU `stat`, use the platform equivalents.

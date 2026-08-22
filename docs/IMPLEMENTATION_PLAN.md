@@ -1495,6 +1495,65 @@ anti-privilege-escalation and negative-authorization subtests skipped because
 their separately documented optional variables were not configured. No PVE
  changes were made outside the disposable target.
 
+**Tasks**:
+- [x] Build plugin: `make build` (output to `vault/plugins/`) — passed on
+  2026-08-20
+- [x] Manual smoke test (dev Vault server with `-dev-plugin-dir` → no manual
+  register, enable, write config, write role, read creds, use token, renew,
+  revoke, delete config with `force=true`) — passed on 2026-08-20 against
+  `pve-manager/9.2.10/43df2e01f27a1a19`, including stored-config deletion and
+  cached-client invalidation. The issued token authenticated successfully to
+  `/version`; revocation was verified by the PVE `HTTP 500` body
+  `"no such user"`. The config GET also confirmed `token_secret` is omitted.
+  The acceptance canary preflight separately identified missing
+  `PVE_BEHAVIORAL_PATH` and `PVE_BEHAVIORAL_MARKER`.
+- [x] Run the required authorization-contract canary after configuring
+  `PVE_BEHAVIORAL_PATH` and `PVE_BEHAVIORAL_MARKER` — targeted command passed
+  on 2026-08-20 against the configured disposable PVE target. The positive
+  behavioral endpoint passed; the optional direct ACL and negative-authorization
+  subtests skipped because their optional variables were unset.
+- [x] Update `README.md` with: overview, build/install instructions,
+  configuration example, role example, usage example, development/testing notes
+- [x] CI config (GitHub Actions or equivalent): normal PR CI runs build, unit
+  tests, and lint only; live acceptance is operator-run only and never run by CI
+- [x] Verify `AGENTS.md` and `docs/ARCHITECTURE.md` are accurate and up-to-date
+  for recorded Phase 5/Phase 6 status
+
+**Acceptance Criteria**:
+- Clean build (`make build` succeeds)
+- Plugin auto-registers and enables through `-dev-plugin-dir` (verified)
+- Production catalog registration is tracked by the unchecked production
+  adoption gate below and is not claimed as complete
+- Full issue→use→renew→revoke smoke test passes through a real `vault server`
+  plus registered plugin binary with required live PVE configuration
+- Stored config can be force-deleted and the cached PVE client is invalidated
+  (post-delete credential access fails because config is absent)
+- CI runs on PR: fmt/lint/test green
+- Live acceptance required tests have a recorded operator green result from
+  2026-08-20 against `pve-manager/9.2.10/43df2e01f27a1a19`; only the three
+  optional gates listed above may skip when their prerequisites are not configured
+- `README.md` has build, config, and usage examples
+
+**Explicitly skipped optional canaries on 2026-08-20** (their prerequisites
+were unset; these are not failures and are not complete):
+
+- `TestAccInsufficientPrivileges` — `PVE_INSUFFICIENT_TOKEN_ID` /
+  `PVE_INSUFFICIENT_TOKEN_SECRET`
+- Direct ACL anti-privilege-escalation canary — `PVE_ACL_CANARY_PATH`,
+  `PVE_ACL_CANARY_UNHELD_ROLE`, and `PVE_ACL_CANARY_TARGET_USER`
+- Negative authorization endpoint canary — `PVE_NEGATIVE_AUTH_PATH` (and
+  optional method override)
+
+The required positive behavioral authorization canary passed, including the
+group-role-gated endpoint, expired-user HTTP 401 check, and renewal
+group-preservation check. Omitted-`append` semantics remain unresolved; the
+engine therefore continues to send explicit `append=1` with `expire` +
+`groups` + `enable` and read back membership.
+
+**Architecture References**: `docs/ARCHITECTURE.md` Root Rotation section (manual operation), Build & Run commands above.
+
+---
+
 ## Deferred / Future Work
 
 ### Production adoption gates
@@ -1530,63 +1589,6 @@ the release gates. Complete these phases in order:
 - [ ] **Phase 5 — Documentation and security review**: review threat model,
   privileges, audit expectations, secret handling, migration/compatibility,
   and operator procedures; update the affected project documentation.
-
-**Tasks**:
-- [x] Build plugin: `make build` (output to `vault/plugins/`) — passed on
-  2026-08-20
-- [x] Manual smoke test (dev Vault server with `-dev-plugin-dir` → no manual
-  register, enable, write config, write role, read creds, use token, renew,
-  revoke, delete config with `force=true`) — passed on 2026-08-20 against
-  `pve-manager/9.2.10/43df2e01f27a1a19`, including stored-config deletion and
-  cached-client invalidation. The issued token authenticated successfully to
-  `/version`; revocation was verified by the PVE `HTTP 500` body
-  `"no such user"`. The config GET also confirmed `token_secret` is omitted.
-  The acceptance canary preflight separately identified missing
-  `PVE_BEHAVIORAL_PATH` and `PVE_BEHAVIORAL_MARKER`.
-- [x] Run the required authorization-contract canary after configuring
-  `PVE_BEHAVIORAL_PATH` and `PVE_BEHAVIORAL_MARKER` — targeted command passed
-  on 2026-08-20 against the configured disposable PVE target. The positive
-  behavioral endpoint passed; the optional direct ACL and negative-authorization
-  subtests skipped because their optional variables were unset.
-- [x] Update `README.md` with: overview, build/install instructions,
-  configuration example, role example, usage example, development/testing notes
-- [x] CI config (GitHub Actions or equivalent): normal PR CI runs build, unit
-  tests, and lint only; live acceptance is operator-run only and never run by CI
-- [x] Verify `AGENTS.md` and `docs/ARCHITECTURE.md` are accurate and up-to-date
-  for recorded Phase 5/Phase 6 status
-
-**Acceptance Criteria**:
-- Clean build (`make build` succeeds)
-- Plugin auto-registers and enables through `-dev-plugin-dir` (verified)
-- Production catalog registration is tracked by the unchecked production
-  adoption gate above and is not claimed as complete
-- Full issue→use→renew→revoke smoke test passes through a real `vault server`
-  plus registered plugin binary with required live PVE configuration
-- Stored config can be force-deleted and the cached PVE client is invalidated
-  (post-delete credential access fails because config is absent)
-- CI runs on PR: fmt/lint/test green
-- Live acceptance required tests have a recorded operator green result from
-  2026-08-20 against `pve-manager/9.2.10/43df2e01f27a1a19`; only the three
-  optional gates listed above may skip when their prerequisites are not configured
-- `README.md` has build, config, and usage examples
-
-**Explicitly skipped optional canaries on 2026-08-20** (their prerequisites
-were unset; these are not failures and are not complete):
-
-- `TestAccInsufficientPrivileges` — `PVE_INSUFFICIENT_TOKEN_ID` /
-  `PVE_INSUFFICIENT_TOKEN_SECRET`
-- Direct ACL anti-privilege-escalation canary — `PVE_ACL_CANARY_PATH`,
-  `PVE_ACL_CANARY_UNHELD_ROLE`, and `PVE_ACL_CANARY_TARGET_USER`
-- Negative authorization endpoint canary — `PVE_NEGATIVE_AUTH_PATH` (and
-  optional method override)
-
-The required positive behavioral authorization canary passed, including the
-group-role-gated endpoint, expired-user HTTP 401 check, and renewal
-group-preservation check. Omitted-`append` semantics remain unresolved; the
-engine therefore continues to send explicit `append=1` with `expire` +
-`groups` + `enable` and read back membership.
-
-**Architecture References**: `docs/ARCHITECTURE.md` Root Rotation section (manual operation), Build & Run commands above.
 
 ---
 
