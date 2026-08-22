@@ -299,9 +299,14 @@ endpoint that is allowed by the verification group's PVE role and returns a
 stable, non-sensitive marker. For example, substitute the endpoint and marker
 approved for the target:
 
+Use the complete `token_id` returned by the credential response when constructing
+the header; do not rebuild it from the user ID, realm, or the engine's current
+lease-token constant. Keep both returned values in the approved protected session
+only, and never print them.
+
 ```bash
-printf 'Authorization: PVEAPIToken=%s@%s!lease=%s\n' \
-  "$ISSUED_USER" "$REALM" "$LEASE_SECRET" | \
+# Set TOKEN_ID from token_id and LEASE_SECRET from token_secret in the protected session.
+printf 'Authorization: PVEAPIToken=%s=%s\n' "$TOKEN_ID" "$LEASE_SECRET" | \
   curl --fail --silent --show-error \
   --header @- "https://<PVE_HOST>:8006/api2/json/<BEHAVIORAL_PATH>"
 ```
