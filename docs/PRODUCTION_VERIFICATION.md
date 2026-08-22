@@ -102,7 +102,7 @@ script from the operator workstation and run it directly on the node instead.
 This avoids staging the verifier in world-writable `/tmp`:
 
 ```bash
-ssh <node> 'EXPECTED_SHA="<from change ticket>" EXPECTED_OWNER="vault:vault" \
+ssh <node> 'EXPECTED_SHA="<SHA256_FROM_CHANGE_TICKET>" EXPECTED_OWNER="vault:vault" \
   PLUGIN_DIR=/etc/vault/plugins bash -s; echo "exit=$?"' \
   < scripts/verify-plugin-artifact.sh
 ```

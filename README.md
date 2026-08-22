@@ -425,7 +425,7 @@ for node in "<node1>" "<node2>" "<node3>"; do
   fi
   # Stream the verifier instead of staging it in world-writable /tmp. Use the
   # digest recorded at build time, not one calculated from a local file.
-  if ! ssh "$node" 'EXPECTED_SHA="<digest recorded at build time>" \
+  if ! ssh "$node" 'EXPECTED_SHA="<SHA256_FROM_CHANGE_TICKET>" \
     EXPECTED_OWNER="vault:vault" PLUGIN_DIR=/etc/vault/plugins bash -s' \
     < scripts/verify-plugin-artifact.sh; then
     echo "FAIL: artifact verification failed on $node"
@@ -435,7 +435,7 @@ for node in "<node1>" "<node2>" "<node3>"; do
 done
 if [ "$verified" -eq 1 ]; then
   # Against the target Vault server configured by VAULT_ADDR:
-  vault plugin register -sha256="<digest recorded at build time>" \
+  vault plugin register -sha256="<SHA256_FROM_CHANGE_TICKET>" \
     secret vault-plugin-secrets-proxmox
   vault secrets enable -path=proxmox vault-plugin-secrets-proxmox
 else
