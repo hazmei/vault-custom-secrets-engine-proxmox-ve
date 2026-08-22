@@ -67,8 +67,8 @@ else
   actual_sha=$(sha256sum "$plugin_path" 2>/dev/null)
   sha_status=$?
   actual_sha=${actual_sha%% *}
-  actual_sha=$(printf %s "$actual_sha" | tr 'A-Z' 'a-z')
-  expected_sha_lc=$(printf %s "$expected_sha" | tr 'A-Z' 'a-z')
+  actual_sha=$(printf %s "$actual_sha" | tr '[:upper:]' '[:lower:]')
+  expected_sha_lc=$(printf %s "$expected_sha" | tr '[:upper:]' '[:lower:]')
   if [ "$sha_status" -eq 0 ] && [ "$actual_sha" = "$expected_sha_lc" ]; then
     echo "OK: digest matches the approved artifact"
   else
