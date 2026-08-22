@@ -12,8 +12,7 @@ make build                               # builds plugin into vault/plugins/
 make test                                # unit tests (mocked Proxmox client)
 go test ./... -run TestXxx -v              # single test
 make testacc                              # operator-run acceptance tests (needs disposable/dev Proxmox)
-make lint                                # pinned golangci-lint via Makefile
-shellcheck scripts/*.sh                  # shell-script lint used by CI
+make lint                                # pinned golangci-lint + shellcheck scripts/*.sh
 make verify-artifact                      # operator-run artifact/permission verification
 ```
 
