@@ -91,7 +91,14 @@ verify the digest independently and verify ownership, mode, and path:
 
 ```bash
 fail=0
-sha256sum /etc/vault/plugins/vault-plugin-secrets-proxmox
+EXPECTED_SHA="<SHA256_FROM_CHANGE_TICKET>"
+EXPECTED_OWNER="vault:vault"  # approved service user/group
+if [ "$(sha256sum /etc/vault/plugins/vault-plugin-secrets-proxmox | cut -d' ' -f1)" = "$EXPECTED_SHA" ]; then
+  echo "OK: digest matches the approved artifact"
+else
+  echo "FAIL: digest does not match the approved artifact"
+  fail=1
+fi
 if sudo -u vault test -x /etc/vault/plugins/vault-plugin-secrets-proxmox; then
   echo "OK: executable by Vault service user"
 else
@@ -102,6 +109,12 @@ fi
 # expected owner/group and mode. Use the platform-equivalent stat command where
 # GNU options are unavailable.
 stat -c '%U:%G %a' /etc/vault/plugins/vault-plugin-secrets-proxmox
+if [ "$(stat -c '%U:%G' /etc/vault/plugins/vault-plugin-secrets-proxmox)" = "$EXPECTED_OWNER" ]; then
+  echo "OK: owner/group is $EXPECTED_OWNER"
+else
+  echo "FAIL: unexpected owner/group"
+  fail=1
+fi
 # No group/other write permission on the file or any parent directory. Each
 # check prints evidence and contributes to the final verification status:
 if test -z "$(find /etc/vault/plugins/vault-plugin-secrets-proxmox \
