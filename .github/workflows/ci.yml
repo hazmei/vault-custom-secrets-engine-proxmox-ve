@@ -56,7 +56,9 @@ jobs:
         run: shellcheck scripts/*.sh
       - name: verify-plugin-artifact smoke
         run: |
-          d=$(mktemp -d)/plugins
+          fixture=$(mktemp -d "$GITHUB_WORKSPACE/.verify-plugin.XXXXXX")
+          trap 'rm -rf "$fixture"' EXIT
+          d="$fixture/plugins"
           mkdir -p "$d"
           install -m 0755 /bin/true "$d/vault-plugin-secrets-proxmox"
           sha=$(sha256sum "$d/vault-plugin-secrets-proxmox" | cut -d' ' -f1)
