@@ -50,9 +50,12 @@ vault-plugin-secrets-proxmox/
 ├── .gitignore
 ├── Makefile
 ├── .golangci.yml
+├── scripts/
+│   └── verify-plugin-artifact.sh # operator-run artifact/permission verification
 ├── docs/
 │   ├── ARCHITECTURE.md
 │   ├── IMPLEMENTATION_PLAN.md
+│   ├── PRODUCTION_VERIFICATION.md
 │   └── PVE_PROBES.md
 ├── README.md
 ├── AGENTS.md

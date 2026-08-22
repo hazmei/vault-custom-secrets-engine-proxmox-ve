@@ -13,6 +13,7 @@ make test                                # unit tests (mocked Proxmox client)
 go test ./... -run TestXxx -v              # single test
 make testacc                              # operator-run acceptance tests (needs disposable/dev Proxmox)
 make lint                                # pinned golangci-lint via Makefile
+make verify-artifact                      # operator-run artifact/permission verification
 ```
 
 Current phase validation status, including the recorded PVE build, optional

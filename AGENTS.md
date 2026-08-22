@@ -116,7 +116,9 @@ The admin token never needs to hold the delegated roles — those are bound to o
 - **Acceptance tests:** Prefix `TestAcc*`, gated by `VAULT_ACC=1` (HashiCorp convention), run only by an operator against a disposable/dev Proxmox cluster. They are never run by CI.
 - **Unit tests** use a mocked PVE client (`internal/pveapi/mock.go`).
 - Run: `go build ./...`, `make test`, `make testacc` (operator-run live
-  acceptance with required env preflight), `make lint`.
+  acceptance with required env preflight), `make lint`, `make verify-artifact`
+  (operator-run artifact and permission verification with the required
+  `EXPECTED_SHA`, `EXPECTED_OWNER`, and `PLUGIN_DIR` environment variables).
 - **CI** (`.github/workflows/ci.yml`) runs build + unit tests + golangci-lint (pinned v2.12.2) on every push/PR. The lint version is pinned in the Makefile (`GOLANGCI_LINT_VERSION`) so local and CI agree.
 
 ## Docs
