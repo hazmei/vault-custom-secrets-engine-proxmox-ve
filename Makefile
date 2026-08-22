@@ -44,6 +44,11 @@ fmt:
 .PHONY: lint
 lint:
 	go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION) run
+	@if command -v shellcheck >/dev/null 2>&1; then \
+		shellcheck scripts/*.sh; \
+	else \
+		echo "shellcheck not installed; skipping shell script lint"; \
+	fi
 
 .PHONY: verify-artifact
 verify-artifact:

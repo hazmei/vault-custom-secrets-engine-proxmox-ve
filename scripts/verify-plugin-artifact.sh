@@ -74,21 +74,39 @@ else
     fail=1
   fi
 
-  if [ "$(id -u)" -eq 0 ] || [ "$(id -un)" = "$service_user" ]; then
+  if [ "$(id -un)" = "$service_user" ]; then
     if test -x "$plugin_path"; then
       echo "OK: executable by Vault service user"
     else
       echo "FAIL: not executable by Vault service user"
       fail=1
     fi
-  elif command -v sudo >/dev/null 2>&1 && sudo -u "$service_user" test -x "$plugin_path"; then
-    echo "OK: executable by Vault service user"
-  else
-    if command -v sudo >/dev/null 2>&1; then
+  elif command -v runuser >/dev/null 2>&1; then
+    runuser -u "$service_user" -- test -x "$plugin_path"
+    execute_status=$?
+    if [ "$execute_status" -eq 0 ]; then
+      echo "OK: executable by Vault service user"
+    elif [ "$execute_status" -eq 1 ]; then
       echo "FAIL: not executable by Vault service user"
+      fail=1
     else
-      echo "FAIL: sudo is unavailable; cannot test service-user execution"
+      echo "FAIL: runuser could not test service-user execution"
+      fail=1
     fi
+  elif command -v sudo >/dev/null 2>&1; then
+    sudo -n -u "$service_user" test -x "$plugin_path"
+    execute_status=$?
+    if [ "$execute_status" -eq 0 ]; then
+      echo "OK: executable by Vault service user"
+    elif [ "$execute_status" -eq 1 ]; then
+      echo "FAIL: not executable by Vault service user"
+      fail=1
+    else
+      echo "FAIL: sudo cannot run non-interactively as $service_user"
+      fail=1
+    fi
+  else
+    echo "FAIL: cannot drop privileges to $service_user; install sudo or runuser"
     fail=1
   fi
 
