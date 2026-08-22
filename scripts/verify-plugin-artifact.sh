@@ -15,14 +15,14 @@ fi
 if [ -z "$expected_owner" ]; then
   echo "FAIL: EXPECTED_OWNER is required"
   fail=1
-fi
-case "$expected_owner" in
-  ?*:?*) ;;
-  *)
+elif ! case "$expected_owner" in
+  ?*:?*) true ;;
+  *) false ;;
+esac
+then
     echo "FAIL: EXPECTED_OWNER must be user:group"
     fail=1
-    ;;
-esac
+fi
 
 case "$plugin_dir" in
   /*) ;;
@@ -117,7 +117,7 @@ else
 
   owner=$(stat -c '%U:%G %a' "$plugin_path" 2>/dev/null)
   owner_status=$?
-  echo "$owner"
+  [ "$owner_status" -eq 0 ] && echo "$owner"
   if [ "$owner_status" -eq 0 ] && [ "${owner% *}" = "$expected_owner" ]; then
     echo "OK: owner/group is $expected_owner"
   else
