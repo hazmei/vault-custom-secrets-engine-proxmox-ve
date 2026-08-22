@@ -52,3 +52,5 @@ jobs:
           # Floor: the action downloads a pre-built binary that must be built with
           # Go >= this module's language version (go 1.25.7); v2.12.2 satisfies that.
           version: v2.12.2
+      - run: sudo apt-get update && sudo apt-get install --yes shellcheck
+      - run: shellcheck scripts/*.sh

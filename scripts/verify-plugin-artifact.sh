@@ -31,6 +31,11 @@ if [ -z "$service_user" ]; then
   fail=1
 fi
 
+if [ "$fail" -ne 0 ]; then
+  echo "VERIFICATION FAILED: invalid inputs"
+  exit 1
+fi
+
 tools_ok=1
 if command -v sha256sum >/dev/null 2>&1 &&
   sha256sum /dev/null >/dev/null 2>&1; then
@@ -56,14 +61,6 @@ else
   tools_ok=0
   fail=1
 fi
-if command -v sudo >/dev/null 2>&1; then
-  echo "OK: sudo is available"
-else
-  echo "FAIL: sudo is unavailable; cannot test service-user execution"
-  tools_ok=0
-  fail=1
-fi
-
 if [ "$tools_ok" -eq 0 ]; then
   echo "FAIL: compatible verification tools are required; assertions skipped"
 else
@@ -77,10 +74,21 @@ else
     fail=1
   fi
 
-  if sudo -u "$service_user" test -x "$plugin_path"; then
+  if [ "$(id -u)" -eq 0 ] || [ "$(id -un)" = "$service_user" ]; then
+    if test -x "$plugin_path"; then
+      echo "OK: executable by Vault service user"
+    else
+      echo "FAIL: not executable by Vault service user"
+      fail=1
+    fi
+  elif command -v sudo >/dev/null 2>&1 && sudo -u "$service_user" test -x "$plugin_path"; then
     echo "OK: executable by Vault service user"
   else
-    echo "FAIL: not executable by Vault service user"
+    if command -v sudo >/dev/null 2>&1; then
+      echo "FAIL: not executable by Vault service user"
+    else
+      echo "FAIL: sudo is unavailable; cannot test service-user execution"
+    fi
     fail=1
   fi
 
@@ -94,7 +102,13 @@ else
     fail=1
   fi
 
-  if [ -n "$(find "$plugin_path" -maxdepth 0 -perm /022 -print -quit)" ]; then
+  if [ ! -e "$plugin_path" ]; then
+    echo "FAIL: $plugin_path does not exist"
+    fail=1
+  elif ! writable=$(find "$plugin_path" -maxdepth 0 -perm /022 -print -quit 2>&1); then
+    echo "FAIL: cannot stat $plugin_path: $writable"
+    fail=1
+  elif [ -n "$writable" ]; then
     echo "FAIL: plugin file is group/other writable"
     fail=1
   else
@@ -103,7 +117,13 @@ else
 
   p=$plugin_dir
   while :; do
-    if [ -n "$(find "$p" -maxdepth 0 -perm /022 -print -quit)" ]; then
+    if [ ! -e "$p" ]; then
+      echo "FAIL: $p does not exist or is not readable"
+      fail=1
+    elif ! writable=$(find "$p" -maxdepth 0 -perm /022 -print -quit 2>&1); then
+      echo "FAIL: cannot stat $p: $writable"
+      fail=1
+    elif [ -n "$writable" ]; then
       echo "FAIL: $p is group/other writable"
       fail=1
     else

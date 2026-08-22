@@ -96,9 +96,19 @@ VERIFY_PLUGIN_DIR="/etc/vault/plugins" \
 make verify-artifact
 ```
 
-The target runs `scripts/verify-plugin-artifact.sh` once per Vault node. Set
-`VERIFY_PLUGIN_DIR` to the node's absolute `plugin_directory`; the script
-preflights the GNU command forms it uses, checks the digest, service-user
+The target is a convenience wrapper for a node that has the repository
+checkout and `make`. On hardened nodes without either, copy the standalone
+script and run it directly from the node instead:
+
+```bash
+scp scripts/verify-plugin-artifact.sh <node>:/tmp/
+ssh <node> 'EXPECTED_SHA=<from change ticket> EXPECTED_OWNER=vault:vault \
+  PLUGIN_DIR=/etc/vault/plugins bash /tmp/verify-plugin-artifact.sh; echo "exit=$?"'
+```
+
+Run the wrapper or standalone script once per Vault node. Set
+`VERIFY_PLUGIN_DIR`/`PLUGIN_DIR` to the node's absolute `plugin_directory`; the
+script preflights the GNU command forms it uses, checks the digest, service-user
 execution, owner/group, and every ancestor directory, and exits non-zero when
 verification fails. `EXPECTED_SHA` and `EXPECTED_OWNER` must be the approved
 values from the change ticket and deployment standard.
