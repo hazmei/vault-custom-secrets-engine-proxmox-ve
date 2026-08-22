@@ -81,28 +81,28 @@ else
       echo "FAIL: not executable by Vault service user"
       fail=1
     fi
-  elif command -v runuser >/dev/null 2>&1; then
-    runuser -u "$service_user" -- test -x "$plugin_path"
+  elif [ "$(id -u)" -eq 0 ] && command -v runuser >/dev/null 2>&1; then
+    execute_err=$(runuser -u "$service_user" -- test -x "$plugin_path" 2>&1)
     execute_status=$?
     if [ "$execute_status" -eq 0 ]; then
       echo "OK: executable by Vault service user"
-    elif [ "$execute_status" -eq 1 ]; then
-      echo "FAIL: not executable by Vault service user"
+    elif [ -n "$execute_err" ]; then
+      echo "FAIL: runuser could not run as $service_user: $execute_err"
       fail=1
     else
-      echo "FAIL: runuser could not test service-user execution"
+      echo "FAIL: not executable by Vault service user"
       fail=1
     fi
   elif command -v sudo >/dev/null 2>&1; then
-    sudo -n -u "$service_user" test -x "$plugin_path"
+    execute_err=$(sudo -n -u "$service_user" test -x "$plugin_path" 2>&1)
     execute_status=$?
     if [ "$execute_status" -eq 0 ]; then
       echo "OK: executable by Vault service user"
-    elif [ "$execute_status" -eq 1 ]; then
-      echo "FAIL: not executable by Vault service user"
+    elif [ -n "$execute_err" ]; then
+      echo "FAIL: sudo could not run as $service_user: $execute_err"
       fail=1
     else
-      echo "FAIL: sudo cannot run non-interactively as $service_user"
+      echo "FAIL: not executable by Vault service user"
       fail=1
     fi
   else
