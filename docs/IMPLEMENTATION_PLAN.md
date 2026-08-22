@@ -1465,6 +1465,12 @@ enablement were verified. Production-style plugin catalog registration with
 `vault plugin register -sha256=<hash>` was not run and remains unverified.
 Therefore Phase 6 is not complete.
 
+The operator-facing production verification procedure is maintained in
+[`docs/PRODUCTION_VERIFICATION.md`](PRODUCTION_VERIFICATION.md). This
+implementation plan is the canonical source for phase status and deferred
+verification gates; do not create a second root-level backlog that restates
+those gates.
+
 The smoke test covered stored-config validation and secret redaction, role
 creation, credential issuance, issued-token `/version` authentication,
 renewal, revocation, PVE absence verification, the `force=true` delete guard,

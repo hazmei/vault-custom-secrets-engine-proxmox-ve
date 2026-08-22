@@ -85,8 +85,12 @@ verify the digest independently and verify ownership, mode, and path:
 
 ```bash
 sha256sum /etc/vault/plugins/vault-plugin-secrets-proxmox
-test "$(stat -c '%a' /etc/vault/plugins/vault-plugin-secrets-proxmox)" = 755
 test -x /etc/vault/plugins/vault-plugin-secrets-proxmox
+# Verify the Vault service user can execute it, the expected owner/group are set,
+# and no group or other write permission is present. Use the platform-equivalent
+# stat/find commands where these GNU options are unavailable.
+test -z "$(find /etc/vault/plugins/vault-plugin-secrets-proxmox \
+  -perm /022 -print -quit)"
 ```
 
 On platforms without `sha256sum` or GNU `stat`, use the platform equivalents.
@@ -114,14 +118,14 @@ and directory configuration.
 
 ## 3. Register and enable the plugin
 
-Against the production Vault API, calculate the digest from the installed
-artifact and register the plugin by catalog name:
+From an approved operator session, register the plugin by catalog name using the
+SHA-256 digest recorded in step 1. Run this against the production Vault API;
+do not calculate a digest from a workstation-local path:
 
 ```bash
 export VAULT_ADDR='<VAULT_ADDR>'
 # Supply VAULT_TOKEN only through the approved protected session.
-SHA256=$(sha256sum /etc/vault/plugins/vault-plugin-secrets-proxmox | cut -d' ' -f1)
-vault plugin register -sha256="$SHA256" \
+vault plugin register -sha256="<SHA256_FROM_CHANGE_TICKET>" \
   secret vault-plugin-secrets-proxmox
 vault plugin list secret
 vault secrets enable -path=<MOUNT> vault-plugin-secrets-proxmox
@@ -152,7 +156,7 @@ path "<MOUNT>/creds/<ROLE>" {
   capabilities = ["read"]
 }
 
-path "sys/leases/renew/<MOUNT>/creds/<ROLE>" {
+path "sys/leases/renew" {
   capabilities = ["update"]
 }
 
@@ -169,13 +173,15 @@ approved break-glass process. Verify the effective policy before testing:
 vault token capabilities <MOUNT>/config
 vault token capabilities <MOUNT>/roles/<ROLE>
 vault token capabilities <MOUNT>/creds/<ROLE>
-vault token capabilities sys/leases/renew/<MOUNT>/creds/<ROLE>
+vault token capabilities sys/leases/renew
 vault token capabilities sys/leases/revoke
 ```
 
 Expected capabilities are the minimum operations above. `vault token
 capabilities` is an authorization check, not a substitute for testing the
-actual endpoint behavior.
+actual endpoint behavior. Vault's built-in `default` policy already grants
+`sys/leases/renew` and its path form, so this stanza is usually redundant
+unless the verification token is created with `-no-default-policy`.
 
 ## 5. Prepare the dedicated PVE verification identity
 
@@ -198,8 +204,10 @@ pveum user token add <PROVISIONER>@<REALM> vault \
 ```
 
 Capture the token secret once into the approved secret manager. `privsep=0` is
-mandatory: the default `privsep=1` gives the token a separate empty ACL and
-credentials issued by the engine will not inherit the user's group access.
+mandatory: the default `privsep=1` gives the provisioner token a separate empty
+ACL, so the engine's own privilege validation and user-provisioning calls are
+denied. The engine separately sets `privsep=0` on each issued lease token so it
+inherits the synthetic user's group access.
 Verify the group binding and propagated `User.Modify` with the PVE
 administrator before continuing. The PVE token secret is never read back by
 the engine and must not be logged.
@@ -213,7 +221,7 @@ do not use `tls_skip_verify=true` as a production workaround:
 vault write <MOUNT>/config \
   address="https://<PVE_HOST>:8006" \
   token_id="<PROVISIONER>@<REALM>!vault" \
-  token_secret="<ONE_TIME_SECRET>" \
+  token_secret=@<PROVISIONER_SECRET_FILE> \
   tls_skip_verify=false ca_cert=@<CA_BUNDLE> \
   default_ttl=3600 default_max_ttl=86400
 vault read <MOUNT>/config
@@ -252,9 +260,10 @@ stable, non-sensitive marker. For example, substitute the endpoint and marker
 approved for the target:
 
 ```bash
-curl --fail --silent --show-error \
-  -H "Authorization: PVEAPIToken=<ISSUED_USER>@<REALM>!lease=<LEASE_SECRET>" \
-  "https://<PVE_HOST>:8006/api2/json/<BEHAVIORAL_PATH>"
+printf 'Authorization: PVEAPIToken=%s@%s!lease=%s\n' \
+  "$ISSUED_USER" "$REALM" "$LEASE_SECRET" | \
+  curl --fail --silent --show-error \
+  --header @- "https://<PVE_HOST>:8006/api2/json/<BEHAVIORAL_PATH>"
 ```
 
 Confirm HTTP 200 and the approved response marker. Also verify that an endpoint
@@ -268,7 +277,7 @@ Renew through Vault's lease endpoint, using the lease ID returned by the issue
 operation:
 
 ```bash
-vault lease renew <LEASE_ID> increment=300
+vault lease renew -increment=300 <LEASE_ID>
 ```
 
 Confirm the renewal succeeds, the PVE user's `expire` advances, group
@@ -296,9 +305,9 @@ confirmation flag:
 ```bash
 vault delete <MOUNT>/config force=true
 # Or explicitly:
-curl --fail --silent --show-error -X DELETE \
-  -H "X-Vault-Token: <BREAK_GLASS_TOKEN>" \
-  "${VAULT_ADDR}/v1/<MOUNT>/config?force=true"
+printf 'X-Vault-Token: %s\n' "$BREAK_GLASS_TOKEN" | \
+  curl --fail --silent --show-error -X DELETE \
+  --header @- "${VAULT_ADDR}/v1/<MOUNT>/config?force=true"
 ```
 
 Verify that deletion without the data parameter is rejected. After the test,
