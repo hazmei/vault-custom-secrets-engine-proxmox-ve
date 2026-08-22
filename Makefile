@@ -10,6 +10,7 @@ GO_FILES := $(shell find . -name '*.go' -not -path './vendor/*')
 # toolchain (observed: "switching to go1.25.13") and the resulting binary clears golangci-lint's
 # build-version guard for this module.
 GOLANGCI_LINT_VERSION ?= v2.12.2
+VERIFY_PLUGIN_DIR ?= /etc/vault/plugins
 
 .PHONY: build
 build:
@@ -43,6 +44,11 @@ fmt:
 .PHONY: lint
 lint:
 	go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION) run
+
+.PHONY: verify-artifact
+verify-artifact:
+	EXPECTED_SHA="$(EXPECTED_SHA)" EXPECTED_OWNER="$(EXPECTED_OWNER)" \
+	PLUGIN_DIR="$(VERIFY_PLUGIN_DIR)" scripts/verify-plugin-artifact.sh
 
 .PHONY: tidy
 tidy:

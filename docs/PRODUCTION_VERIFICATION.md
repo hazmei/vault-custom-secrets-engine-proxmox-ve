@@ -90,110 +90,22 @@ binary to the approved plugin directory on every Vault node. On each node,
 verify the digest independently and verify ownership, mode, and path:
 
 ```bash
-fail=0
-EXPECTED_SHA="<SHA256_FROM_CHANGE_TICKET>"
-EXPECTED_OWNER="vault:vault"  # approved service user/group
-tools_ok=1
-if command -v sha256sum >/dev/null 2>&1 && sha256sum /dev/null >/dev/null 2>&1; then
-  echo "OK: sha256sum is available"
-else
-  echo "FAIL: sha256sum is unavailable; use shasum -a 256"
-  tools_ok=0
-  fail=1
-fi
-if command -v stat >/dev/null 2>&1 && stat -c '%U' / >/dev/null 2>&1; then
-  echo "OK: GNU stat -c is available"
-else
-  echo "FAIL: GNU stat -c is unavailable; use stat -f '%Su:%Sg %Lp'"
-  tools_ok=0
-  fail=1
-fi
-if command -v find >/dev/null 2>&1 && \
-  find / -maxdepth 0 -perm /022 -print -quit >/dev/null 2>&1; then
-  echo "OK: find -maxdepth 0 -perm /022 is available"
-else
-  echo "FAIL: find -perm /022 is unavailable; use the platform equivalent"
-  tools_ok=0
-  fail=1
-fi
-if [ "$tools_ok" -eq 1 ]; then
-  actual_sha=$(sha256sum /etc/vault/plugins/vault-plugin-secrets-proxmox)
-  actual_sha="${actual_sha%% *}"
-  if [ "$actual_sha" = "$EXPECTED_SHA" ]; then
-    echo "OK: digest matches the approved artifact"
-  else
-    echo "FAIL: digest does not match the approved artifact"
-    fail=1
-  fi
-else
-  echo "FAIL: digest and permission assertions skipped until compatible tools are installed"
-fi
-if sudo -u vault test -x /etc/vault/plugins/vault-plugin-secrets-proxmox; then
-  echo "OK: executable by Vault service user"
-else
-  echo "FAIL: not executable by Vault service user"
-  fail=1
-fi
-# Replace vault:vault with the approved service user/group and verify the
-# expected owner/group and mode. Use the platform-equivalent stat command where
-# GNU options are unavailable.
-if [ "$tools_ok" -eq 1 ]; then
-  owner=$(stat -c '%U:%G %a' /etc/vault/plugins/vault-plugin-secrets-proxmox)
-  echo "$owner"
-  if [ "${owner% *}" = "$EXPECTED_OWNER" ]; then
-    echo "OK: owner/group is $EXPECTED_OWNER"
-  else
-    echo "FAIL: unexpected owner/group"
-    fail=1
-  fi
-else
-  echo "FAIL: owner/group assertion skipped until compatible tools are installed"
-fi
-# No group/other write permission on the file or any parent directory. Each
-# check prints evidence and contributes to the final verification status:
-if [ "$tools_ok" -eq 1 ] && \
-  test -z "$(find /etc/vault/plugins/vault-plugin-secrets-proxmox \
-    -perm /022 -print -quit)"; then
-  echo "OK: plugin file is not group/other writable"
-elif [ "$tools_ok" -eq 0 ]; then
-  echo "FAIL: plugin writability assertion skipped until compatible tools are installed"
-else
-  echo "FAIL: plugin file is group/other writable"
-  fail=1
-fi
-p=/etc/vault/plugins  # adapt to your plugin_directory; must be absolute
-case "$p" in
-  /*)
-    while :; do
-      if [ "$tools_ok" -eq 1 ] && \
-        test -z "$(find "$p" -maxdepth 0 -perm /022 -print -quit)"; then
-        echo "OK: $p is not group/other writable"
-      elif [ "$tools_ok" -eq 0 ]; then
-        echo "FAIL: $p writability assertion skipped until compatible tools are installed"
-        fail=1
-      else
-        echo "FAIL: $p is group/other writable"
-        fail=1
-      fi
-      [ "$p" = / ] && break
-      p=$(dirname "$p")
-    done
-    ;;
-  *)
-    echo "FAIL: plugin path must be absolute; ancestor check skipped"
-    fail=1
-    ;;
-esac
-if [ "$fail" -eq 0 ]; then
-  echo "VERIFICATION PASSED"
-else
-  echo "VERIFICATION FAILED"
-fi
+EXPECTED_SHA="<SHA256_FROM_CHANGE_TICKET>" \
+EXPECTED_OWNER="vault:vault" \
+VERIFY_PLUGIN_DIR="/etc/vault/plugins" \
+make verify-artifact
 ```
 
-On platforms without `sha256sum` or GNU `stat`, use the platform equivalents
-after adapting the preflight checks above (for example, `shasum -a 256` and
-`stat -f '%Su:%Sg %Lp'` on BSD/macOS).
+The target runs `scripts/verify-plugin-artifact.sh` once per Vault node. Set
+`VERIFY_PLUGIN_DIR` to the node's absolute `plugin_directory`; the script
+preflights the GNU command forms it uses, checks the digest, service-user
+execution, owner/group, and every ancestor directory, and exits non-zero when
+verification fails. `EXPECTED_SHA` and `EXPECTED_OWNER` must be the approved
+values from the change ticket and deployment standard.
+
+On platforms without `sha256sum` or GNU `stat`, adapt the script to use the
+platform equivalents (for example, `shasum -a 256` and
+`stat -f '%Su:%Sg %Lp'` on BSD/macOS) before running it.
 The digest must match on all nodes before registration. If any node differs,
 stop and correct distribution; do not register a mixed artifact set.
 
