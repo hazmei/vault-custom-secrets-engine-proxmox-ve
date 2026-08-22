@@ -364,6 +364,8 @@ Build the plugin binary into `vault/plugins/`:
 
 ```bash
 make build
+# Record this digest in the change ticket; use it as <SHA256_FROM_CHANGE_TICKET> below.
+shasum -a 256 vault/plugins/vault-plugin-secrets-proxmox
 ```
 
 For local development, start Vault with the plugin directory. Vault
