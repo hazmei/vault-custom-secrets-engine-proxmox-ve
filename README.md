@@ -392,11 +392,12 @@ HA/failover checks, see the [Production Vault Verification
 Procedure](docs/PRODUCTION_VERIFICATION.md).
 
 For a production-style install, configure Vault with a real plugin directory,
-copy the binary there, calculate its SHA-256 digest from that exact file, and
-register it in the Vault plugin catalog. Put the following stanza in the Vault
-server configuration file (for example, `/etc/vault.d/vault.hcl`), then restart
-Vault for the setting to take effect. The directory must be configured as a
-real directory, not a symlink:
+distribute the binary to every node, verify each node against the SHA-256 digest
+recorded at build time (`<SHA256_FROM_CHANGE_TICKET>` below — the value captured
+in the change ticket), and only then register it in the Vault plugin catalog.
+Put the following stanza in the Vault server configuration file (for example,
+`/etc/vault.d/vault.hcl`), then restart Vault for the setting to take effect.
+The directory must be configured as a real directory, not a symlink:
 
 ```hcl
 plugin_directory = "/etc/vault/plugins"
