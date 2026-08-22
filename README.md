@@ -409,8 +409,9 @@ sudo install -m 0755 vault/plugins/vault-plugin-secrets-proxmox /etc/vault/plugi
 # On each Vault node, verify the installed artifact before registering it. Use
 # the digest recorded at build time, not a digest calculated on an admin
 # workstation or from an unapproved local file.
-EXPECTED_SHA=<digest recorded at build time> EXPECTED_OWNER=vault:vault \
-  PLUGIN_DIR=/etc/vault/plugins bash scripts/verify-plugin-artifact.sh
+scp scripts/verify-plugin-artifact.sh <node>:/tmp/
+ssh <node> 'EXPECTED_SHA="<digest recorded at build time>" EXPECTED_OWNER="vault:vault" \
+  PLUGIN_DIR=/etc/vault/plugins bash /tmp/verify-plugin-artifact.sh; echo "exit=$?"'
 vault plugin register -sha256="<digest recorded at build time>" \
   secret vault-plugin-secrets-proxmox
 vault secrets enable -path=proxmox vault-plugin-secrets-proxmox

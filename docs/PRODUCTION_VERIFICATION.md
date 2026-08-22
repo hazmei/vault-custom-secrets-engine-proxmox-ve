@@ -102,7 +102,7 @@ script and run it directly from the node instead:
 
 ```bash
 scp scripts/verify-plugin-artifact.sh <node>:/tmp/
-ssh <node> 'EXPECTED_SHA=<from change ticket> EXPECTED_OWNER=vault:vault \
+ssh <node> 'EXPECTED_SHA="<from change ticket>" EXPECTED_OWNER="vault:vault" \
   PLUGIN_DIR=/etc/vault/plugins bash /tmp/verify-plugin-artifact.sh; echo "exit=$?"'
 ```
 
