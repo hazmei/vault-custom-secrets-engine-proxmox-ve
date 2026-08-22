@@ -59,6 +59,9 @@ explicitly approved target.
   `vault/plugins/vault-plugin-secrets-proxmox`.
 - A release artifact transfer process that preserves executable bits and does
   not transform the binary.
+- `curl` 7.55.0 or newer when using `--header @-` below. On older systems,
+  write each header to a mode-0600 temporary file, use `--header @<file>`, and
+  securely remove the file after the request.
 
 ### Proxmox VE
 
@@ -85,12 +88,15 @@ verify the digest independently and verify ownership, mode, and path:
 
 ```bash
 sha256sum /etc/vault/plugins/vault-plugin-secrets-proxmox
-test -x /etc/vault/plugins/vault-plugin-secrets-proxmox
-# Verify the Vault service user can execute it, the expected owner/group are set,
-# and no group or other write permission is present. Use the platform-equivalent
-# stat/find commands where these GNU options are unavailable.
+sudo -u vault test -x /etc/vault/plugins/vault-plugin-secrets-proxmox
+# Replace vault:vault with the approved service user/group and verify the
+# expected owner/group and mode. Use the platform-equivalent stat command where
+# GNU options are unavailable.
+stat -c '%U:%G %a' /etc/vault/plugins/vault-plugin-secrets-proxmox
+# No group/other write permission on the file or its containing directory:
 test -z "$(find /etc/vault/plugins/vault-plugin-secrets-proxmox \
   -perm /022 -print -quit)"
+test -z "$(find /etc/vault/plugins -maxdepth 1 -type d -perm /022 -print -quit)"
 ```
 
 On platforms without `sha256sum` or GNU `stat`, use the platform equivalents.
@@ -226,6 +232,11 @@ vault write <MOUNT>/config \
   default_ttl=3600 default_max_ttl=86400
 vault read <MOUNT>/config
 ```
+
+Create `<PROVISIONER_SECRET_FILE>` without a trailing newline. The Vault CLI
+reads `@<file>` contents verbatim; use `printf %s` rather than `echo` when
+writing the one-time secret. A trailing newline is harmless in the PEM CA
+bundle, but would make the provisioner secret incorrect and lead to a PVE 401.
 
 Confirm the read response contains the address, TLS settings, TTLs, and token
 ID, but **does not contain `token_secret`**. Also confirm the secret is absent
