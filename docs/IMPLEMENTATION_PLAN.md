@@ -1493,7 +1493,7 @@ The test passed, including the positive behavioral-endpoint check and the
 expired-user authentication and renewal checks. The optional direct ACL
 anti-privilege-escalation and negative-authorization subtests skipped because
 their separately documented optional variables were not configured. No PVE
- changes were made outside the disposable target.
+changes were made outside the disposable target.
 
 **Tasks**:
 - [x] Build plugin: `make build` (output to `vault/plugins/`) — passed on

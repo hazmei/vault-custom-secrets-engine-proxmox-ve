@@ -406,8 +406,12 @@ Copy the built binary into that directory and make it executable:
 
 ```bash
 sudo install -m 0755 vault/plugins/vault-plugin-secrets-proxmox /etc/vault/plugins/
-SHA256=$(shasum -a 256 /etc/vault/plugins/vault-plugin-secrets-proxmox | cut -d' ' -f1)
-vault plugin register -sha256="$SHA256" \
+# On each Vault node, verify the installed artifact before registering it. Use
+# the digest recorded at build time, not a digest calculated on an admin
+# workstation or from an unapproved local file.
+EXPECTED_SHA=<digest recorded at build time> EXPECTED_OWNER=vault:vault \
+  PLUGIN_DIR=/etc/vault/plugins bash scripts/verify-plugin-artifact.sh
+vault plugin register -sha256="<digest recorded at build time>" \
   secret vault-plugin-secrets-proxmox
 vault secrets enable -path=proxmox vault-plugin-secrets-proxmox
 ```
