@@ -402,22 +402,25 @@ real directory, not a symlink:
 plugin_directory = "/etc/vault/plugins"
 ```
 
-Copy the built binary into that directory and make it executable:
+From the operator workstation, distribute the built binary and verifier to
+each Vault node, then verify every node before registering the plugin:
 
 ```bash
-# On each Vault node:
-sudo install -m 0755 vault/plugins/vault-plugin-secrets-proxmox /etc/vault/plugins/
-# From the operator workstation, copy the verifier to each node and replace
-# <node> with that node's hostname or address:
-scp scripts/verify-plugin-artifact.sh <node>:/tmp/
-# From the operator workstation, verify the remote node. Registration is gated
-# on this command succeeding; use the digest recorded at build time, not a
-# digest calculated on an admin workstation or from an unapproved local file.
-ssh <node> 'EXPECTED_SHA="<digest recorded at build time>" EXPECTED_OWNER="vault:vault" \
-  PLUGIN_DIR=/etc/vault/plugins bash /tmp/verify-plugin-artifact.sh' && \
+# Replace the node placeholders with every Vault node's hostname or address.
+for node in "<node1>" "<node2>" "<node3>"; do
+  scp vault/plugins/vault-plugin-secrets-proxmox \
+    scripts/verify-plugin-artifact.sh "$node":/tmp/
+  ssh "$node" 'sudo install -m 0755 /tmp/vault-plugin-secrets-proxmox \
+    /etc/vault/plugins/'
+  # Registration is gated on every remote verification succeeding. Use the
+  # digest recorded at build time, not one calculated from a local file.
+  ssh "$node" 'EXPECTED_SHA="<digest recorded at build time>" \
+    EXPECTED_OWNER="vault:vault" PLUGIN_DIR=/etc/vault/plugins \
+    bash /tmp/verify-plugin-artifact.sh' || exit 1
+done
+# Against the target Vault server configured by VAULT_ADDR:
 vault plugin register -sha256="<digest recorded at build time>" \
   secret vault-plugin-secrets-proxmox
-# Against the target Vault server configured by VAULT_ADDR:
 vault secrets enable -path=proxmox vault-plugin-secrets-proxmox
 ```
 
