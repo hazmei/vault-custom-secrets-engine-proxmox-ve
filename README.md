@@ -407,21 +407,39 @@ each Vault node, then verify every node before registering the plugin:
 
 ```bash
 # Replace the node placeholders with every Vault node's hostname or address.
+verified=1
 for node in "<node1>" "<node2>" "<node3>"; do
-  scp vault/plugins/vault-plugin-secrets-proxmox \
-    scripts/verify-plugin-artifact.sh "$node":/tmp/
-  ssh "$node" 'sudo install -m 0755 /tmp/vault-plugin-secrets-proxmox \
-    /etc/vault/plugins/'
-  # Registration is gated on every remote verification succeeding. Use the
+  if ! scp vault/plugins/vault-plugin-secrets-proxmox "$node":/tmp/; then
+    echo "FAIL: could not distribute plugin to $node"
+    verified=0
+    break
+  fi
+  # The SSH account must have non-interactive sudo permission for this
+  # install command (for example, a narrowly scoped NOPASSWD rule).
+  if ! ssh "$node" 'sudo -n install -m 0755 \
+    /tmp/vault-plugin-secrets-proxmox /etc/vault/plugins/'; then
+    echo "FAIL: could not install plugin on $node"
+    verified=0
+    break
+  fi
+  # Stream the verifier instead of staging it in world-writable /tmp. Use the
   # digest recorded at build time, not one calculated from a local file.
-  ssh "$node" 'EXPECTED_SHA="<digest recorded at build time>" \
-    EXPECTED_OWNER="vault:vault" PLUGIN_DIR=/etc/vault/plugins \
-    bash /tmp/verify-plugin-artifact.sh' || exit 1
+  if ! ssh "$node" 'EXPECTED_SHA="<digest recorded at build time>" \
+    EXPECTED_OWNER="vault:vault" PLUGIN_DIR=/etc/vault/plugins bash -s' \
+    < scripts/verify-plugin-artifact.sh; then
+    echo "FAIL: artifact verification failed on $node"
+    verified=0
+    break
+  fi
 done
-# Against the target Vault server configured by VAULT_ADDR:
-vault plugin register -sha256="<digest recorded at build time>" \
-  secret vault-plugin-secrets-proxmox
-vault secrets enable -path=proxmox vault-plugin-secrets-proxmox
+if [ "$verified" -eq 1 ]; then
+  # Against the target Vault server configured by VAULT_ADDR:
+  vault plugin register -sha256="<digest recorded at build time>" \
+    secret vault-plugin-secrets-proxmox
+  vault secrets enable -path=proxmox vault-plugin-secrets-proxmox
+else
+  echo "STOP: plugin registration was not attempted"
+fi
 ```
 
 For this production-style path, provide `VAULT_ADDR` and an authenticated
