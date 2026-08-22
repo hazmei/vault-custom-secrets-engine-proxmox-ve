@@ -56,7 +56,7 @@ jobs:
         run: shellcheck scripts/*.sh
       - name: verify-plugin-artifact smoke
         run: |
-          fixture=$(mktemp -d "$GITHUB_WORKSPACE/.verify-plugin.XXXXXX")
+          fixture=$(mktemp -d "$RUNNER_TEMP/verify-plugin.XXXXXX")
           trap 'rm -rf "$fixture"' EXIT
           d="$fixture/plugins"
           mkdir -p "$d"

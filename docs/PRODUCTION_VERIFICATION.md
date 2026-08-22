@@ -113,6 +113,10 @@ execution, owner/group, and every ancestor directory, and exits non-zero when
 verification fails. `EXPECTED_SHA` and `EXPECTED_OWNER` must be the approved
 values from the change ticket and deployment standard.
 
+The ancestor check covers every parent directory up to `/`; stage rehearsals in
+a non-world-writable directory, not `/tmp`, or the check will fail on `/tmp`
+even when the artifact itself is correct.
+
 On platforms without `sha256sum` or GNU `stat`, adapt the script to use the
 platform equivalents (for example, `shasum -a 256` and
 `stat -f '%Su:%Sg %Lp'` on BSD/macOS) before running it.
