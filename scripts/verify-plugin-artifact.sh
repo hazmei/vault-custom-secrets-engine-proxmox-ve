@@ -16,6 +16,13 @@ if [ -z "$expected_owner" ]; then
   echo "FAIL: EXPECTED_OWNER is required"
   fail=1
 fi
+case "$expected_owner" in
+  ?*:?*) ;;
+  *)
+    echo "FAIL: EXPECTED_OWNER must be user:group"
+    fail=1
+    ;;
+esac
 
 case "$plugin_dir" in
   /*) ;;
@@ -26,10 +33,6 @@ case "$plugin_dir" in
 esac
 
 service_user=${expected_owner%%:*}
-if [ -z "$service_user" ]; then
-  echo "FAIL: EXPECTED_OWNER must include a service user"
-  fail=1
-fi
 
 if [ "$fail" -ne 0 ]; then
   echo "VERIFICATION FAILED: invalid inputs"
