@@ -97,13 +97,14 @@ make verify-artifact
 ```
 
 The target is a convenience wrapper for a node that has the repository
-checkout and `make`. On hardened nodes without either, copy the standalone
-script and run it directly from the node instead:
+checkout and `make`. On hardened nodes without either, stream the standalone
+script from the operator workstation and run it directly on the node instead.
+This avoids staging the verifier in world-writable `/tmp`:
 
 ```bash
-scp scripts/verify-plugin-artifact.sh <node>:/tmp/
 ssh <node> 'EXPECTED_SHA="<from change ticket>" EXPECTED_OWNER="vault:vault" \
-  PLUGIN_DIR=/etc/vault/plugins bash /tmp/verify-plugin-artifact.sh; echo "exit=$?"'
+  PLUGIN_DIR=/etc/vault/plugins bash -s; echo "exit=$?"' \
+  < scripts/verify-plugin-artifact.sh
 ```
 
 Run the wrapper or standalone script once per Vault node. Set
