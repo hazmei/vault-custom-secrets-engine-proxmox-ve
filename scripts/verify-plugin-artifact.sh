@@ -138,12 +138,14 @@ else
     echo "OK: plugin file is not group/other writable"
   fi
 
-  p=$plugin_dir
+  if [ -L "$plugin_dir" ]; then
+    echo "FAIL: $plugin_dir is a symlink"
+    fail=1
+  fi
+  real_dir=$(cd "$plugin_dir" 2>/dev/null && pwd -P) || real_dir=$plugin_dir
+  p=$real_dir
   while :; do
-    if [ -L "$p" ]; then
-      echo "FAIL: $p is a symlink"
-      fail=1
-    elif [ ! -e "$p" ]; then
+    if [ ! -e "$p" ]; then
       echo "FAIL: $p does not exist or is not readable"
       fail=1
     elif ! writable=$(find "$p" -maxdepth 0 -perm /022 -print -quit 2>&1); then
