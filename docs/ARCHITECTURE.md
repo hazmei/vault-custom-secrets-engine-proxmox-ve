@@ -30,14 +30,17 @@ direct-ACL, and negative-authorization canaries were explicitly skipped on
 2026-08-20 because their optional prerequisites were unset. These skips do
 not constitute completed tests.
 
-**Production operations reference:** The README's [Production Proxmox
+**Production operations reference:** The focused
+[Production Vault Verification Procedure](PRODUCTION_VERIFICATION.md) is the
+operator-facing verification checklist. The README's [Production Proxmox
 Prerequisites and Runbook](../README.md#production-proxmox-prerequisites-and-runbook)
-is the operator-facing setup procedure. It is distinct from the disposable
-acceptance setup and covers the dedicated provisioner identity, exact ACL
+remains the setup reference for the dedicated provisioner identity, exact ACL
 paths, mandatory propagation, one-time token secret handling, manual token
-rotation, and stranded-lease warnings. Production catalog registration remains
-unverified; the documented production-style Vault installation commands must
-not be treated as live validation.
+rotation, and stranded-lease warnings. Both are distinct from the disposable
+acceptance setup. Production catalog registration remains unverified; the
+documented production-style Vault installation commands must not be treated as
+live validation. This document remains authoritative for design and security
+behavior; the implementation plan remains authoritative for current status.
 
 ## Configuration
 

@@ -364,6 +364,8 @@ Build the plugin binary into `vault/plugins/`:
 
 ```bash
 make build
+# Record this digest in the change ticket; use it as <SHA256_FROM_CHANGE_TICKET> below.
+shasum -a 256 vault/plugins/vault-plugin-secrets-proxmox
 ```
 
 For local development, start Vault with the plugin directory. Vault
@@ -386,25 +388,62 @@ vault secrets enable -path=proxmox vault-plugin-secrets-proxmox
 
 **Production installation (distinct from the development server above):**
 
+For the focused operator checklist covering artifact distribution, production
+catalog registration, least-privilege policies, lifecycle verification, and
+HA/failover checks, see the [Production Vault Verification
+Procedure](docs/PRODUCTION_VERIFICATION.md).
+
 For a production-style install, configure Vault with a real plugin directory,
-copy the binary there, calculate its SHA-256 digest from that exact file, and
-register it in the Vault plugin catalog. Put the following stanza in the Vault
-server configuration file (for example, `/etc/vault.d/vault.hcl`), then restart
-Vault for the setting to take effect. The directory must be configured as a
-real directory, not a symlink:
+distribute the binary to every node, verify each node against the SHA-256 digest
+recorded at build time (`<SHA256_FROM_CHANGE_TICKET>` below — the value captured
+in the change ticket), and only then register it in the Vault plugin catalog.
+Put the following stanza in the Vault server configuration file (for example,
+`/etc/vault.d/vault.hcl`), then restart Vault for the setting to take effect.
+The directory must be configured as a real directory, not a symlink:
 
 ```hcl
 plugin_directory = "/etc/vault/plugins"
 ```
 
-Copy the built binary into that directory and make it executable:
+From the operator workstation, distribute the built binary and verifier to
+each Vault node, then verify every node before registering the plugin:
 
 ```bash
-sudo install -m 0755 vault/plugins/vault-plugin-secrets-proxmox /etc/vault/plugins/
-SHA256=$(shasum -a 256 /etc/vault/plugins/vault-plugin-secrets-proxmox | cut -d' ' -f1)
-vault plugin register -sha256="$SHA256" \
-  secret vault-plugin-secrets-proxmox
-vault secrets enable -path=proxmox vault-plugin-secrets-proxmox
+# Replace the node placeholders with every Vault node's hostname or address.
+verified=1
+for node in "<node1>" "<node2>" "<node3>"; do
+  if ! scp vault/plugins/vault-plugin-secrets-proxmox "$node":/tmp/; then
+    echo "FAIL: could not distribute plugin to $node"
+    verified=0
+    break
+  fi
+  # The SSH account must have non-interactive sudo permission for this
+  # install command (for example, a narrowly scoped NOPASSWD rule).
+  if ! ssh -n "$node" 'sudo -n install -m 0755 \
+    /tmp/vault-plugin-secrets-proxmox /etc/vault/plugins/ && \
+    rm -f /tmp/vault-plugin-secrets-proxmox'; then
+    echo "FAIL: could not install plugin on $node"
+    verified=0
+    break
+  fi
+  # Stream the verifier instead of staging it in world-writable /tmp. Use the
+  # digest recorded at build time, not one calculated from a local file.
+  if ! ssh "$node" 'EXPECTED_SHA="<SHA256_FROM_CHANGE_TICKET>" \
+    EXPECTED_OWNER="vault:vault" PLUGIN_DIR=/etc/vault/plugins bash -s' \
+    < scripts/verify-plugin-artifact.sh; then
+    echo "FAIL: artifact verification failed on $node"
+    verified=0
+    break
+  fi
+done
+if [ "$verified" -eq 1 ]; then
+  # Against the target Vault server configured by VAULT_ADDR:
+  vault plugin register -sha256="<SHA256_FROM_CHANGE_TICKET>" \
+    secret vault-plugin-secrets-proxmox
+  vault secrets enable -path=proxmox vault-plugin-secrets-proxmox
+else
+  echo "STOP: plugin registration was not attempted"
+fi
 ```
 
 For this production-style path, provide `VAULT_ADDR` and an authenticated
@@ -512,6 +551,11 @@ Key points:
 - **[docs/RECOMMENDED_ROLES.md](docs/RECOMMENDED_ROLES.md)** — A starter set of
   roles for first-time setup: the PVE group and ACL bindings behind each one,
   suggested TTLs, per-team scoping, and the userid length budget
+
+- **[docs/PRODUCTION_VERIFICATION.md](docs/PRODUCTION_VERIFICATION.md)** — The
+  production verification procedure for artifact integrity, catalog
+  registration, Vault policy checks, PVE-backed lifecycle checks, cleanup, and
+  HA/failover validation
 
 ## Testing Strategy
 

@@ -116,12 +116,15 @@ The admin token never needs to hold the delegated roles — those are bound to o
 - **Acceptance tests:** Prefix `TestAcc*`, gated by `VAULT_ACC=1` (HashiCorp convention), run only by an operator against a disposable/dev Proxmox cluster. They are never run by CI.
 - **Unit tests** use a mocked PVE client (`internal/pveapi/mock.go`).
 - Run: `go build ./...`, `make test`, `make testacc` (operator-run live
-  acceptance with required env preflight), `make lint`.
-- **CI** (`.github/workflows/ci.yml`) runs build + unit tests + golangci-lint (pinned v2.12.2) on every push/PR. The lint version is pinned in the Makefile (`GOLANGCI_LINT_VERSION`) so local and CI agree.
+  acceptance with required env preflight), `make lint`, `make verify-artifact`
+  (operator-run artifact and permission verification with the required
+  `EXPECTED_SHA`, `EXPECTED_OWNER`, and `PLUGIN_DIR` environment variables).
+- **CI** (`.github/workflows/ci.yml`) runs build + unit tests + golangci-lint (pinned v2.12.2), ShellCheck, and the `verify-plugin-artifact` smoke test on every push/PR. The lint version is pinned in the Makefile (`GOLANGCI_LINT_VERSION`) so local and CI agree.
 
 ## Docs
 
 - `docs/ARCHITECTURE.md` — full design (paths, storage schema, lifecycle, error/compensation, TTLs). Authoritative.
 - `docs/IMPLEMENTATION_PLAN.md` — phased implementation tasks and locked decisions.
+- `docs/PRODUCTION_VERIFICATION.md` — operator-run production verification procedure (artifact integrity, catalog registration, lifecycle, HA/failover).
 - `docs/PVE_PROBES.md` — PVE behavior probe evidence (confirmed on PVE 9.2.10).
 - `README.md` — project overview and usage examples.
