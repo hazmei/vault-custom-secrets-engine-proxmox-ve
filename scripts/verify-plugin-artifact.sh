@@ -12,17 +12,17 @@ if [ -z "$expected_sha" ]; then
   echo "FAIL: EXPECTED_SHA is required"
   fail=1
 fi
-if [ -z "$expected_owner" ]; then
-  echo "FAIL: EXPECTED_OWNER is required"
-  fail=1
-elif ! case "$expected_owner" in
-  ?*:?*) true ;;
-  *) false ;;
-esac
-then
+case "$expected_owner" in
+  "")
+    echo "FAIL: EXPECTED_OWNER is required"
+    fail=1
+    ;;
+  ?*:?*) ;;
+  *)
     echo "FAIL: EXPECTED_OWNER must be user:group"
     fail=1
-fi
+    ;;
+esac
 
 case "$plugin_dir" in
   /*) ;;
