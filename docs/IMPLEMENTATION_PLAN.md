@@ -1461,8 +1461,8 @@ not run by CI.
 and `make lint` passed, and the full real Vault-server lifecycle smoke test
 passed against the disposable `pve-manager/9.2.10/43df2e01f27a1a19` target.
 Development-mode registration through `-dev-plugin-dir=./vault/plugins` and
-enablement were verified. Production-style plugin catalog registration with
-`vault plugin register -sha256=<hash>` was not run and remains unverified.
+enablement were verified. Production-style plugin catalog registration remains
+unverified; see the trackable deferred gate below.
 Therefore Phase 6 is not complete.
 
 The operator-facing production verification procedure is maintained in
@@ -1470,38 +1470,6 @@ The operator-facing production verification procedure is maintained in
 implementation plan is the canonical source for phase status and deferred
 verification gates; do not create a second root-level backlog that restates
 those gates.
-
-**Deferred verification gates before production adoption**:
-- [ ] Build one approved artifact, distribute it to every Vault node, and
-  verify identical digest, executable permissions, ownership, and path.
-- [ ] Register the plugin in the production catalog with the verified digest;
-  verify catalog and mount persistence across restart.
-- [ ] Verify standby-to-active forwarding before any PVE mutation, controlled
-  failover, and issue/renew/revoke through the cluster address after failover.
-- [ ] Verify restart recovery for leases, WAL cleanup, PVE users/tokens,
-  catalog state, mount state, and audit evidence across nodes.
-
-**Deferred feature — Password Credential Support (gated future feature)**:
-Password credentials are deliberately not implemented; the engine currently
-issues only PVE API tokens. Do not make token-only production adoption depend
-on this feature, add password fields, or alter the token lifecycle as part of
-the release gates. Complete these phases in order:
-- [ ] **Phase 1 — PVE password behavior probe**: verify user creation,
-  authentication, rotation/update, expiry, disablement, deletion, and
-  interaction with token credentials and the user-level `expire` backstop;
-  record evidence in `docs/PVE_PROBES.md`.
-- [ ] **Phase 2 — Role-level opt-in credential mode**: after the probe, add an
-  explicit mode with `token` as the default, preserving existing token-only
-  roles and leases; update schema, validation, architecture, plan, and tests.
-- [ ] **Phase 3 — Password issuance**: after mode design and tests are
-  approved, implement opt-in password generation and issuance with one-time
-  secret handling and token-path-equivalent collision/error compensation.
-- [ ] **Phase 4 — Password lifecycle handling**: define and test renewal,
-  revocation, WAL rollback, expiry, disablement, and out-of-band password
-  changes so token and password cleanup cannot silently diverge.
-- [ ] **Phase 5 — Documentation and security review**: review threat model,
-  privileges, audit expectations, secret handling, migration/compatibility,
-  and operator procedures; update the affected project documentation.
 
 The smoke test covered stored-config validation and secret redaction, role
 creation, credential issuance, issued-token `/version` authentication,
@@ -1525,7 +1493,43 @@ The test passed, including the positive behavioral-endpoint check and the
 expired-user authentication and renewal checks. The optional direct ACL
 anti-privilege-escalation and negative-authorization subtests skipped because
 their separately documented optional variables were not configured. No PVE
-changes were made outside the disposable target.
+ changes were made outside the disposable target.
+
+## Deferred / Future Work
+
+### Production adoption gates
+
+- [ ] Build one approved artifact, distribute it to every Vault node, and
+  verify identical digest, executable permissions, ownership, and path.
+- [ ] Register the plugin in the production catalog with the verified digest;
+  verify catalog and mount persistence across restart.
+- [ ] Verify standby-to-active forwarding before any PVE mutation, controlled
+  failover, and issue/renew/revoke through the cluster address after failover.
+- [ ] Verify restart recovery for leases, WAL cleanup, PVE users/tokens,
+  catalog state, mount state, and audit evidence across nodes.
+
+### Password Credential Support (gated future feature)
+
+Password credentials are deliberately not implemented; the engine currently
+issues only PVE API tokens. Do not make token-only production adoption depend
+on this feature, add password fields, or alter the token lifecycle as part of
+the release gates. Complete these phases in order:
+- [ ] **Phase 1 — PVE password behavior probe**: verify user creation,
+  authentication, rotation/update, expiry, disablement, deletion, and
+  interaction with token credentials and the user-level `expire` backstop;
+  record evidence in `docs/PVE_PROBES.md`.
+- [ ] **Phase 2 — Role-level opt-in credential mode**: after the probe, add an
+  explicit mode with `token` as the default, preserving existing token-only
+  roles and leases; update schema, validation, architecture, plan, and tests.
+- [ ] **Phase 3 — Password issuance**: after mode design and tests are
+  approved, implement opt-in password generation and issuance with one-time
+  secret handling and token-path-equivalent collision/error compensation.
+- [ ] **Phase 4 — Password lifecycle handling**: define and test renewal,
+  revocation, WAL rollback, expiry, disablement, and out-of-band password
+  changes so token and password cleanup cannot silently diverge.
+- [ ] **Phase 5 — Documentation and security review**: review threat model,
+  privileges, audit expectations, secret handling, migration/compatibility,
+  and operator procedures; update the affected project documentation.
 
 **Tasks**:
 - [x] Build plugin: `make build` (output to `vault/plugins/`) — passed on
@@ -1554,8 +1558,8 @@ changes were made outside the disposable target.
 **Acceptance Criteria**:
 - Clean build (`make build` succeeds)
 - Plugin auto-registers and enables through `-dev-plugin-dir` (verified)
-- Production catalog registration using `vault plugin register -sha256=<hash>`
-  remains unverified and is not claimed as complete
+- Production catalog registration is tracked by the unchecked production
+  adoption gate above and is not claimed as complete
 - Full issue→use→renew→revoke smoke test passes through a real `vault server`
   plus registered plugin binary with required live PVE configuration
 - Stored config can be force-deleted and the cached PVE client is invalidated

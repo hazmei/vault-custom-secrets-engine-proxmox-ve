@@ -59,6 +59,9 @@ explicitly approved target.
   `vault/plugins/vault-plugin-secrets-proxmox`.
 - A release artifact transfer process that preserves executable bits and does
   not transform the binary.
+
+### Operator workstation
+
 - `curl` 7.55.0 or newer when using `--header @-` below. On older systems,
   write each header to a mode-0600 temporary file, use `--header @<file>`, and
   securely remove the file after the request.
@@ -88,15 +91,35 @@ verify the digest independently and verify ownership, mode, and path:
 
 ```bash
 sha256sum /etc/vault/plugins/vault-plugin-secrets-proxmox
-sudo -u vault test -x /etc/vault/plugins/vault-plugin-secrets-proxmox
+if sudo -u vault test -x /etc/vault/plugins/vault-plugin-secrets-proxmox; then
+  echo "OK: executable by Vault service user"
+else
+  echo "FAIL: not executable by Vault service user"
+  exit 1
+fi
 # Replace vault:vault with the approved service user/group and verify the
 # expected owner/group and mode. Use the platform-equivalent stat command where
 # GNU options are unavailable.
 stat -c '%U:%G %a' /etc/vault/plugins/vault-plugin-secrets-proxmox
-# No group/other write permission on the file or its containing directory:
-test -z "$(find /etc/vault/plugins/vault-plugin-secrets-proxmox \
-  -perm /022 -print -quit)"
-test -z "$(find /etc/vault/plugins -maxdepth 1 -type d -perm /022 -print -quit)"
+# No group/other write permission on the file or any parent directory. Each
+# check prints evidence and exits non-zero on failure:
+if test -z "$(find /etc/vault/plugins/vault-plugin-secrets-proxmox \
+  -perm /022 -print -quit)"; then
+  echo "OK: plugin file is not group/other writable"
+else
+  echo "FAIL: plugin file is group/other writable"
+  exit 1
+fi
+p=/etc/vault/plugins
+while [ "$p" != / ]; do
+  if test -z "$(find "$p" -maxdepth 0 -perm /022 -print -quit)"; then
+    echo "OK: $p is not group/other writable"
+  else
+    echo "FAIL: $p is group/other writable"
+    exit 1
+  fi
+  p=$(dirname "$p")
+done
 ```
 
 On platforms without `sha256sum` or GNU `stat`, use the platform equivalents.
