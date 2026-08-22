@@ -372,16 +372,37 @@ Run these checks with the cluster owners and an approved failure plan:
 2. Send config, role, issue, renew, and revoke requests through the normal
    cluster address, not a node-local development address. Confirm mutating
    credential issuance is forwarded to the active node before any PVE call.
+   Record the active node from the cluster API and correlate a controlled issue
+   with the PVE proxy log; the `POST /api2/json/access/users` source address
+   must be the active Vault node, never a standby:
+
+   ```bash
+   vault status -format=json | jq -r '.ha_mode, .leader_address'
+   # On the PVE host, during the controlled issue:
+   grep 'POST /api2/json/access/users' /var/log/pveproxy/access.log | tail -5
+   ```
+
+   Use the Vault audit log and the corresponding PVE log entry as the recorded
+   evidence for forwarding. Stop if the source address is a standby or if the
+   request cannot be correlated.
 3. During a controlled active-node failover, verify that an already-issued
    lease can be renewed and revoked through the surviving cluster address.
 4. Perform one controlled issue after failover, use its behavioral endpoint,
    renew it, and revoke it. Verify no duplicate/orphan PVE user is left behind.
 5. If the Vault version or operational design permits a restart between issue
    and cleanup, verify that the persisted mount, role, lease, catalog entry,
-   and WAL rollback behavior are available after restart. Do not simulate a
-   crash in production without an approved plan.
+   and WAL rollback behavior are available after restart. For WAL rollback,
+   use an approved disposable-target failure injection that leaves an in-flight
+   WAL entry, then record the rollback-manager evidence that the nonce-matched
+   orphan `vault-*` PVE user was deleted (or that no such orphan remains).
+   Do not simulate a crash in production without an approved plan.
 6. Review Vault audit logs and PVE audit logs for the expected calls, with no
-   token secrets or Authorization headers exposed.
+   token secrets or Authorization headers exposed. Match the issue request to
+   the PVE `POST /api2/json/access/users` entry from step 2, and match the
+   subsequent token, renewal, and deletion calls to the same lease/user. Record
+   the relevant timestamps, node/source identities, HTTP outcomes, and absence
+   of secret material; redact token values and Authorization headers from any
+   ticket evidence.
 
 Record pass/fail evidence and stop if a standby performs a PVE mutation locally,
 the plugin is missing on a node, the digest differs, or cleanup is incomplete.
