@@ -90,25 +90,28 @@ binary to the approved plugin directory on every Vault node. On each node,
 verify the digest independently and verify ownership, mode, and path:
 
 ```bash
+fail=0
 sha256sum /etc/vault/plugins/vault-plugin-secrets-proxmox
 if sudo -u vault test -x /etc/vault/plugins/vault-plugin-secrets-proxmox; then
   echo "OK: executable by Vault service user"
 else
   echo "FAIL: not executable by Vault service user"
+  fail=1
 fi
 # Replace vault:vault with the approved service user/group and verify the
 # expected owner/group and mode. Use the platform-equivalent stat command where
 # GNU options are unavailable.
 stat -c '%U:%G %a' /etc/vault/plugins/vault-plugin-secrets-proxmox
 # No group/other write permission on the file or any parent directory. Each
-# check prints evidence and exits non-zero on failure:
+# check prints evidence and contributes to the final verification status:
 if test -z "$(find /etc/vault/plugins/vault-plugin-secrets-proxmox \
   -perm /022 -print -quit)"; then
   echo "OK: plugin file is not group/other writable"
 else
   echo "FAIL: plugin file is group/other writable"
+  fail=1
 fi
-p=/etc/vault/plugins
+p=/etc/vault/plugins  # adapt to your plugin_directory; must be absolute
 case "$p" in
   /*)
     while :; do
@@ -116,6 +119,7 @@ case "$p" in
         echo "OK: $p is not group/other writable"
       else
         echo "FAIL: $p is group/other writable"
+        fail=1
       fi
       [ "$p" = / ] && break
       p=$(dirname "$p")
@@ -123,8 +127,14 @@ case "$p" in
     ;;
   *)
     echo "FAIL: plugin path must be absolute; ancestor check skipped"
+    fail=1
     ;;
 esac
+if [ "$fail" -eq 0 ]; then
+  echo "VERIFICATION PASSED"
+else
+  echo "VERIFICATION FAILED"
+fi
 ```
 
 On platforms without `sha256sum` or GNU `stat`, use the platform equivalents.
