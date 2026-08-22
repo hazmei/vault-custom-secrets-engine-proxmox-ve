@@ -13,8 +13,12 @@ make test                                # unit tests (mocked Proxmox client)
 go test ./... -run TestXxx -v              # single test
 make testacc                              # operator-run acceptance tests (needs disposable/dev Proxmox)
 make lint                                # pinned golangci-lint via Makefile
+shellcheck scripts/*.sh                  # shell-script lint used by CI
 make verify-artifact                      # operator-run artifact/permission verification
 ```
+
+CI also runs the `verify-plugin-artifact` smoke test against valid and invalid
+artifact-verification inputs.
 
 Current phase validation status, including the recorded PVE build, optional
 acceptance-test skip gates, and unverified production catalog registration, is
