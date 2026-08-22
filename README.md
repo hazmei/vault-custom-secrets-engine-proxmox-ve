@@ -405,15 +405,19 @@ plugin_directory = "/etc/vault/plugins"
 Copy the built binary into that directory and make it executable:
 
 ```bash
+# On each Vault node:
 sudo install -m 0755 vault/plugins/vault-plugin-secrets-proxmox /etc/vault/plugins/
-# On each Vault node, verify the installed artifact before registering it. Use
-# the digest recorded at build time, not a digest calculated on an admin
-# workstation or from an unapproved local file.
+# From the operator workstation, copy the verifier to each node and replace
+# <node> with that node's hostname or address:
 scp scripts/verify-plugin-artifact.sh <node>:/tmp/
+# From the operator workstation, verify the remote node. Registration is gated
+# on this command succeeding; use the digest recorded at build time, not a
+# digest calculated on an admin workstation or from an unapproved local file.
 ssh <node> 'EXPECTED_SHA="<digest recorded at build time>" EXPECTED_OWNER="vault:vault" \
-  PLUGIN_DIR=/etc/vault/plugins bash /tmp/verify-plugin-artifact.sh; echo "exit=$?"'
+  PLUGIN_DIR=/etc/vault/plugins bash /tmp/verify-plugin-artifact.sh' && \
 vault plugin register -sha256="<digest recorded at build time>" \
   secret vault-plugin-secrets-proxmox
+# Against the target Vault server configured by VAULT_ADDR:
 vault secrets enable -path=proxmox vault-plugin-secrets-proxmox
 ```
 
