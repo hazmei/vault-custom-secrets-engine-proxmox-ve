@@ -78,6 +78,10 @@ explicitly approved target.
 
 ## 1. Build and distribute one verified artifact
 
+Confirm the intended absolute `plugin_directory` on every Vault node before
+transferring the artifact; step 2 applies that path to the effective Vault
+configuration.
+
 Build from the reviewed source revision:
 
 ```bash
@@ -133,15 +137,19 @@ plugin_directory = "/etc/vault/plugins"
 ```
 
 Confirm the effective configuration and restart/reload according to the
-cluster's change procedure. Verify on every node that:
+cluster's change procedure. After the restart/reload, re-run the verifier on
+every node. It re-checks the digest, service-user execution, owner/group,
+symlink status, and write permissions on the artifact and its parent
+directories:
 
-1. the directory exists and is not a symlink;
-2. the Vault service user can execute the binary;
-3. the verified digest is unchanged; and
-4. file permissions do not expose the artifact for unauthorized replacement.
+```bash
+ssh <node> 'EXPECTED_SHA="<SHA256_FROM_CHANGE_TICKET>" EXPECTED_OWNER="vault:vault" \
+  PLUGIN_DIR=/etc/vault/plugins bash -s; echo "exit=$?"' \
+  < scripts/verify-plugin-artifact.sh
+```
 
 Do not proceed with catalog registration until all nodes have the same artifact
-and directory configuration.
+and directory configuration, and every post-restart verification succeeds.
 
 ## 3. Register and enable the plugin
 
