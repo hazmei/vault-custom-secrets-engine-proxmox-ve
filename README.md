@@ -416,8 +416,9 @@ for node in "<node1>" "<node2>" "<node3>"; do
   fi
   # The SSH account must have non-interactive sudo permission for this
   # install command (for example, a narrowly scoped NOPASSWD rule).
-  if ! ssh "$node" 'sudo -n install -m 0755 \
-    /tmp/vault-plugin-secrets-proxmox /etc/vault/plugins/'; then
+  if ! ssh -n "$node" 'sudo -n install -m 0755 \
+    /tmp/vault-plugin-secrets-proxmox /etc/vault/plugins/ && \
+    rm -f /tmp/vault-plugin-secrets-proxmox'; then
     echo "FAIL: could not install plugin on $node"
     verified=0
     break
