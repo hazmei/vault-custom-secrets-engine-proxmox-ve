@@ -67,7 +67,9 @@ else
   actual_sha=$(sha256sum "$plugin_path" 2>/dev/null)
   sha_status=$?
   actual_sha=${actual_sha%% *}
-  if [ "$sha_status" -eq 0 ] && [ "$actual_sha" = "$expected_sha" ]; then
+  actual_sha=$(printf %s "$actual_sha" | tr 'A-Z' 'a-z')
+  expected_sha_lc=$(printf %s "$expected_sha" | tr 'A-Z' 'a-z')
+  if [ "$sha_status" -eq 0 ] && [ "$actual_sha" = "$expected_sha_lc" ]; then
     echo "OK: digest matches the approved artifact"
   else
     echo "FAIL: digest does not match the approved artifact"
@@ -120,7 +122,10 @@ else
     fail=1
   fi
 
-  if [ ! -e "$plugin_path" ]; then
+  if [ -L "$plugin_path" ]; then
+    echo "FAIL: $plugin_path is a symlink"
+    fail=1
+  elif [ ! -e "$plugin_path" ]; then
     echo "FAIL: $plugin_path does not exist"
     fail=1
   elif ! writable=$(find "$plugin_path" -maxdepth 0 -perm /022 -print -quit 2>&1); then
@@ -135,7 +140,10 @@ else
 
   p=$plugin_dir
   while :; do
-    if [ ! -e "$p" ]; then
+    if [ -L "$p" ]; then
+      echo "FAIL: $p is a symlink"
+      fail=1
+    elif [ ! -e "$p" ]; then
       echo "FAIL: $p does not exist or is not readable"
       fail=1
     elif ! writable=$(find "$p" -maxdepth 0 -perm /022 -print -quit 2>&1); then
