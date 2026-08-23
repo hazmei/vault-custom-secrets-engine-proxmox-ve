@@ -17,15 +17,19 @@ full command output containing them.
 - Use a dedicated production Vault mount and a dedicated, non-human PVE
   provisioner identity. Do not use a human identity, `root@pam`, an acceptance
   identity, or the repository's development server for this verification.
-- Use a dedicated PVE verification group whose ACL bindings are explicitly
-  approved for the test. The group must not grant more access than the
-  behavioral check requires.
+- Use the dedicated PVE verification group `vault-production-readers`, whose
+  ACL bindings are explicitly approved for the test. The group must not grant
+  more access than the behavioral check requires.
 - Treat the PVE provisioner token secret and every issued lease token secret as
   one-time credentials. Put them in the approved secret manager or protected
   operator session; do not put them in shell history, CI logs, tickets, chat,
   screenshots, support bundles, or this repository.
-- Use placeholders such as `<VAULT_ADDR>`, `proxmox`, and `<PVE_GROUP>` below.
-  Do not substitute real secrets into documentation or commit them.
+- The concrete verification example below uses the PVE group
+  `vault-production-readers`, the delegated PVE role `PVEAuditor`, realm `pve`,
+  and Vault role `production-readers`. Keep placeholders such as
+  `<VAULT_ADDR>`, `<PVE_HOST>`, and provisioner identity values where the
+  environment-specific value is genuinely required. Do not substitute real
+  secrets into documentation or commit them.
 - This procedure creates and deletes PVE users and tokens and mutates Vault
   mount state. Stop if the target is not disposable for the PVE lifecycle
   portion or if cleanup cannot be guaranteed.
@@ -73,8 +77,9 @@ explicitly approved target.
   node.
 - A dedicated provisioner user and token, created by a PVE cluster
   administrator.
-- A pre-created verification group and approved group-to-role ACL binding.
-  The engine does not create groups or ACL bindings.
+- The pre-created verification group `vault-production-readers` and its
+  approved group-to-role ACL binding. The engine does not create groups or ACL
+  bindings.
 
 ### Permission contract and evidence
 
@@ -104,7 +109,8 @@ Capture redacted evidence for each target realm and group before proceeding:
 
 - the provisioner identity and the effective `User.Modify` entry at the parent
   `/access/groups`, including its propagation flag;
-- the effective `User.Modify` result at `/access/groups/<PVE_GROUP>`;
+- the effective `User.Modify` result at
+  `/access/groups/vault-production-readers`;
 - the effective `Sys.Audit` result at `/access/groups`; and
 - the effective `Realm.AllocateUser` result at `/access/realm/<REALM>`.
 
@@ -119,10 +125,11 @@ provisioner's own identity as proof of any item in this checklist.
 #### Provisioner versus delegated credentials
 
 The provisioner identity and issued lease identities have different jobs. A
-cluster administrator creates `<PVE_GROUP>` and binds it out-of-band to the
-approved PVE role(s) and path(s). The engine only creates synthetic users,
-adds them to that pre-created group, and creates their tokens; it does not
-create groups or ACL bindings and does not grant roles with `PUT /access/acl`.
+cluster administrator creates `vault-production-readers` and binds it
+out-of-band to the approved PVE role(s) and path(s). The engine only creates
+synthetic users, adds them to that pre-created group, and creates their
+tokens; it does not create groups or ACL bindings and does not grant roles
+with `PUT /access/acl`.
 Issued credentials therefore need not use roles held by the provisioner. The
 provisioner needs the user-management and validation permissions in the
 matrix, while a lease token inherits the roles bound to its group with
@@ -279,6 +286,39 @@ unless the verification token is created with `-no-default-policy`.
 
 ## 5. Prepare the dedicated PVE verification identity
 
+### 5.1 Create and bind the delegated verification group
+
+This step is performed out-of-band by a Proxmox cluster administrator before
+the Vault provisioner identity is created. Confirm that `PVEAuditor` is the
+intended example role and review its privileges and path scope against the
+approved change. `PVEAuditor` is illustrative, not a blanket recommendation;
+use the approved delegated role for the target.
+
+```bash
+pveum role list
+pveum group add vault-production-readers --comment "Vault production read-only lease group"
+pveum acl modify / --group vault-production-readers --role PVEAuditor --propagate 1
+```
+
+The group ACL is an out-of-band administrator configuration. The engine only
+adds each synthetic user to the already-existing group and creates a token
+with `privsep=0`; the issued token inherits the group's bound role and path
+access. The engine does not create PVE groups or ACL bindings. Rebinding or
+removing this group ACL changes the access of outstanding credentials, so
+revoke all verification leases before changing or deleting the group or its
+binding.
+
+Capture redacted administrator evidence before continuing:
+
+- the existence and comment of `vault-production-readers`;
+- the binding of `PVEAuditor` to that group, including path `/` and propagation
+  enabled (`1`); and
+- the reviewed, approved privilege and path scope of `PVEAuditor`.
+
+Do not include token secrets, Authorization headers, or unrelated cluster data
+in the evidence. Keep it in the approved change record and record the cluster,
+group, delegated role, scope, and timestamp it describes.
+
 As a PVE cluster administrator, create a dedicated provisioner role/user and
 scope it to the target realm and groups path. The `/access/groups` grant must
 propagate: creation checks `/access/groups/<group>`, while renewal and revoke
@@ -292,7 +332,8 @@ pveum acl modify /access/groups \
   --user <PROVISIONER>@<REALM> --role VaultProvisioner --propagate 1
 pveum acl modify /access/realm/<REALM> \
   --user <PROVISIONER>@<REALM> --role VaultProvisioner
-# <PVE_GROUP> must already exist and have only the approved role/path binding.
+# vault-production-readers must already exist and have only the approved
+# PVEAuditor role/path binding documented in section 5.1.
 pveum user token add <PROVISIONER>@<REALM> vault \
   --privsep 0 --comment "Vault production verification token"
 ```
@@ -309,9 +350,9 @@ mandatory: the default `privsep=1` gives the provisioner token a separate empty
 ACL, so the engine's own privilege validation and user-provisioning calls are
 denied. The engine separately sets `privsep=0` on each issued lease token so it
 inherits the synthetic user's group access.
-Verify the group binding and propagated `User.Modify` with the PVE
-administrator before continuing. The PVE token secret is never read back by
-the engine and must not be logged.
+Verify the `vault-production-readers` binding and propagated `User.Modify` with
+the PVE administrator before continuing. The PVE token secret is never read
+back by the engine and must not be logged.
 
 ## 6. Configure and verify redaction
 
@@ -342,27 +383,35 @@ not sufficient.
 
 ## 7. Write a role and issue a credential
 
-Use the pre-created verification group and finite TTLs:
+Use the pre-created `vault-production-readers` group and finite TTLs:
 
 ```bash
 vault write proxmox/roles/production-readers \
-  group="<PVE_GROUP>" user_prefix="vault" realm="<REALM>" \
+  group="vault-production-readers" user_prefix="vault" realm="pve" \
   ttl=300 max_ttl=900
 vault read proxmox/roles/production-readers
 vault read proxmox/creds/production-readers
 ```
 
+The role write validates that the group exists and that the provisioner has
+the required effective permissions for the group child path and
+`/access/realm/pve`; a successful write is therefore evidence of those checks,
+not just a stored role definition. After issuance, verify in PVE that the
+synthetic user belongs to `vault-production-readers` and that its token has
+only the reviewed, inherited `PVEAuditor` access at the approved path. Confirm
+the behavioral endpoint in section 8 with that credential.
+
 Store the issued `token_secret` only in the approved protected session. Record
-the returned PVE user ID for cleanup, but not the secret. Confirm in PVE that
-the synthetic user is a member of `<PVE_GROUP>` and that its token was created
-with the expected inherited access.
+the returned PVE user ID for cleanup, but not the secret. Do not treat the
+Vault role definition alone as proof of group membership or inherited access.
 
 ## 8. Use the credential against a behavioral endpoint
 
 Do not use `/version` as the sole acceptance check: it proves reachability and
 authentication, not the group-derived authorization contract. Use an approved
-endpoint that is allowed by the verification group's PVE role and returns a
-stable, non-sensitive marker. For example, substitute the endpoint and marker
+endpoint that is allowed by the PVE role bound to `vault-production-readers`
+and returns a stable, non-sensitive marker. For example, substitute the
+endpoint and marker
 approved for the target:
 
 Use the complete `token_id` returned by the credential response when constructing
@@ -435,9 +484,10 @@ change plan. Complete and record every item in this cleanup checklist:
   schedule;
 - remove the temporary `VaultProvisioner` custom role when it is no longer
   referenced, or document why it is retained and who owns its review;
-- remove the verification group's ACL role bindings and delete the
-  verification group when it is no longer needed, or document its retained
-  ownership, approved bindings, and next review/rotation date; and
+- after all verification leases are revoked, remove the
+  `vault-production-readers` group's ACL role bindings and delete the group
+  when it is no longer needed, or document its retained ownership, approved
+  bindings, and next review/rotation date; and
 - remove temporary Vault policies, the mount, and the plugin catalog entry as
   required by the change plan.
 
