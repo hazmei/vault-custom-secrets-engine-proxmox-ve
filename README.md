@@ -386,8 +386,18 @@ the provenance and the digest before distributing an artifact to Vault nodes:
 ```bash
 gh attestation verify vault-plugin-secrets-proxmox_<version>_linux_amd64 \
   --repo hazmei/vault-custom-secrets-engine-proxmox-ve
+
+# Linux (GNU coreutils):
 sha256sum -c SHA256SUMS --ignore-missing
+# macOS, and anywhere else without GNU coreutils:
+shasum -a 256 -c SHA256SUMS --ignore-missing
 ```
+
+`--ignore-missing` checks only the artifacts actually present, so a single
+downloaded binary verifies without the other five. The `shasum` substitution is
+the same one `scripts/verify-plugin-artifact.sh` names when `sha256sum` is
+unavailable; releases include darwin binaries, so operators verifying on macOS
+need it.
 
 Releases do not change the project's validation status: production-style
 catalog registration with `vault plugin register -sha256=<hash>` remains
