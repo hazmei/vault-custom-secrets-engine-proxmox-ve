@@ -24,7 +24,7 @@ full command output containing them.
   one-time credentials. Put them in the approved secret manager or protected
   operator session; do not put them in shell history, CI logs, tickets, chat,
   screenshots, support bundles, or this repository.
-- Use placeholders such as `<VAULT_ADDR>`, `<MOUNT>`, and `<PVE_GROUP>` below.
+- Use placeholders such as `<VAULT_ADDR>`, `proxmox`, and `<PVE_GROUP>` below.
   Do not substitute real secrets into documentation or commit them.
 - This procedure creates and deletes PVE users and tokens and mutates Vault
   mount state. Stop if the target is not disposable for the PVE lifecycle
@@ -76,6 +76,65 @@ explicitly approved target.
 - A pre-created verification group and approved group-to-role ACL binding.
   The engine does not create groups or ACL bindings.
 
+### Permission contract and evidence
+
+The following matrix is the acceptance contract for the dedicated provisioner
+identity. “Effective” includes an exact-path grant or a propagating grant on
+an ancestor. The distinction between the parent and child group paths is
+deliberate: PVE checks different paths for different operations.
+
+| Engine operation | PVE calls exercised | Required provisioner permission and path | Verification note |
+| --- | --- | --- | --- |
+| Config validation | `GET /version`, `GET /access/permissions` | `User.Modify` at `/access/groups`; `Sys.Audit` at `/access/groups` | `/version` proves reachability/TLS only. The permissions tree is parsed and ancestor paths are walked. |
+| Role write | `GET /access/groups/{group}`, `GET /access/permissions` | `Sys.Audit` at `/access/groups`; `User.Modify` effective at `/access/groups/<group>`; `Realm.AllocateUser` at `/access/realm/<realm>` | Group existence and the realm are role-specific. The exact child-path check catches a non-propagating parent grant before issuance. |
+| Credential create | `POST /access/users` with `groups=<group>`, read-back `GET /access/users/{id}`, then token creation | `User.Modify` effective at `/access/groups/<group>`; `Realm.AllocateUser` at `/access/realm/<realm>` | The child-path `User.Modify` is normally supplied by propagating `/access/groups`. The group must already exist. |
+| Renewal | `GET /access/users/{id}`, `PUT /access/users/{id}` with `expire` + `groups` + `enable` + `append=1`, then read-back | `User.Modify` at the parent `/access/groups` | A child-only grant is insufficient. This unavoidable parent check is why the provisioner is not per-group scoped. |
+| Revocation | `DELETE /access/users/{id}` | `User.Modify` at the parent `/access/groups` | The delete cascades to the lease token and membership. Missing-user body `"no such user"` is idempotent success. |
+
+`Sys.Audit` is present to support the recommended early group-existence check
+(`GET /access/groups/{group}`) during role write. It is not a delegated
+credential permission and is not needed to make the issued token powerful.
+Operators may omit that precheck, and therefore `Sys.Audit`, only if they
+accept discovering a missing group at issuance time instead.
+
+The config write and every role write use `GET /access/permissions` to verify
+the effective permission tree. A successful `GET /version` is only a
+reachability/authentication and TLS check; it is not permission evidence.
+Capture redacted evidence for each target realm and group before proceeding:
+
+- the provisioner identity and the effective `User.Modify` entry at the parent
+  `/access/groups`, including its propagation flag;
+- the effective `User.Modify` result at `/access/groups/<PVE_GROUP>`;
+- the effective `Sys.Audit` result at `/access/groups`; and
+- the effective `Realm.AllocateUser` result at `/access/realm/<REALM>`.
+
+Evidence should show the relevant path, privilege, and `:0`/`:1` propagation
+value from the permissions response or an equivalent redacted administrator
+query. Remove token IDs' secrets, Authorization headers, unrelated user data,
+and unnecessary cluster details. Keep the evidence in the approved change
+record and record which cluster, realm, group, and timestamp it describes.
+Do not treat a bare `/version` response, a role definition alone, or the
+provisioner's own identity as proof of any item in this checklist.
+
+#### Provisioner versus delegated credentials
+
+The provisioner identity and issued lease identities have different jobs. A
+cluster administrator creates `<PVE_GROUP>` and binds it out-of-band to the
+approved PVE role(s) and path(s). The engine only creates synthetic users,
+adds them to that pre-created group, and creates their tokens; it does not
+create groups or ACL bindings and does not grant roles with `PUT /access/acl`.
+Issued credentials therefore need not use roles held by the provisioner. The
+provisioner needs the user-management and validation permissions in the
+matrix, while a lease token inherits the roles bound to its group with
+`privsep=0`.
+
+This is least privilege only relative to a full-admin provisioner. The
+required parent-path `User.Modify` is unavoidably cluster-wide user
+administration: a compromised provisioner can affect users beyond this mount
+and can create a user in any privileged group it can name. Treat the
+provisioner token as high-impact, monitor its user/group mutations, and do
+not describe this setup as per-group isolation or risk-free least privilege.
+
 ## 1. Build and distribute one verified artifact
 
 Confirm the intended absolute `plugin_directory` on every Vault node before
@@ -85,7 +144,7 @@ configuration.
 Build from the reviewed source revision:
 
 ```bash
-make build
+make build # include GOOS=linux GOARCH=arm64 to build for linux on arm64
 shasum -a 256 vault/plugins/vault-plugin-secrets-proxmox
 ```
 
@@ -163,7 +222,7 @@ export VAULT_ADDR='<VAULT_ADDR>'
 vault plugin register -sha256="<SHA256_FROM_CHANGE_TICKET>" \
   secret vault-plugin-secrets-proxmox
 vault plugin list secret
-vault secrets enable -path=<MOUNT> vault-plugin-secrets-proxmox
+vault secrets enable -path=proxmox vault-plugin-secrets-proxmox
 vault secrets list
 ```
 
@@ -179,15 +238,15 @@ chosen mount and the organization's identity model; the example deliberately
 contains no token values:
 
 ```hcl
-path "<MOUNT>/config" {
+path "proxmox/config" {
   capabilities = ["create", "read", "update"]
 }
 
-path "<MOUNT>/roles/<ROLE>" {
+path "proxmox/roles/production-readers" {
   capabilities = ["create", "read", "update", "delete"]
 }
 
-path "<MOUNT>/creds/<ROLE>" {
+path "proxmox/creds/production-readers" {
   capabilities = ["read"]
 }
 
@@ -205,9 +264,9 @@ only to a separately controlled cleanup operator, or temporarily through the
 approved break-glass process. Verify the effective policy before testing:
 
 ```bash
-vault token capabilities <MOUNT>/config
-vault token capabilities <MOUNT>/roles/<ROLE>
-vault token capabilities <MOUNT>/creds/<ROLE>
+vault token capabilities proxmox/config
+vault token capabilities proxmox/roles/production-readers
+vault token capabilities proxmox/creds/production-readers
 vault token capabilities sys/leases/renew
 vault token capabilities sys/leases/revoke
 ```
@@ -232,11 +291,18 @@ pveum role add VaultProvisioner \
 pveum acl modify /access/groups \
   --user <PROVISIONER>@<REALM> --role VaultProvisioner --propagate 1
 pveum acl modify /access/realm/<REALM> \
-  --user <PROVISIONER>@<REALM> --role VaultProvisioner --propagate 1
+  --user <PROVISIONER>@<REALM> --role VaultProvisioner
 # <PVE_GROUP> must already exist and have only the approved role/path binding.
 pveum user token add <PROVISIONER>@<REALM> vault \
   --privsep 0 --comment "Vault production verification token"
 ```
+
+The realm ACL is intentionally shown without `--propagate`: the required
+`Realm.AllocateUser` grant is scoped to the exact `/access/realm/<REALM>` path.
+Use propagation only when the security review explicitly requires allocation
+in child realm paths and the evidence records that broader scope. In contrast,
+`--propagate 1` on the `/access/groups` parent is mandatory because creation
+checks `/access/groups/<group>` while renewal and revocation check the parent.
 
 Capture the token secret once into the approved secret manager. `privsep=0` is
 mandatory: the default `privsep=1` gives the provisioner token a separate empty
@@ -253,13 +319,13 @@ Write configuration through the protected session. Prefer a trusted CA bundle;
 do not use `tls_skip_verify=true` as a production workaround:
 
 ```bash
-vault write <MOUNT>/config \
+vault write proxmox/config \
   address="https://<PVE_HOST>:8006" \
   token_id="<PROVISIONER>@<REALM>!vault" \
   token_secret=@<PROVISIONER_SECRET_FILE> \
   tls_skip_verify=false ca_cert=@<CA_BUNDLE> \
   default_ttl=3600 default_max_ttl=86400
-vault read <MOUNT>/config
+vault read proxmox/config
 ```
 
 Create `<PROVISIONER_SECRET_FILE>` without a trailing newline. The Vault CLI
@@ -279,11 +345,11 @@ not sufficient.
 Use the pre-created verification group and finite TTLs:
 
 ```bash
-vault write <MOUNT>/roles/<ROLE> \
+vault write proxmox/roles/production-readers \
   group="<PVE_GROUP>" user_prefix="vault" realm="<REALM>" \
   ttl=300 max_ttl=900
-vault read <MOUNT>/roles/<ROLE>
-vault read <MOUNT>/creds/<ROLE>
+vault read proxmox/roles/production-readers
+vault read proxmox/creds/production-readers
 ```
 
 Store the issued `token_secret` only in the approved protected session. Record
@@ -349,18 +415,38 @@ revoked by the engine. The `force=true` value is plugin data, not the Vault CLI
 confirmation flag:
 
 ```bash
-vault delete <MOUNT>/config force=true
+vault delete proxmox/config force=true
 # Or explicitly:
 printf 'X-Vault-Token: %s\n' "$BREAK_GLASS_TOKEN" | \
   curl --fail --silent --show-error -X DELETE \
-  --header @- "${VAULT_ADDR}/v1/<MOUNT>/config?force=true"
+  --header @- "${VAULT_ADDR}/v1/proxmox/config?force=true"
 ```
 
 Verify that deletion without the data parameter is rejected. After the test,
 delete the temporary Vault role/mount and catalog entry according to the
-change plan, remove the provisioner token and verification group/bindings,
-and confirm no synthetic PVE users remain. If any user remains, revoke it
-through the approved PVE administrator process and document the reason.
+change plan. Complete and record every item in this cleanup checklist:
+
+- revoke every verification lease and confirm its synthetic PVE user and
+  `lease` token are gone;
+- remove the provisioner API token (`vault` in the example), or record its
+  retained owner, purpose, expiry/rotation date, and secret-manager location;
+- remove the provisioner user's ACL entries, then delete the dedicated
+  provisioner user, or document the approved retained owner and rotation
+  schedule;
+- remove the temporary `VaultProvisioner` custom role when it is no longer
+  referenced, or document why it is retained and who owns its review;
+- remove the verification group's ACL role bindings and delete the
+  verification group when it is no longer needed, or document its retained
+  ownership, approved bindings, and next review/rotation date; and
+- remove temporary Vault policies, the mount, and the plugin catalog entry as
+  required by the change plan.
+
+Perform PVE cleanup with a cluster administrator and verify the final state
+using redacted user, token, group, and ACL listings. If any synthetic user,
+token, ACL entry, group, or provisioner object remains, do not mark the
+procedure complete: remove it through the approved administrator process or
+record the exception, owner, reason, access scope, and rotation/expiry plan in
+the change ticket.
 
 ## 11. HA, standby, and failover checks
 
@@ -389,7 +475,7 @@ Run these checks with the cluster owners and an approved failure plan:
    masquerading can make every node appear identical. When addresses are
    shared, use the file audit device on each Vault node instead: only the node
    that handled the request records the request/response pair for
-   `<MOUNT>/creds/<ROLE>`, while a standby that forwarded the request records
+   `proxmox/creds/production-readers`, while a standby that forwarded the request records
    the request without a backend response. Record the node that produced the
    pair and treat the check as inconclusive if neither source identity nor
    per-node audit evidence is available. Stop if the source address is a
