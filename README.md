@@ -368,6 +368,31 @@ make build
 shasum -a 256 vault/plugins/vault-plugin-secrets-proxmox
 ```
 
+### Released binaries
+
+Pre-built binaries for `darwin/arm64`, `darwin/amd64`, `linux/arm64`,
+`linux/amd64`, `windows/arm64`, and `windows/amd64` are published by the
+manually triggered `Release` workflow (`.github/workflows/release.yml`) and
+attached to the corresponding GitHub release, along with `SHA256SUMS` and a
+machine-readable `manifest.json`. Each recorded digest is the digest of the raw
+binary, so it is directly usable as `<SHA256_FROM_CHANGE_TICKET>` below, as the
+`-sha256` argument to `vault plugin register`, and as `EXPECTED_SHA` for
+`scripts/verify-plugin-artifact.sh`. Renaming the downloaded file to
+`vault-plugin-secrets-proxmox` on install does not change the digest.
+
+Every released binary carries a SLSA build-provenance attestation. Verify both
+the provenance and the digest before distributing an artifact to Vault nodes:
+
+```bash
+gh attestation verify vault-plugin-secrets-proxmox_<version>_linux_amd64 \
+  --repo hazmei/vault-custom-secrets-engine-proxmox-ve
+sha256sum -c SHA256SUMS --ignore-missing
+```
+
+Releases do not change the project's validation status: production-style
+catalog registration with `vault plugin register -sha256=<hash>` remains
+unverified, and releases are marked as pre-releases by default.
+
 For local development, start Vault with the plugin directory. Vault
 auto-registers binaries found there, so no manual registration command is
 needed in this mode:

@@ -1,0 +1,324 @@
+# Release — manual only. Cross-compiles the plugin for every supported operator
+# platform, publishes a signed build-provenance attestation for each binary, and
+# attaches a machine-readable release manifest (manifest.json) plus SHA256SUMS.
+#
+# The digests recorded here are digests of the RAW BINARY, which is exactly what
+# `vault plugin register -sha256=<hash>` consumes (docs/PRODUCTION_VERIFICATION.md)
+# and what scripts/verify-plugin-artifact.sh checks via EXPECTED_SHA. Binaries are
+# published unarchived so that digest is usable without an intermediate extract step.
+#
+# Versioning: semver, derived from the highest existing `v<major>.<minor>.<patch>`
+# tag. `bump` (patch/minor/major) computes the next version; `explicit` takes the
+# `version` input verbatim. With no tags in the repository the first release is
+# always 0.1.0. Releases are marked pre-release by default: production catalog
+# registration is still unverified for this project (see README.md).
+
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: "Semver bump from the latest v* tag (or 'explicit' to use the version input)"
+        type: choice
+        required: true
+        default: patch
+        options: [patch, minor, major, explicit]
+      version:
+        description: "Explicit semver, e.g. 0.2.0 (only used when bump=explicit)"
+        type: string
+        required: false
+        default: ""
+      prerelease:
+        description: "Mark the GitHub release as a pre-release"
+        type: boolean
+        required: true
+        default: true
+      draft:
+        description: "Create the GitHub release as a draft"
+        type: boolean
+        required: true
+        default: false
+      dry_run:
+        description: "Build, hash and verify only — no tag, no attestation, no release"
+        type: boolean
+        required: true
+        default: false
+
+permissions: {}
+
+concurrency:
+  group: release
+  cancel-in-progress: false # never interrupt a run that may already have published
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write # create the tag and the GitHub release
+      id-token: write # OIDC token for build-provenance attestation
+      attestations: write # write the attestation to the repository's attestation store
+    env:
+      PLUGIN_NAME: vault-plugin-secrets-proxmox
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0 # full history + tags: the semver bump reads existing v* tags
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Resolve release version
+        id: version
+        env:
+          BUMP: ${{ inputs.bump }}
+          EXPLICIT: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+
+          # Official semver core+prerelease+build grammar, as ERE (no leading zeros).
+          semver_re='^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-(0|[1-9][0-9]*|[0-9]*[a-zA-Z-][0-9a-zA-Z-]*)(\.(0|[1-9][0-9]*|[0-9]*[a-zA-Z-][0-9a-zA-Z-]*))*)?(\+[0-9a-zA-Z-]+(\.[0-9a-zA-Z-]+)*)?$'
+
+          if [ "$BUMP" = explicit ]; then
+            version=${EXPLICIT#v}
+            if [ -z "$version" ]; then
+              echo "::error::bump=explicit requires the version input" >&2
+              exit 1
+            fi
+            if ! printf %s "$version" | grep -Eq "$semver_re"; then
+              echo "::error::'$version' is not a valid semver version" >&2
+              exit 1
+            fi
+          else
+            # Highest release tag; prerelease tags are deliberately excluded as a bump base.
+            latest=$(git tag --list 'v[0-9]*' \
+              | sed 's/^v//' \
+              | grep -E '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$' \
+              | sort -V | tail -n1 || true)
+            if [ -z "$latest" ]; then
+              version=0.1.0
+              echo "no existing v* release tag; seeding the first release at $version"
+            else
+              major=${latest%%.*}
+              rest=${latest#*.}
+              minor=${rest%%.*}
+              patch=${rest#*.}
+              case "$BUMP" in
+                major) version="$((major + 1)).0.0" ;;
+                minor) version="$major.$((minor + 1)).0" ;;
+                patch) version="$major.$minor.$((patch + 1))" ;;
+                *) echo "::error::unknown bump '$BUMP'" >&2; exit 1 ;;
+              esac
+              echo "latest release tag v$latest -> $BUMP -> $version"
+            fi
+          fi
+
+          tag="v$version"
+          if git rev-parse -q --verify "refs/tags/$tag" >/dev/null; then
+            echo "::error::tag $tag already exists" >&2
+            exit 1
+          fi
+
+          {
+            echo "version=$version"
+            echo "tag=$tag"
+          } >>"$GITHUB_OUTPUT"
+          echo "releasing $tag from ${GITHUB_SHA}"
+
+      - name: Build and test
+        # Gate the release on the same baseline CI enforces. Acceptance tests
+        # (TestAcc*) stay operator-run against a disposable PVE cluster.
+        run: |
+          set -euo pipefail
+          go build ./...
+          go test ./...
+
+      - name: Cross-compile release binaries
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+
+          # Reproducibility: no cgo, -trimpath strips local paths, -buildid= drops the
+          # per-build id, and SOURCE_DATE_EPOCH pins any embedded timestamp to the commit.
+          SOURCE_DATE_EPOCH=$(git log -1 --pretty=%ct)
+          export SOURCE_DATE_EPOCH CGO_ENABLED=0
+
+          for target in \
+            darwin/arm64 darwin/amd64 \
+            linux/arm64 linux/amd64 \
+            windows/arm64 windows/amd64
+          do
+            goos=${target%%/*}
+            goarch=${target#*/}
+            name="${PLUGIN_NAME}_${VERSION}_${goos}_${goarch}"
+            if [ "$goos" = windows ]; then name="${name}.exe"; fi
+            echo "building $name"
+            GOOS="$goos" GOARCH="$goarch" go build \
+              -trimpath \
+              -mod=readonly \
+              -ldflags='-s -w -buildid=' \
+              -o "dist/$name" \
+              ./cmd/vault-plugin-secrets-proxmox
+          done
+
+          # Hash only the binaries: redirecting into the directory being globbed
+          # would otherwise make SHA256SUMS hash itself mid-write.
+          ( cd dist && sha256sum ./"${PLUGIN_NAME}"_* >SHA256SUMS.tmp && mv SHA256SUMS.tmp SHA256SUMS )
+          ( cd dist && sha256sum -c SHA256SUMS )
+          cat dist/SHA256SUMS
+
+      - name: Write release manifest
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          set -euo pipefail
+
+          # One entry per artifact. sha256 is the digest of the binary itself —
+          # feed it to `vault plugin register -sha256=` and to EXPECTED_SHA.
+          artifacts=$(
+            for f in dist/"${PLUGIN_NAME}"_*; do
+              base=$(basename "$f")
+              stripped=${base%.exe}
+              goarch=${stripped##*_}
+              rest=${stripped%_*}
+              goos=${rest##*_}
+              jq -n \
+                --arg filename "$base" \
+                --arg os "$goos" \
+                --arg arch "$goarch" \
+                --arg sha256 "$(sha256sum "$f" | cut -d' ' -f1)" \
+                --argjson size_bytes "$(stat -c '%s' "$f")" \
+                '{filename: $filename, os: $os, arch: $arch, sha256: $sha256, size_bytes: $size_bytes}'
+            done | jq -s 'sort_by(.os, .arch)'
+          )
+
+          jq -n \
+            --arg name "$PLUGIN_NAME" \
+            --arg version "$VERSION" \
+            --arg tag "$TAG" \
+            --arg commit "$GITHUB_SHA" \
+            --arg repository "$GITHUB_REPOSITORY" \
+            --arg built_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --arg go_version "$(go env GOVERSION)" \
+            --arg source_date_epoch "$(git log -1 --pretty=%ct)" \
+            --arg workflow_run "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
+            --argjson artifacts "$artifacts" \
+            '{
+              schema_version: 1,
+              name: $name,
+              version: $version,
+              tag: $tag,
+              commit: $commit,
+              repository: $repository,
+              built_at: $built_at,
+              go_version: $go_version,
+              source_date_epoch: ($source_date_epoch | tonumber),
+              workflow_run: $workflow_run,
+              digest_algorithm: "sha256",
+              digest_subject: "raw plugin binary (the value vault plugin register -sha256 expects)",
+              attestation: {
+                predicate_type: "https://slsa.dev/provenance/v1",
+                verify_command: ("gh attestation verify <downloaded-binary> --repo " + $repository)
+              },
+              artifacts: $artifacts
+            }' >dist/manifest.json
+
+          # Fail closed if the manifest and SHA256SUMS ever disagree.
+          jq -r '.artifacts[] | "\(.sha256)  ./\(.filename)"' dist/manifest.json \
+            | sort >"$RUNNER_TEMP/manifest-sums"
+          sort dist/SHA256SUMS >"$RUNNER_TEMP/dist-sums"
+          diff -u "$RUNNER_TEMP/dist-sums" "$RUNNER_TEMP/manifest-sums"
+          cat dist/manifest.json
+
+      - name: Attest build provenance
+        if: ${{ !inputs.dry_run }}
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-path: dist/vault-plugin-secrets-proxmox_*
+
+      - name: Compose release notes
+        if: ${{ !inputs.dry_run }}
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          set -euo pipefail
+          {
+            echo "## vault-plugin-secrets-proxmox $TAG"
+            echo
+            echo "Vault secrets engine that issues short-lived Proxmox VE API tokens."
+            echo
+            echo "> **Not production-ready.** Production-style catalog registration with"
+            echo "> \`vault plugin register -sha256=<hash>\` remains unverified for this"
+            echo "> project. See \`README.md\` and \`docs/IMPLEMENTATION_PLAN.md\` for the"
+            echo "> current validation status before deploying."
+            echo
+            echo "### Artifacts"
+            echo
+            echo "| OS | Arch | File | SHA256 |"
+            echo "| --- | --- | --- | --- |"
+            jq -r '.artifacts[] | "| \(.os) | \(.arch) | `\(.filename)` | `\(.sha256)` |"' dist/manifest.json
+            echo
+            echo "\`manifest.json\` carries the same data machine-readably; \`SHA256SUMS\`"
+            echo "works with \`sha256sum -c\`. Each digest is the digest of the **raw binary**,"
+            echo "which is the value \`vault plugin register -sha256=\` and the"
+            echo "\`EXPECTED_SHA\` input to \`scripts/verify-plugin-artifact.sh\` expect."
+            echo "Renaming the file to \`vault-plugin-secrets-proxmox\` on install does not"
+            echo "change the digest."
+            echo
+            echo "### Verify provenance"
+            echo
+            echo '```bash'
+            echo "gh attestation verify ${PLUGIN_NAME}_${VERSION}_linux_amd64 \\"
+            echo "  --repo $GITHUB_REPOSITORY"
+            echo "sha256sum -c SHA256SUMS --ignore-missing"
+            echo '```'
+            echo
+            echo "### Install"
+            echo
+            echo '```bash'
+            echo "sudo install -m 0755 -o vault -g vault \\"
+            echo "  ${PLUGIN_NAME}_${VERSION}_linux_amd64 /etc/vault/plugins/${PLUGIN_NAME}"
+            echo '```'
+            echo
+            echo "Then follow **Build and Install** in \`README.md\` and the operator"
+            echo "runbook in \`docs/PRODUCTION_VERIFICATION.md\`."
+            echo
+            echo "Built from \`$GITHUB_SHA\` with $(go env GOVERSION)."
+          } >dist/RELEASE_NOTES.md
+          cat dist/RELEASE_NOTES.md
+
+      - name: Create GitHub release
+        if: ${{ !inputs.dry_run }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.version.outputs.tag }}
+          PRERELEASE: ${{ inputs.prerelease }}
+          DRAFT: ${{ inputs.draft }}
+        run: |
+          set -euo pipefail
+          args=(release create "$TAG"
+            --target "$GITHUB_SHA"
+            --title "$TAG"
+            --notes-file dist/RELEASE_NOTES.md
+            --generate-notes)
+          if [ "$PRERELEASE" = "true" ]; then args+=(--prerelease); fi
+          if [ "$DRAFT" = "true" ]; then args+=(--draft); fi
+          gh "${args[@]}" \
+            dist/"${PLUGIN_NAME}"_* \
+            dist/SHA256SUMS \
+            dist/manifest.json
+
+      - name: Upload dry-run artifacts
+        if: ${{ inputs.dry_run }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-dry-run-${{ steps.version.outputs.tag }}
+          path: dist/
+          retention-days: 7
+          if-no-files-found: error
