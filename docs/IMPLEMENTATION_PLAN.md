@@ -29,16 +29,14 @@ password implementation in the current token-only release.
 
 - The role field is `mode` with values `token` and `password`.
 - An omitted `mode` means `token`, preserving existing role and lease behavior. This
-  compatibility rule MUST apply at read time as well as write time: `getRole()` must
-  normalize a decoded empty value to `token`, or issuance must treat `mode == ""` as
-  token. Legacy stored-role tests are required; write-time defaulting alone is not
-  sufficient.
+  compatibility rule MUST apply at read time as well as write time: omitted mode
+  defaults to `token` at both read and write time, and `getRole()` MUST normalize a
+  decoded empty `mode` to `token` before returning the role. Legacy stored-role tests
+  are required; write-time defaulting alone is not sufficient.
 - A password response contains exactly `user_id` and `password`.
 - Password mode creates no PVE API token and uses a separate Vault secret type.
 - The password is never stored in WAL or `Secret.InternalData`, and is never written to logs.
 - Existing token roles and leases remain compatible and are not migrated.
-- These are contract decisions only; no probe result is claimed here and they do not
-  authorize password implementation in the current token-only release.
 
 ### Probe-dependent password design intent
 
@@ -1636,8 +1634,11 @@ are gated until its live PVE 9.2.10 evidence is recorded.**
     for every failure. Probe the privileges required to create/set a password,
     recording the exact ACL path, privilege, and propagation flag; compare them with
     the existing `/access/groups` and `/access/realm/<realm>` checks. Record PVE
-    password minimum and maximum constraints needed by the generator. Capture exact
-    status/body behavior throughout and redact all password values from evidence.
+    password minimum and maximum constraints needed by the generator. Determine and
+    record the exact password API call shape: whether the password is supplied on
+    `POST /access/users` or set by a separate password-setting call, including request
+    ordering and response/error behavior. Capture exact status/body behavior
+    throughout and redact all password values from evidence.
   - **Acceptance**: reproducible probe evidence is recorded in `docs/PVE_PROBES.md`
     with no password values; unresolved behavior is explicitly listed; implementation
     gate is opened only after review.
@@ -1652,8 +1653,11 @@ are gated until its live PVE 9.2.10 evidence is recorded.**
     behavior for existing token roles/leases. Lock password-generator ownership
     (engine versus PVE), length, charset, `crypto/rand` entropy requirements, and
     PVE minimum/maximum constraints from P0 before P4 can start. Define redaction
-    requirements for responses, errors, logs, WAL, and `InternalData`. Treat renewal
-    as design intent unless P0 proves the original password still authenticates.
+    requirements for responses, errors, logs, WAL, and `InternalData`. Lock the
+    password API call shape and compensation ordering before P4; if separate
+    post-create password setting is required, require `DeleteUser` compensation and
+    conditional WAL cleanup for failures at that step. Treat renewal as design intent
+    unless P0 proves the original password still authenticates.
   - **Acceptance**: the plan, architecture, README, and operator guidance agree;
     no document claims unsupported PVE behavior or exposes a secret.
 
@@ -1663,11 +1667,11 @@ are gated until its live PVE 9.2.10 evidence is recorded.**
     relevant compatibility tests.
   - **Dependencies**: P1; preserve existing token role decoding and validation.
   - **Checklist**: add `mode` validation for `token`/`password`; default omission to
-    `token` on both write and read (normalize `mode == ""` in `getRole()` or apply
-    equivalent issuance handling); add tests for legacy stored roles with absent or
+    `token` on both write and read, and require `getRole()` to normalize decoded
+    `mode == ""` to `token` before returning the role; add tests for legacy stored roles with absent or
     empty mode; persist/read the field without changing existing role or lease data;
     reject unsupported values clearly; ensure role responses and help text are exact.
-    Add password-mode realm applicability validation before issuance, based on P0's
+    Add password-mode realm applicability validation at role-write time, based on P0's
     exact status/body evidence, while preserving token-mode realm behavior. If P0
     finds password-specific privileges, update the config precheck in
     `path_config.go`, role precheck in `path_roles.go`, ACL/operator privilege docs,
