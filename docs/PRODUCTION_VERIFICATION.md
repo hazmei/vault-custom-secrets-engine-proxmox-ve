@@ -176,19 +176,20 @@ script from the operator workstation and run it directly on the node instead.
 This avoids staging the verifier in world-writable `/tmp`:
 
 ```bash
-node="<VAULT_NODE_HOSTNAME>"
-(
-  if ! ssh "$node" 'EXPECTED_SHA="<SHA256_FROM_CHANGE_TICKET>" \
+for node in "<VAULT_NODE_1>" "<VAULT_NODE_2>"; do
+  (
+    if ! ssh "$node" 'EXPECTED_SHA="<SHA256_FROM_CHANGE_TICKET>" \
   EXPECTED_OWNER="vault:vault" PLUGIN_DIR=/etc/vault/plugins bash -s' \
   < scripts/verify-plugin-artifact.sh; then
-    echo "FAIL: artifact verification failed on $node"
-    exit 1
-  fi
-)
+      echo "FAIL: artifact verification failed on $node"
+      exit 1
+    fi
+  )
+done
 ```
 
-The guard consumes SSH's non-zero status when verification fails, so the
-procedure does not continue to the next step with an unverified artifact.
+The guard reports SSH's non-zero status when verification fails. Do not proceed
+to the next step until every node has passed verification.
 
 Run the wrapper or standalone script once per Vault node. Set
 `VERIFY_PLUGIN_DIR`/`PLUGIN_DIR` to the node's absolute `plugin_directory`; the
@@ -222,15 +223,16 @@ symlink status, and write permissions on the artifact and its parent
 directories:
 
 ```bash
-node="<VAULT_NODE_HOSTNAME>"
-(
-  if ! ssh "$node" 'EXPECTED_SHA="<SHA256_FROM_CHANGE_TICKET>" \
+for node in "<VAULT_NODE_1>" "<VAULT_NODE_2>"; do
+  (
+    if ! ssh "$node" 'EXPECTED_SHA="<SHA256_FROM_CHANGE_TICKET>" \
   EXPECTED_OWNER="vault:vault" PLUGIN_DIR=/etc/vault/plugins bash -s' \
   < scripts/verify-plugin-artifact.sh; then
-    echo "FAIL: artifact verification failed on $node"
-    exit 1
-  fi
-)
+      echo "FAIL: artifact verification failed on $node"
+      exit 1
+    fi
+  )
+done
 ```
 
 Do not proceed with catalog registration until all nodes have the same artifact
