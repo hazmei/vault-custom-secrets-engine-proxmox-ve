@@ -66,12 +66,20 @@ jobs:
             PLUGIN_DIR="$d" scripts/verify-plugin-artifact.sh
           ! EXPECTED_SHA=deadbeef EXPECTED_OWNER="$(id -un):$(id -gn)" \
             PLUGIN_DIR="$d" scripts/verify-plugin-artifact.sh
-          if sh -c 'EXPECTED_SHA=deadbeef \
+          if streamed_output=$(sh -c 'EXPECTED_SHA=deadbeef \
             EXPECTED_OWNER="$2" PLUGIN_DIR="$1" bash -s' \
-            _ "$d" "$(id -un):$(id -gn)" < scripts/verify-plugin-artifact.sh; then
+            _ "$d" "$(id -un):$(id -gn)" < scripts/verify-plugin-artifact.sh); then
             echo "streamed verifier unexpectedly succeeded"
             exit 1
           fi
+          case "$streamed_output" in
+            *"FAIL: digest does not match"*) ;;
+            *)
+              printf '%s\n' "$streamed_output"
+              echo "streamed verifier failed for the wrong reason"
+              exit 1
+              ;;
+          esac
           sh -c 'EXPECTED_SHA="$3" \
             EXPECTED_OWNER="$2" PLUGIN_DIR="$1" bash -s' \
             _ "$d" "$(id -un):$(id -gn)" "$sha" < scripts/verify-plugin-artifact.sh

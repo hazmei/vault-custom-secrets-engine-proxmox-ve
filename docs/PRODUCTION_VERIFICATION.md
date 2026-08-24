@@ -185,7 +185,7 @@ for node in "<VAULT_NODE_1>" "<VAULT_NODE_2>" "<VAULT_NODE_3>"; do
     < scripts/verify-plugin-artifact.sh; then
     echo "FAIL: artifact verification failed on $node"
     verified=0
-    break
+    continue
   fi
 done
 if [ "$verified" -eq 1 ]; then
@@ -196,10 +196,11 @@ fi
 ```
 
 The guard reports SSH's non-zero status when verification fails and records the
-overall result in `verified`. Do not proceed to the next step unless the final
-message confirms that every node passed verification.
+overall result in `verified`. It continues through the list so one run reports
+every failing node. Do not proceed to the next step unless the final message
+confirms that every node passed verification.
 
-Run the wrapper or standalone script once per Vault node. Set
+The loop runs the wrapper or standalone script once per Vault node. Set
 `VERIFY_PLUGIN_DIR`/`PLUGIN_DIR` to the node's absolute `plugin_directory`; the
 script preflights the GNU command forms it uses, checks the digest, service-user
 execution, owner/group, and every ancestor directory, and exits non-zero when
@@ -225,30 +226,12 @@ plugin_directory = "/etc/vault/plugins"
 ```
 
 Confirm the effective configuration and restart/reload according to the
-cluster's change procedure. After the restart/reload, re-run the verifier on
-every node. It re-checks the digest, service-user execution, owner/group,
-symlink status, and write permissions on the artifact and its parent
-directories:
-
-```bash
-verified=1
-# Replace these placeholders with every Vault node's hostname or address.
-for node in "<VAULT_NODE_1>" "<VAULT_NODE_2>" "<VAULT_NODE_3>"; do
-  # Keep the continuation inside the quoted command for the remote shell.
-  if ! ssh "$node" 'EXPECTED_SHA="<SHA256_FROM_CHANGE_TICKET>" \
-    EXPECTED_OWNER="vault:vault" PLUGIN_DIR=/etc/vault/plugins bash -s' \
-    < scripts/verify-plugin-artifact.sh; then
-    echo "FAIL: artifact verification failed on $node"
-    verified=0
-    break
-  fi
-done
-if [ "$verified" -eq 1 ]; then
-  echo "PASS: artifact verified on every Vault node"
-else
-  echo "STOP: do not continue until every Vault node passes verification"
-fi
-```
+cluster's change procedure. After the restart/reload, re-run the verification
+loop from section 1 against every node in the same operator shell. It re-checks
+the digest, service-user execution, owner/group, symlink status, and write
+permissions on the artifact and its parent directories. The loop resets
+`verified`, so its final result is the result used by the registration gate
+below.
 
 Do not proceed with catalog registration until all nodes have the same artifact
 and directory configuration, and every post-restart verification succeeds.
@@ -262,12 +245,20 @@ do not calculate a digest from a workstation-local path:
 ```bash
 export VAULT_ADDR='<VAULT_ADDR>'
 # Supply VAULT_TOKEN only through the approved protected session.
-vault plugin register -sha256="<SHA256_FROM_CHANGE_TICKET>" \
-  secret vault-plugin-secrets-proxmox
-vault plugin list secret
-vault secrets enable -path=proxmox vault-plugin-secrets-proxmox
-vault secrets list
+if [ "${verified:-0}" -ne 1 ]; then
+  echo "STOP: plugin registration requires a passing verification loop"
+else
+  vault plugin register -sha256="<SHA256_FROM_CHANGE_TICKET>" \
+    secret vault-plugin-secrets-proxmox
+  vault plugin list secret
+  vault secrets enable -path=proxmox vault-plugin-secrets-proxmox
+  vault secrets list
+fi
 ```
+
+Run sections 1–3 in the same operator shell, or repeat the section 1 loop in
+the shell used for registration so that `verified=1` reflects the latest
+post-restart verification.
 
 Confirm that the catalog entry's SHA-256 matches the digest recorded in step 1,
 and that the mount is enabled at the intended path. Do not use
