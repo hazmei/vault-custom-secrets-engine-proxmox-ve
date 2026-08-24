@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-set -u
+set -eu
 
 script_dir=$(cd -- "$(dirname -- "$0")" && pwd -P)
 verifier="$script_dir/verify-plugin-artifact.sh"
