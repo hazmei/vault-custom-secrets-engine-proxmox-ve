@@ -2,7 +2,7 @@
 
 set -u
 
-script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
+script_dir=$(cd -- "$(dirname -- "$0")" && pwd -P)
 verifier="$script_dir/verify-plugin-artifact.sh"
 fixture=$(mktemp -d "${TMPDIR:-/tmp}/verify-plugin.XXXXXX")
 trap 'rm -rf "$fixture"' EXIT
@@ -46,10 +46,12 @@ expect_verifier 1 "FAIL: digest does not match" "direct negative" \
   "$verifier"
 
 # Feed bash through a pipe, matching the stdin stream delivered by ssh.
+# shellcheck disable=SC2016
 expect_verifier 1 "FAIL: digest does not match" "streamed negative" \
   sh -c 'EXPECTED_SHA=deadbeef \
     EXPECTED_OWNER="$2" PLUGIN_DIR="$1" bash -s' \
   _ "$d" "$owner" < <(cat "$verifier")
+# shellcheck disable=SC2016
 expect_verifier 0 "OK: digest matches the approved artifact" \
   "streamed positive" sh -c 'EXPECTED_SHA="$3" \
     EXPECTED_OWNER="$2" PLUGIN_DIR="$1" bash -s' \
