@@ -185,7 +185,6 @@ for node in "<VAULT_NODE_1>" "<VAULT_NODE_2>" "<VAULT_NODE_3>"; do
     < scripts/verify-plugin-artifact.sh; then
     echo "FAIL: artifact verification failed on $node"
     verified=0
-    continue
   fi
 done
 if [ "$verified" -eq 1 ]; then
@@ -229,9 +228,13 @@ Confirm the effective configuration and restart/reload according to the
 cluster's change procedure. After the restart/reload, re-run the verification
 loop from section 1 against every node in the same operator shell. It re-checks
 the digest, service-user execution, owner/group, symlink status, and write
-permissions on the artifact and its parent directories. The loop resets
-`verified`, so its final result is the result used by the registration gate
-below.
+ permissions on the artifact and its parent directories. Invalidate the
+ pre-restart result before restarting, then re-run the loop so its final result
+ is the result used by the registration gate below:
+
+```bash
+verified=0
+```
 
 Do not proceed with catalog registration until all nodes have the same artifact
 and directory configuration, and every post-restart verification succeeds.
