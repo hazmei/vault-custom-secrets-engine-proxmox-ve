@@ -23,6 +23,10 @@ It builds its fixture under `$RUNNER_TEMP`, falling back to `.smoke-tmp/` in the
 repo root, and refuses to run when any ancestor of that directory is
 group/other writable (the verifier rejects such ancestors, so every positive
 assertion would otherwise fail for an unrelated-looking reason).
+On a host without GNU coreutils/findutils (such as macOS/BSD), it skips with
+exit 0 and prints a `brew install coreutils findutils` hint; when `CI` is set
+to anything other than the `false`/`0` opt-out, it refuses to skip and exits 1
+so the CI gate cannot silently self-disable.
 
 Current phase validation status, including the recorded PVE build, optional
 acceptance-test skip gates, and unverified production catalog registration, is

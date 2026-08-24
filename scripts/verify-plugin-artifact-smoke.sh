@@ -144,18 +144,18 @@ chmod g-w "$d/vault-plugin-secrets-proxmox"
 
 mv "$d/vault-plugin-secrets-proxmox" "$d/vault-plugin-secrets-proxmox.real"
 ln -s vault-plugin-secrets-proxmox.real "$d/vault-plugin-secrets-proxmox"
-expect_verifier 1 "is a symlink" "symlinked artifact" \
+expect_verifier 1 "$d/vault-plugin-secrets-proxmox is a symlink" "symlinked artifact" \
   env EXPECTED_SHA="$sha" EXPECTED_OWNER="$owner" PLUGIN_DIR="$d" "$verifier"
 rm "$d/vault-plugin-secrets-proxmox"
 mv "$d/vault-plugin-secrets-proxmox.real" "$d/vault-plugin-secrets-proxmox"
 
 ln -s "$d" "$fixture/plugin-link"
-expect_verifier 1 "is a symlink" "symlinked plugin directory" \
+expect_verifier 1 "$fixture/plugin-link is a symlink" "symlinked plugin directory" \
   env EXPECTED_SHA="$sha" EXPECTED_OWNER="$owner" PLUGIN_DIR="$fixture/plugin-link" \
   "$verifier"
 
 chmod g+w "$fixture"
-expect_verifier 1 "is group/other writable" "writable ancestor" \
+expect_verifier 1 "$fixture is group/other writable" "writable ancestor" \
   env EXPECTED_SHA="$sha" EXPECTED_OWNER="$owner" PLUGIN_DIR="$d" "$verifier"
 chmod g-w "$fixture"
 
