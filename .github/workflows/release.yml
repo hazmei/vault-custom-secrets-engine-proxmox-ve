@@ -1,0 +1,370 @@
+# Release — manual only. Cross-compiles the plugin for every supported operator
+# platform, publishes a signed build-provenance attestation for each binary, and
+# attaches a machine-readable release manifest (manifest.json) plus SHA256SUMS.
+#
+# The digests recorded here are digests of the RAW BINARY, which is exactly what
+# `vault plugin register -sha256=<hash>` consumes (docs/PRODUCTION_VERIFICATION.md)
+# and what scripts/verify-plugin-artifact.sh checks via EXPECTED_SHA. Binaries are
+# published unarchived so that digest is usable without an intermediate extract step.
+#
+# Versioning: semver, derived from the highest existing `v<major>.<minor>.<patch>`
+# tag (read over the REST API, so the checkout stays shallow and tag-free).
+# `bump` (patch/minor/major) computes the next version; `explicit` takes the
+# `version` input verbatim. With no tags in the repository the first release is
+# always 0.1.0. Releases are marked pre-release by default: production catalog
+# registration is still unverified for this project (see README.md).
+
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: "Semver bump from the latest v* tag (or 'explicit' to use the version input)"
+        type: choice
+        required: true
+        default: patch
+        options: [patch, minor, major, explicit]
+      version:
+        description: "Explicit semver, e.g. 0.2.0 (only used when bump=explicit)"
+        type: string
+        required: false
+        default: ""
+      prerelease:
+        description: "Mark the GitHub release as a pre-release"
+        type: boolean
+        required: true
+        default: true
+      draft:
+        description: "Create the GitHub release as a draft"
+        type: boolean
+        required: true
+        default: false
+      dry_run:
+        description: "Build, hash and verify only — no tag, no attestation, no release"
+        type: boolean
+        required: true
+        default: false
+
+permissions: {}
+
+concurrency:
+  group: release
+  cancel-in-progress: false # never interrupt a run that may already have published
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write # create the tag and the GitHub release
+      id-token: write # OIDC token for build-provenance attestation
+      attestations: write # write the attestation to the repository's attestation store
+    env:
+      PLUGIN_NAME: vault-plugin-secrets-proxmox
+    steps:
+      # Actions are pinned to commit SHAs; the trailing comment records the release.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        # Default shallow (depth 1) checkout is enough: the semver bump reads tags
+        # over the REST API, and SOURCE_DATE_EPOCH only needs the head commit.
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+
+      - name: Resolve release version
+        id: version
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          BUMP: ${{ inputs.bump }}
+          EXPLICIT: ${{ inputs.version }}
+        with:
+          script: |
+            // Official semver grammar: no leading zeros, optional prerelease/build.
+            const semverRe = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-((?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*)(?:\.(?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*))*))?(?:\+([0-9a-zA-Z-]+(?:\.[0-9a-zA-Z-]+)*))?$/;
+            const coreRe = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/;
+            const { owner, repo } = context.repo;
+
+            // Every v* tag, straight from the API — no tag history in the checkout.
+            let refs = [];
+            try {
+              refs = await github.paginate(github.rest.git.listMatchingRefs, {
+                owner, repo, ref: 'tags/v',
+              });
+            } catch (err) {
+              if (err.status !== 404) throw err; // 404 == no tags yet
+            }
+            const existing = new Set(refs.map((r) => r.ref.replace('refs/tags/', '')));
+
+            const bump = process.env.BUMP;
+            let version;
+
+            if (bump === 'explicit') {
+              version = (process.env.EXPLICIT || '').replace(/^v/, '');
+              if (!version) {
+                core.setFailed('bump=explicit requires the version input');
+                return;
+              }
+              if (!semverRe.test(version)) {
+                core.setFailed(`'${version}' is not a valid semver version`);
+                return;
+              }
+            } else {
+              // Release tags only: a prerelease is never a bump base.
+              const cores = [...existing]
+                .map((t) => t.replace(/^v/, ''))
+                .filter((t) => coreRe.test(t))
+                .map((t) => t.split('.').map(Number));
+              cores.sort((a, b) => b[0] - a[0] || b[1] - a[1] || b[2] - a[2]);
+
+              if (cores.length === 0) {
+                version = '0.1.0';
+                core.info(`no existing v* release tag; seeding the first release at ${version}`);
+              } else {
+                const [major, minor, patch] = cores[0];
+                if (bump === 'major') version = `${major + 1}.0.0`;
+                else if (bump === 'minor') version = `${major}.${minor + 1}.0`;
+                else if (bump === 'patch') version = `${major}.${minor}.${patch + 1}`;
+                else {
+                  core.setFailed(`unknown bump '${bump}'`);
+                  return;
+                }
+                core.info(`latest release tag v${major}.${minor}.${patch} -> ${bump} -> ${version}`);
+              }
+            }
+
+            const tag = `v${version}`;
+            if (existing.has(tag)) {
+              core.setFailed(`tag ${tag} already exists`);
+              return;
+            }
+
+            core.setOutput('version', version);
+            core.setOutput('tag', tag);
+            core.info(`releasing ${tag} from ${context.sha}`);
+
+      - name: Build and test
+        # Gate the release on the same baseline CI enforces. Acceptance tests
+        # (TestAcc*) stay operator-run against a disposable PVE cluster.
+        run: |
+          set -euo pipefail
+          go build ./...
+          go test ./...
+
+      - name: Cross-compile release binaries
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+
+          # Reproducibility: no cgo, -trimpath strips local paths, -buildid= drops the
+          # per-build id, and SOURCE_DATE_EPOCH pins any embedded timestamp to the commit.
+          SOURCE_DATE_EPOCH=$(git log -1 --pretty=%ct)
+          export SOURCE_DATE_EPOCH CGO_ENABLED=0
+
+          for target in \
+            darwin/arm64 darwin/amd64 \
+            linux/arm64 linux/amd64 \
+            windows/arm64 windows/amd64
+          do
+            goos=${target%%/*}
+            goarch=${target#*/}
+            name="${PLUGIN_NAME}_${VERSION}_${goos}_${goarch}"
+            if [ "$goos" = windows ]; then name="${name}.exe"; fi
+            echo "building $name"
+            GOOS="$goos" GOARCH="$goarch" go build \
+              -trimpath \
+              -mod=readonly \
+              -ldflags='-s -w -buildid=' \
+              -o "dist/$name" \
+              ./cmd/vault-plugin-secrets-proxmox
+          done
+
+          # Hash only the binaries: redirecting into the directory being globbed
+          # would otherwise make SHA256SUMS hash itself mid-write.
+          ( cd dist && sha256sum ./"${PLUGIN_NAME}"_* >SHA256SUMS.tmp && mv SHA256SUMS.tmp SHA256SUMS )
+          ( cd dist && sha256sum -c SHA256SUMS )
+          cat dist/SHA256SUMS
+
+      - name: Write release manifest
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          set -euo pipefail
+
+          # One entry per artifact. sha256 is the digest of the binary itself —
+          # feed it to `vault plugin register -sha256=` and to EXPECTED_SHA.
+          artifacts=$(
+            for f in dist/"${PLUGIN_NAME}"_*; do
+              base=$(basename "$f")
+              stripped=${base%.exe}
+              goarch=${stripped##*_}
+              rest=${stripped%_*}
+              goos=${rest##*_}
+              jq -n \
+                --arg filename "$base" \
+                --arg os "$goos" \
+                --arg arch "$goarch" \
+                --arg sha256 "$(sha256sum "$f" | cut -d' ' -f1)" \
+                --argjson size_bytes "$(stat -c '%s' "$f")" \
+                '{filename: $filename, os: $os, arch: $arch, sha256: $sha256, size_bytes: $size_bytes}'
+            done | jq -s 'sort_by(.os, .arch)'
+          )
+
+          jq -n \
+            --arg name "$PLUGIN_NAME" \
+            --arg version "$VERSION" \
+            --arg tag "$TAG" \
+            --arg commit "$GITHUB_SHA" \
+            --arg repository "$GITHUB_REPOSITORY" \
+            --arg built_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --arg go_version "$(go env GOVERSION)" \
+            --arg source_date_epoch "$(git log -1 --pretty=%ct)" \
+            --arg workflow_run "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
+            --argjson artifacts "$artifacts" \
+            '{
+              schema_version: 1,
+              name: $name,
+              version: $version,
+              tag: $tag,
+              commit: $commit,
+              repository: $repository,
+              built_at: $built_at,
+              go_version: $go_version,
+              source_date_epoch: ($source_date_epoch | tonumber),
+              workflow_run: $workflow_run,
+              digest_algorithm: "sha256",
+              digest_subject: "raw plugin binary (the value vault plugin register -sha256 expects)",
+              attestation: {
+                predicate_type: "https://slsa.dev/provenance/v1",
+                verify_command: ("gh attestation verify <downloaded-binary> --repo " + $repository)
+              },
+              artifacts: $artifacts
+            }' >dist/manifest.json
+
+          # Fail closed if the manifest and SHA256SUMS ever disagree.
+          jq -r '.artifacts[] | "\(.sha256)  ./\(.filename)"' dist/manifest.json \
+            | sort >"$RUNNER_TEMP/manifest-sums"
+          sort dist/SHA256SUMS >"$RUNNER_TEMP/dist-sums"
+          diff -u "$RUNNER_TEMP/dist-sums" "$RUNNER_TEMP/manifest-sums"
+          cat dist/manifest.json
+
+      - name: Attest build provenance
+        if: ${{ !inputs.dry_run }}
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: dist/vault-plugin-secrets-proxmox_*
+
+      - name: Create GitHub release
+        if: ${{ !inputs.dry_run }}
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          TAG: ${{ steps.version.outputs.tag }}
+          PRERELEASE: ${{ inputs.prerelease }}
+          DRAFT: ${{ inputs.draft }}
+        with:
+          script: |
+            const fs = require('fs');
+            const path = require('path');
+            const { owner, repo } = context.repo;
+            const version = process.env.VERSION;
+            const tag = process.env.TAG;
+            const manifest = JSON.parse(fs.readFileSync('dist/manifest.json', 'utf8'));
+            const name = manifest.name;
+
+            const rows = manifest.artifacts
+              .map((a) => `| ${a.os} | ${a.arch} | \`${a.filename}\` | \`${a.sha256}\` |`)
+              .join('\n');
+
+            const body = [
+              `## ${name} ${tag}`,
+              '',
+              'Vault secrets engine that issues short-lived Proxmox VE API tokens.',
+              '',
+              '> **Not production-ready.** Production-style catalog registration with',
+              '> `vault plugin register -sha256=<hash>` remains unverified for this',
+              '> project. See `README.md` and `docs/IMPLEMENTATION_PLAN.md` for the',
+              '> current validation status before deploying.',
+              '',
+              '### Artifacts',
+              '',
+              '| OS | Arch | File | SHA256 |',
+              '| --- | --- | --- | --- |',
+              rows,
+              '',
+              '`manifest.json` carries the same data machine-readably; `SHA256SUMS`',
+              'works with `sha256sum -c`. Each digest is the digest of the **raw binary**,',
+              'which is the value `vault plugin register -sha256=` and the',
+              '`EXPECTED_SHA` input to `scripts/verify-plugin-artifact.sh` expect.',
+              `Renaming the file to \`${name}\` on install does not change the digest.`,
+              '',
+              '### Verify provenance',
+              '',
+              '```bash',
+              `gh attestation verify ${name}_${version}_linux_amd64 \\`,
+              `  --repo ${owner}/${repo}`,
+              '# Linux (GNU coreutils):',
+              'sha256sum -c SHA256SUMS --ignore-missing',
+              '# macOS, and anywhere else without GNU coreutils:',
+              'shasum -a 256 -c SHA256SUMS --ignore-missing',
+              '```',
+              '',
+              '### Install',
+              '',
+              '```bash',
+              'sudo install -m 0755 -o vault -g vault \\',
+              `  ${name}_${version}_linux_amd64 /etc/vault/plugins/${name}`,
+              '```',
+              '',
+              'Then follow **Build and Install** in `README.md` and the operator',
+              'runbook in `docs/PRODUCTION_VERIFICATION.md`.',
+              '',
+              `Built from \`${manifest.commit}\` with ${manifest.go_version}.`,
+            ].join('\n');
+
+            const release = await github.rest.repos.createRelease({
+              owner,
+              repo,
+              tag_name: tag,
+              target_commitish: context.sha,
+              name: tag,
+              body,
+              generate_release_notes: true, // appended below the body, as gh --generate-notes does
+              prerelease: process.env.PRERELEASE === 'true',
+              draft: process.env.DRAFT === 'true',
+            });
+            core.info(`created ${release.data.html_url}`);
+
+            const assets = [
+              ...manifest.artifacts.map((a) => a.filename),
+              'SHA256SUMS',
+              'manifest.json',
+            ];
+            for (const asset of assets) {
+              const file = path.join('dist', asset);
+              const data = fs.readFileSync(file);
+              await github.rest.repos.uploadReleaseAsset({
+                owner,
+                repo,
+                release_id: release.data.id,
+                name: asset,
+                data,
+                headers: {
+                  'content-type': 'application/octet-stream',
+                  'content-length': data.length,
+                },
+              });
+              core.info(`uploaded ${asset} (${data.length} bytes)`);
+            }
+
+      - name: Upload dry-run artifacts
+        if: ${{ inputs.dry_run }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-dry-run-${{ steps.version.outputs.tag }}
+          path: dist/
+          retention-days: 7
+          if-no-files-found: error
