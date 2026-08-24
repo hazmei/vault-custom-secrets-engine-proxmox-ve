@@ -28,13 +28,24 @@ tracking-only until the live PVE probe in P0 passes; these decisions do not auth
 password implementation in the current token-only release.
 
 - The role field is `mode` with values `token` and `password`.
-- An omitted `mode` defaults to `token`, preserving existing role and lease behavior.
+- An omitted `mode` means `token`, preserving existing role and lease behavior. This
+  compatibility rule MUST apply at read time as well as write time: `getRole()` must
+  normalize a decoded empty value to `token`, or issuance must treat `mode == ""` as
+  token. Legacy stored-role tests are required; write-time defaulting alone is not
+  sufficient.
 - A password response contains exactly `user_id` and `password`.
 - Password mode creates no PVE API token and uses a separate Vault secret type.
 - The password is never stored in WAL or `Secret.InternalData`, and is never written to logs.
-- Renewal extends the PVE user expiry only; it does not rotate or return the password.
 - Existing token roles and leases remain compatible and are not migrated.
-- Implementation is gated on live PVE 9.2.10 behavior probing; no probe result is claimed here.
+- These are contract decisions only; no probe result is claimed here and they do not
+  authorize password implementation in the current token-only release.
+
+### Probe-dependent password design intent
+
+Password renewal is intended to extend the PVE user expiry only, without rotating or
+returning the password. This is not a confirmed PVE behavior yet. It remains
+conditional on P0 evidence for the exact engine renewal shape and a successful
+authentication attempt with the original password after renewal.
 
 ## Repository Layout
 
@@ -1617,8 +1628,16 @@ are gated until its live PVE 9.2.10 evidence is recorded.**
     complete.
   - **Checklist**: verify password user creation and authentication; determine
     password rotation/update behavior; verify expiry, disablement, deletion, and
-    interaction with token credentials and the user-level `expire` backstop; capture
-    exact status/body behavior and redact secrets from evidence.
+    interaction with token credentials and the user-level `expire` backstop. Exercise
+    the exact engine renewal shape `expire + groups + enable + append=1`, read the
+    user back, and authenticate with the original password afterward. Probe which
+    realm types accept password credentials (including the configured/default `pve`
+    realm and non-password realms), recording the exact HTTP status and redacted body
+    for every failure. Probe the privileges required to create/set a password,
+    recording the exact ACL path, privilege, and propagation flag; compare them with
+    the existing `/access/groups` and `/access/realm/<realm>` checks. Record PVE
+    password minimum and maximum constraints needed by the generator. Capture exact
+    status/body behavior throughout and redact all password values from evidence.
   - **Acceptance**: reproducible probe evidence is recorded in `docs/PVE_PROBES.md`
     with no password values; unresolved behavior is explicitly listed; implementation
     gate is opened only after review.
@@ -1629,18 +1648,30 @@ are gated until its live PVE 9.2.10 evidence is recorded.**
   - **Dependencies**: P0 evidence and review.
   - **Checklist**: reconcile the confirmed `mode` contract with probe findings;
     document exact response fields, separate secret type, no-token behavior,
-    one-time password handling, renewal semantics, compatibility, and error paths;
-    define migration behavior for existing token roles/leases.
+    one-time password handling, compatibility, and error paths; define migration
+    behavior for existing token roles/leases. Lock password-generator ownership
+    (engine versus PVE), length, charset, `crypto/rand` entropy requirements, and
+    PVE minimum/maximum constraints from P0 before P4 can start. Define redaction
+    requirements for responses, errors, logs, WAL, and `InternalData`. Treat renewal
+    as design intent unless P0 proves the original password still authenticates.
   - **Acceptance**: the plan, architecture, README, and operator guidance agree;
     no document claims unsupported PVE behavior or exposes a secret.
 
 - [ ] **P2 — Role schema and validation**
-  - **Files/scope**: `path_roles.go`, `path_roles_test.go`, role storage/schema
-    documentation, and relevant compatibility tests.
+  - **Files/scope**: `path_config.go`, `path_roles.go`, privilege documentation and
+    tests if P0 identifies new requirements, role storage/schema documentation, and
+    relevant compatibility tests.
   - **Dependencies**: P1; preserve existing token role decoding and validation.
   - **Checklist**: add `mode` validation for `token`/`password`; default omission to
-    `token`; persist/read the field without changing existing role or lease data;
+    `token` on both write and read (normalize `mode == ""` in `getRole()` or apply
+    equivalent issuance handling); add tests for legacy stored roles with absent or
+    empty mode; persist/read the field without changing existing role or lease data;
     reject unsupported values clearly; ensure role responses and help text are exact.
+    Add password-mode realm applicability validation before issuance, based on P0's
+    exact status/body evidence, while preserving token-mode realm behavior. If P0
+    finds password-specific privileges, update the config precheck in
+    `path_config.go`, role precheck in `path_roles.go`, ACL/operator privilege docs,
+    and their tests; retain the existing token privilege behavior unchanged.
   - **Acceptance**: old roles round-trip as token roles; invalid modes fail; new
     password roles round-trip; token role tests remain green.
 
@@ -1649,15 +1680,19 @@ are gated until its live PVE 9.2.10 evidence is recorded.**
     `secret_password.go`), `backend.go`, and secret unit tests.
   - **Dependencies**: P1 and P2; use only the confirmed PVE behavior.
   - **Checklist**: define a distinct Vault secret type returning exactly `user_id`
-    and `password`; keep password out of WAL, InternalData, logs, and error text;
-    register callbacks without changing the token secret type.
+    and `password`; implement only the generator contract locked in P1: explicit
+    ownership, length, charset, `crypto/rand` entropy, and PVE min/max compliance;
+    keep password out of WAL, InternalData, logs, and error text, with redaction tests;
+    register callbacks without changing the token secret type. P3 must not invent or
+    silently choose any generator parameter left unresolved by P0/P1.
   - **Acceptance**: schema has no extra response fields; secret redaction tests pass;
     token secret registration and existing leases remain unchanged.
 
 - [ ] **P4 — Password issuance and compensation**
   - **Files/scope**: `path_creds.go` or password issuance helper, `wal.go`,
     `internal/pveapi/*`, and issuance/compensation tests.
-  - **Dependencies**: P0–P3.
+  - **Dependencies**: P0–P3; blocked until P0 evidence and the P1/P3 password
+    generator and redaction gates are locked.
   - **Checklist**: branch on role mode; create the PVE user with the confirmed
     password request shape and existing expiry/group safeguards; never create an API
     token in password mode; return the password once; preserve nonce-gated WAL
@@ -1671,12 +1706,15 @@ are gated until its live PVE 9.2.10 evidence is recorded.**
   - **Files/scope**: password secret callbacks, `secret_password.go`, and lifecycle
     tests; update architecture references if probe results require it.
   - **Dependencies**: P0–P4.
-  - **Checklist**: renewal extends expiry only using the existing TTL rules; do not
-    rotate or return a password; revoke the PVE user idempotently; define behavior for
-    disabled users, expired users, and out-of-band password changes from probe data.
-  - **Acceptance**: renewal never invokes password rotation and never returns a
-    password; revocation removes the user and is retry-safe; token renew/revoke tests
-    remain green.
+  - **Checklist**: if P0 proves the exact renewal PUT preserves authentication,
+    renewal extends expiry only using the existing TTL rules; otherwise stop and
+    revise the lifecycle design before implementation. Do not rotate or return a
+    password unless P0/P1 explicitly change that contract. Revoke the PVE user
+    idempotently; define behavior for disabled users, expired users, and out-of-band
+    password changes from probe data.
+  - **Acceptance**: conditional on P0 evidence, renewal never invokes password
+    rotation and never returns a password; revocation removes the user and is
+    retry-safe; token renew/revoke tests remain green.
 
 - [ ] **P6 — WAL and lifecycle test coverage**
   - **Files/scope**: `wal_test.go`, `path_creds_test.go`, `secret_password_test.go`,
