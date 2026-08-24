@@ -176,20 +176,28 @@ script from the operator workstation and run it directly on the node instead.
 This avoids staging the verifier in world-writable `/tmp`:
 
 ```bash
-for node in "<VAULT_NODE_1>" "<VAULT_NODE_2>"; do
-  (
-    if ! ssh "$node" 'EXPECTED_SHA="<SHA256_FROM_CHANGE_TICKET>" \
-  EXPECTED_OWNER="vault:vault" PLUGIN_DIR=/etc/vault/plugins bash -s' \
-  < scripts/verify-plugin-artifact.sh; then
-      echo "FAIL: artifact verification failed on $node"
-      exit 1
-    fi
-  )
+verified=1
+# Replace these placeholders with every Vault node's hostname or address.
+for node in "<VAULT_NODE_1>" "<VAULT_NODE_2>" "<VAULT_NODE_3>"; do
+  # Keep the continuation inside the quoted command for the remote shell.
+  if ! ssh "$node" 'EXPECTED_SHA="<SHA256_FROM_CHANGE_TICKET>" \
+    EXPECTED_OWNER="vault:vault" PLUGIN_DIR=/etc/vault/plugins bash -s' \
+    < scripts/verify-plugin-artifact.sh; then
+    echo "FAIL: artifact verification failed on $node"
+    verified=0
+    break
+  fi
 done
+if [ "$verified" -eq 1 ]; then
+  echo "PASS: artifact verified on every Vault node"
+else
+  echo "STOP: do not continue until every Vault node passes verification"
+fi
 ```
 
-The guard reports SSH's non-zero status when verification fails. Do not proceed
-to the next step until every node has passed verification.
+The guard reports SSH's non-zero status when verification fails and records the
+overall result in `verified`. Do not proceed to the next step unless the final
+message confirms that every node passed verification.
 
 Run the wrapper or standalone script once per Vault node. Set
 `VERIFY_PLUGIN_DIR`/`PLUGIN_DIR` to the node's absolute `plugin_directory`; the
@@ -223,16 +231,23 @@ symlink status, and write permissions on the artifact and its parent
 directories:
 
 ```bash
-for node in "<VAULT_NODE_1>" "<VAULT_NODE_2>"; do
-  (
-    if ! ssh "$node" 'EXPECTED_SHA="<SHA256_FROM_CHANGE_TICKET>" \
-  EXPECTED_OWNER="vault:vault" PLUGIN_DIR=/etc/vault/plugins bash -s' \
-  < scripts/verify-plugin-artifact.sh; then
-      echo "FAIL: artifact verification failed on $node"
-      exit 1
-    fi
-  )
+verified=1
+# Replace these placeholders with every Vault node's hostname or address.
+for node in "<VAULT_NODE_1>" "<VAULT_NODE_2>" "<VAULT_NODE_3>"; do
+  # Keep the continuation inside the quoted command for the remote shell.
+  if ! ssh "$node" 'EXPECTED_SHA="<SHA256_FROM_CHANGE_TICKET>" \
+    EXPECTED_OWNER="vault:vault" PLUGIN_DIR=/etc/vault/plugins bash -s' \
+    < scripts/verify-plugin-artifact.sh; then
+    echo "FAIL: artifact verification failed on $node"
+    verified=0
+    break
+  fi
 done
+if [ "$verified" -eq 1 ]; then
+  echo "PASS: artifact verified on every Vault node"
+else
+  echo "STOP: do not continue until every Vault node passes verification"
+fi
 ```
 
 Do not proceed with catalog registration until all nodes have the same artifact
