@@ -128,7 +128,12 @@ The admin token never needs to hold the delegated roles — those are bound to o
   to `/` and fails on writable ones — without the precheck a checkout under a
   shared path fails as `direct positive: rc=1 want=0` with no hint that the
   fixture's own location is at fault. Set `RUNNER_TEMP` to a private directory
-  in that case.
+  in that case. On a host without GNU coreutils/findutils (macOS/BSD, where the
+  verifier's `sha256sum`/`stat -c`/`find -perm /022` probes fail), the smoke
+  script probes the same three tools up front and **skips cleanly** (`exit 0`
+  with a `brew install coreutils findutils` hint) instead of asserting the
+  verifier exits 0 and surfacing that same opaque `direct positive` line;
+  full execution therefore runs on Linux/CI.
 - **CI** (`.github/workflows/ci.yml`) runs build + unit tests + golangci-lint (pinned v2.12.2), ShellCheck, and the `verify-plugin-artifact` smoke test on every push/PR. The smoke step invokes the same `scripts/verify-plugin-artifact-smoke.sh` as `make smoke`. The lint version is pinned in the Makefile (`GOLANGCI_LINT_VERSION`) so local and CI agree.
 
 ## Docs
