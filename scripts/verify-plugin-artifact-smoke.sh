@@ -20,6 +20,15 @@ command -v find >/dev/null 2>&1 && find / -maxdepth 0 -perm /022 -print -quit >/
 if [ "$tools_ok" -ne 1 ]; then
   echo "skipping plugin artifact smoke checks: GNU coreutils/findutils required" >&2
   echo "(brew install coreutils findutils, or run in CI on Linux)" >&2
+  # Skipping is right for a local `make smoke` on darwin, but NOT for the CI
+  # gate: a silent exit 0 there would let the artifact-verification checks
+  # self-disable (base-image change, container swap, a future macOS matrix
+  # entry) with nothing but an unread skip line. GitHub Actions sets CI=true
+  # automatically, so refuse to skip when it is set.
+  if [ -n "${CI:-}" ]; then
+    echo "refusing to skip in CI: install GNU coreutils/findutils on the runner" >&2
+    exit 1
+  fi
   exit 0
 fi
 
@@ -65,7 +74,13 @@ d="$fixture/plugins"
 mkdir -p "$d"
 printf '#!/usr/bin/env bash\nexit 0\n' > "$d/vault-plugin-secrets-proxmox"
 chmod 0755 "$d/vault-plugin-secrets-proxmox"
-sha=$(sha256sum "$d/vault-plugin-secrets-proxmox" | cut -d' ' -f1)
+# Trim in the shell rather than piping to cut: a pipeline's status is the last
+# element's, so `cut` returning 0 would mask a failed sha256sum and `set -e`
+# would never fire, leaving sha empty → EXPECTED_SHA="" → the exact
+# "direct positive: rc=1 want=0" this script guards against. Matches
+# verify-plugin-artifact.sh.
+sha=$(sha256sum "$d/vault-plugin-secrets-proxmox")
+sha=${sha%% *}
 owner=$(id -un):$(id -gn)
 
 expect_verifier() {
