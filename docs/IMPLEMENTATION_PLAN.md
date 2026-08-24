@@ -1659,8 +1659,10 @@ are gated until its live PVE 9.2.10 evidence is recorded.**
     MUST compensate by revoking/deleting the live credential; if deletion fails,
     retain the nonce-gated WAL entry for rollback. If separate post-create password
     setting is required, apply the same `DeleteUser` compensation and conditional WAL
-    cleanup rules. Treat renewal as design intent unless P0 proves the original
-    password still authenticates.
+    cleanup rules. Explicitly decide and lock the password-mode comment read-back
+    policy: retain the token-mode soft warning, or make a nonce mismatch fatal and
+    delete the user before failing issuance. Treat renewal as design intent unless
+    P0 proves the original password still authenticates.
   - **Acceptance**: the plan, architecture, README, and operator guidance agree;
     no document claims unsupported PVE behavior or exposes a secret.
 
@@ -1704,10 +1706,19 @@ are gated until its live PVE 9.2.10 evidence is recorded.**
     password request shape and existing expiry/group safeguards; never create an API
     token in password mode; return the password once; preserve nonce-gated WAL
     ownership and collision handling; compensate every post-WAL failure without
-    persisting or logging the password.
+    persisting or logging the password. Apply the P1-locked password comment
+    read-back policy explicitly: either retain the token-mode soft warning, or make
+    a nonce mismatch fatal, delete the user, and fail issuance. Do not inherit this
+    behavior implicitly from token mode. If same-call creation succeeds but group
+    read-back fails (including a read-back error), call `DeleteUser`; delete the WAL
+    only when that deletion returns nil or `ErrUserNotFound`, and retain the WAL and
+    return the cleanup error when deletion fails transiently.
   - **Acceptance**: password issuance returns exactly the contract fields; mock
-    assertions prove no token call; collision, tokenless failure, WAL cleanup, and
-    user cleanup paths are covered; token issuance is behaviorally unchanged.
+    assertions prove no token call; collision, tokenless failure, group read-back
+    failure, conditional WAL cleanup, and user cleanup paths are covered; the
+    P1-selected comment mismatch policy is explicit and enforced; password values
+    never appear in logs, errors, WAL, `InternalData`, or Vault storage; token
+    issuance is behaviorally unchanged.
 
 - [ ] **P5 — Password renewal and revocation**
   - **Files/scope**: password secret callbacks, `secret_password.go`, and lifecycle
@@ -1729,8 +1740,13 @@ are gated until its live PVE 9.2.10 evidence is recorded.**
   - **Dependencies**: P0–P5.
   - **Checklist**: add unit coverage for secret non-persistence, nonce ownership,
     crash recovery, compensation, renewal, revocation, compatibility, and log/error
-    redaction; add opt-in live coverage for authentication, expiry, disablement,
-    deletion, and confirmed token interaction.
+    redaction; mock password-mode group read-back failure after same-call creation
+    and assert `DeleteUser`; assert that a transient `DeleteUser` failure retains
+    the WAL, while nil or `ErrUserNotFound` permits WAL deletion. Test the
+    P1-selected password comment mismatch policy, including any required delete
+    and WAL behavior. Assert that password values are absent from logs, errors,
+    WAL, `InternalData`, and stored Vault data. Add opt-in live coverage for
+    authentication, expiry, disablement, deletion, and confirmed token interaction.
   - **Acceptance**: unit tests pass without live PVE; password acceptance tests are
     `VAULT_ACC=1` gated, require explicit P0 evidence/prerequisites, and never print
     secrets; existing acceptance tests remain unchanged and green.
@@ -1745,10 +1761,13 @@ are gated until its live PVE 9.2.10 evidence is recorded.**
     disablement/revocation expectations, audit evidence, privilege implications,
     compatibility, and recovery procedures; review logs, WAL, InternalData, error
     paths, and operator workflows for secret exposure. Document the live-credential
-    orphan window from same-call password creation through `WALRollbackMinAge` plus
-    rollback retry time, including the PVE `expire` backstop as mitigation. Reconcile
-    the resulting orphan-handling assumptions in `docs/ARCHITECTURE.md` and `AGENTS.md`
-    as appropriate.
+    orphan windows separately: for a nonce-matched orphan, from same-call password
+    creation through `WALRollbackMinAge` plus rollback retry time; for an empty- or
+    nonce-mismatched orphan, potentially through the full PVE `expire` lifetime or
+    until manual cleanup, because `walRollback` intentionally drops that WAL entry
+    without deleting a foreign/mismatched user. Include the PVE `expire` backstop as
+    mitigation for both cases. Reconcile the resulting orphan-handling assumptions
+    in `docs/ARCHITECTURE.md` and `AGENTS.md` as appropriate.
   - **Acceptance**: security review is recorded; operator docs match the shipped
     behavior and probe evidence; no token-only production gate is weakened.
 
