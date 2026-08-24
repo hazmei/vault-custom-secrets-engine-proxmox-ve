@@ -176,12 +176,15 @@ script from the operator workstation and run it directly on the node instead.
 This avoids staging the verifier in world-writable `/tmp`:
 
 ```bash
-if ! ssh <node> 'EXPECTED_SHA="<SHA256_FROM_CHANGE_TICKET>" \
+node="<VAULT_NODE_HOSTNAME>"
+(
+  if ! ssh "$node" 'EXPECTED_SHA="<SHA256_FROM_CHANGE_TICKET>" \
   EXPECTED_OWNER="vault:vault" PLUGIN_DIR=/etc/vault/plugins bash -s' \
   < scripts/verify-plugin-artifact.sh; then
-  echo "FAIL: artifact verification failed on <node>"
-  exit 1
-fi
+    echo "FAIL: artifact verification failed on $node"
+    exit 1
+  fi
+)
 ```
 
 The guard consumes SSH's non-zero status when verification fails, so the
@@ -219,12 +222,15 @@ symlink status, and write permissions on the artifact and its parent
 directories:
 
 ```bash
-if ! ssh <node> 'EXPECTED_SHA="<SHA256_FROM_CHANGE_TICKET>" \
+node="<VAULT_NODE_HOSTNAME>"
+(
+  if ! ssh "$node" 'EXPECTED_SHA="<SHA256_FROM_CHANGE_TICKET>" \
   EXPECTED_OWNER="vault:vault" PLUGIN_DIR=/etc/vault/plugins bash -s' \
   < scripts/verify-plugin-artifact.sh; then
-  echo "FAIL: artifact verification failed on <node>"
-  exit 1
-fi
+    echo "FAIL: artifact verification failed on $node"
+    exit 1
+  fi
+)
 ```
 
 Do not proceed with catalog registration until all nodes have the same artifact
