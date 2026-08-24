@@ -21,6 +21,21 @@ These design choices are baked into the implementation and are **not open for re
 - **No issuance-time requested TTL**: `<mount>/creds/:role` declares NO `ttl` field, matching the database and terraform secrets engines. The effective TTL comes from role values with config defaults as fallback; `increment` is passed to `CalculateTTL` only on renewal (from `req.Secret.Increment`).
 - **`expire=0` (unlimited TTL) policy**: The engine REFUSES issuance when the effective TTL resolves to 0 (unlimited). Sending PVE `expire=0` creates a never-expiring user, disabling the `expire` backstop — the sole defense-in-depth if Vault revocation is delayed or fails. `creds/:role` returns a clear error: `"role %q resolves to an unlimited TTL; set a non-zero ttl/max_ttl on the role or config default_ttl/default_max_ttl (the PVE expire backstop requires a finite lease)"`. (Alternative considered and rejected as more complex: floor the PVE `expire` at `now + effMaxTTL + grace` when a finite max exists but ttl is 0.) This makes the backstop non-optional.
 
+## Confirmed Password Credential Decisions
+
+The following contract is confirmed for the future password credential feature. It is
+tracking-only until the live PVE probe in P0 passes; these decisions do not authorize
+password implementation in the current token-only release.
+
+- The role field is `mode` with values `token` and `password`.
+- An omitted `mode` defaults to `token`, preserving existing role and lease behavior.
+- A password response contains exactly `user_id` and `password`.
+- Password mode creates no PVE API token and uses a separate Vault secret type.
+- The password is never stored in WAL or `Secret.InternalData`, and is never written to logs.
+- Renewal extends the PVE user expiry only; it does not rotate or return the password.
+- Existing token roles and leases remain compatible and are not migrated.
+- Implementation is gated on live PVE 9.2.10 behavior probing; no probe result is claimed here.
+
 ## Repository Layout
 
 ```
@@ -972,6 +987,18 @@ recorded a `DeleteUser` for the just-created userid. No live PVE needed.
 
 **References**: `docs/ARCHITECTURE.md` — Testing Strategy section, Acceptance Tests — authorization contract canary, failure injection, DELETE config guard.
 
+### Password Credential Testing Strategy (gated)
+
+Password tests remain pending until P0 records live PVE 9.2.10 behavior. Unit tests
+must use the mock client and assert the contract without exposing password values in
+test logs or failure messages. They must cover mode defaulting and validation, the
+separate secret schema, password-only issuance with no token call, compensation and
+WAL ordering, renewal without rotation or password return, revocation, and
+compatibility with token roles and pre-existing token leases. Acceptance coverage
+must be opt-in and operator-run against the probed PVE behavior, including password
+authentication, expiry, disablement, deletion, and any confirmed interaction with
+token credentials. No password acceptance test may run before P0 is complete.
+
 ## Build & Run
 
 ### Build the Plugin
@@ -1576,26 +1603,104 @@ engine therefore continues to send explicit `append=1` with `expire` +
 
 ### Password Credential Support (gated future feature)
 
-Password credentials are deliberately not implemented; the engine currently
-issues only PVE API tokens. Do not make token-only production adoption depend
-on this feature, add password fields, or alter the token lifecycle as part of
-the release gates. Complete these phases in order:
-- [ ] **Phase 1 — PVE password behavior probe**: verify user creation,
-  authentication, rotation/update, expiry, disablement, deletion, and
-  interaction with token credentials and the user-level `expire` backstop;
-  record evidence in `docs/PVE_PROBES.md`.
-- [ ] **Phase 2 — Role-level opt-in credential mode**: after the probe, add an
-  explicit mode with `token` as the default, preserving existing token-only
-  roles and leases; update schema, validation, architecture, plan, and tests.
-- [ ] **Phase 3 — Password issuance**: after mode design and tests are
-  approved, implement opt-in password generation and issuance with one-time
-  secret handling and token-path-equivalent collision/error compensation.
-- [ ] **Phase 4 — Password lifecycle handling**: define and test renewal,
-  revocation, WAL rollback, expiry, disablement, and out-of-band password
-  changes so token and password cleanup cannot silently diverge.
-- [ ] **Phase 5 — Documentation and security review**: review threat model,
-  privileges, audit expectations, secret handling, migration/compatibility,
-  and operator procedures; update the affected project documentation.
+Password credentials are deliberately not implemented; the engine currently issues
+only PVE API tokens. Do not make token-only production adoption depend on this work,
+add password fields, or alter the token lifecycle as part of the release gates.
+Complete the following tasks in order. **P0 is pending, and all implementation tasks
+are gated until its live PVE 9.2.10 evidence is recorded.**
+
+- [ ] **P0 — Live PVE password behavior probe (pre-implementation)**
+  - **Files/scope**: `docs/PVE_PROBES.md`, disposable PVE 9.2.10 target, probe
+    notes/scripts as appropriate; no application code.
+  - **Dependencies**: operator-provided disposable PVE 9.2.10 cluster and
+    credentials; none of the implementation tasks may start before this task is
+    complete.
+  - **Checklist**: verify password user creation and authentication; determine
+    password rotation/update behavior; verify expiry, disablement, deletion, and
+    interaction with token credentials and the user-level `expire` backstop; capture
+    exact status/body behavior and redact secrets from evidence.
+  - **Acceptance**: reproducible probe evidence is recorded in `docs/PVE_PROBES.md`
+    with no password values; unresolved behavior is explicitly listed; implementation
+    gate is opened only after review.
+
+- [ ] **P1 — Contract and documentation finalization (pre-implementation)**
+  - **Files/scope**: `docs/IMPLEMENTATION_PLAN.md`, `docs/ARCHITECTURE.md`,
+    `README.md`, and any password-specific operator documentation.
+  - **Dependencies**: P0 evidence and review.
+  - **Checklist**: reconcile the confirmed `mode` contract with probe findings;
+    document exact response fields, separate secret type, no-token behavior,
+    one-time password handling, renewal semantics, compatibility, and error paths;
+    define migration behavior for existing token roles/leases.
+  - **Acceptance**: the plan, architecture, README, and operator guidance agree;
+    no document claims unsupported PVE behavior or exposes a secret.
+
+- [ ] **P2 — Role schema and validation**
+  - **Files/scope**: `path_roles.go`, `path_roles_test.go`, role storage/schema
+    documentation, and relevant compatibility tests.
+  - **Dependencies**: P1; preserve existing token role decoding and validation.
+  - **Checklist**: add `mode` validation for `token`/`password`; default omission to
+    `token`; persist/read the field without changing existing role or lease data;
+    reject unsupported values clearly; ensure role responses and help text are exact.
+  - **Acceptance**: old roles round-trip as token roles; invalid modes fail; new
+    password roles round-trip; token role tests remain green.
+
+- [ ] **P3 — Separate password secret type**
+  - **Files/scope**: new password secret implementation (likely
+    `secret_password.go`), `backend.go`, and secret unit tests.
+  - **Dependencies**: P1 and P2; use only the confirmed PVE behavior.
+  - **Checklist**: define a distinct Vault secret type returning exactly `user_id`
+    and `password`; keep password out of WAL, InternalData, logs, and error text;
+    register callbacks without changing the token secret type.
+  - **Acceptance**: schema has no extra response fields; secret redaction tests pass;
+    token secret registration and existing leases remain unchanged.
+
+- [ ] **P4 — Password issuance and compensation**
+  - **Files/scope**: `path_creds.go` or password issuance helper, `wal.go`,
+    `internal/pveapi/*`, and issuance/compensation tests.
+  - **Dependencies**: P0–P3.
+  - **Checklist**: branch on role mode; create the PVE user with the confirmed
+    password request shape and existing expiry/group safeguards; never create an API
+    token in password mode; return the password once; preserve nonce-gated WAL
+    ownership and collision handling; compensate every post-WAL failure without
+    persisting or logging the password.
+  - **Acceptance**: password issuance returns exactly the contract fields; mock
+    assertions prove no token call; collision, tokenless failure, WAL cleanup, and
+    user cleanup paths are covered; token issuance is behaviorally unchanged.
+
+- [ ] **P5 — Password renewal and revocation**
+  - **Files/scope**: password secret callbacks, `secret_password.go`, and lifecycle
+    tests; update architecture references if probe results require it.
+  - **Dependencies**: P0–P4.
+  - **Checklist**: renewal extends expiry only using the existing TTL rules; do not
+    rotate or return a password; revoke the PVE user idempotently; define behavior for
+    disabled users, expired users, and out-of-band password changes from probe data.
+  - **Acceptance**: renewal never invokes password rotation and never returns a
+    password; revocation removes the user and is retry-safe; token renew/revoke tests
+    remain green.
+
+- [ ] **P6 — WAL and lifecycle test coverage**
+  - **Files/scope**: `wal_test.go`, `path_creds_test.go`, `secret_password_test.go`,
+    `acceptance_test.go` (gated `TestAcc*` additions), and testing documentation.
+  - **Dependencies**: P0–P5.
+  - **Checklist**: add unit coverage for secret non-persistence, nonce ownership,
+    crash recovery, compensation, renewal, revocation, compatibility, and log/error
+    redaction; add opt-in live coverage for authentication, expiry, disablement,
+    deletion, and confirmed token interaction.
+  - **Acceptance**: unit tests pass without live PVE; password acceptance tests are
+    `VAULT_ACC=1` gated, require explicit P0 evidence/prerequisites, and never print
+    secrets; existing acceptance tests remain unchanged and green.
+
+- [ ] **P7 — Operator documentation and security review**
+  - **Files/scope**: `README.md`, `docs/ARCHITECTURE.md`,
+    `docs/PRODUCTION_VERIFICATION.md`, `docs/IMPLEMENTATION_PLAN.md`, and audit/
+    security review notes.
+  - **Dependencies**: P0–P6.
+  - **Checklist**: document configuration, response handling, password lifetime,
+    disablement/revocation expectations, audit evidence, privilege implications,
+    compatibility, and recovery procedures; review logs, WAL, InternalData, error
+    paths, and operator workflows for secret exposure.
+  - **Acceptance**: security review is recorded; operator docs match the shipped
+    behavior and probe evidence; no token-only production gate is weakened.
 
 ---
 
