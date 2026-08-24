@@ -25,8 +25,8 @@ full command output containing them.
   operator session; do not put them in shell history, CI logs, tickets, chat,
   screenshots, support bundles, or this repository.
 - The concrete verification example below uses the PVE group
-  `vault-production-readers`, the delegated PVE role `PVEAuditor`, realm `pve`,
-  and Vault role `production-readers`. Keep placeholders such as
+  `vault-production-readers`, the delegated PVE role `PVEAuditor`, the target
+  realm `<REALM>`, and Vault role `production-readers`. Keep placeholders such as
   `<VAULT_ADDR>`, `<PVE_HOST>`, and provisioner identity values where the
   environment-specific value is genuinely required. Do not substitute real
   secrets into documentation or commit them.
@@ -151,9 +151,13 @@ configuration.
 Build from the reviewed source revision:
 
 ```bash
-make build # include GOOS=linux GOARCH=arm64 to build for linux on arm64
+make build
 shasum -a 256 vault/plugins/vault-plugin-secrets-proxmox
 ```
+
+Build for the Vault server's platform. If the build host differs, cross-compile
+with `GOOS=linux GOARCH=arm64 make build`; the SHA-256 below must be the hash of
+the artifact that will actually be installed on the Vault node.
 
 Record the commit and SHA-256 digest in the change ticket. Transfer that exact
 binary to the approved plugin directory on every Vault node. On each node,
@@ -297,7 +301,7 @@ use the approved delegated role for the target.
 ```bash
 pveum role list
 pveum group add vault-production-readers --comment "Vault production read-only lease group"
-pveum acl modify / --group vault-production-readers --role PVEAuditor --propagate 1
+pveum acl modify /nodes/<NODE> --group vault-production-readers --role PVEAuditor --propagate 1
 ```
 
 The group ACL is an out-of-band administrator configuration. The engine only
@@ -311,8 +315,8 @@ binding.
 Capture redacted administrator evidence before continuing:
 
 - the existence and comment of `vault-production-readers`;
-- the binding of `PVEAuditor` to that group, including path `/` and propagation
-  enabled (`1`); and
+- the binding of `PVEAuditor` to that group, including the approved path
+  `/nodes/<NODE>` and propagation enabled (`1`); and
 - the reviewed, approved privilege and path scope of `PVEAuditor`.
 
 Do not include token secrets, Authorization headers, or unrelated cluster data
@@ -331,19 +335,20 @@ pveum role add VaultProvisioner \
 pveum acl modify /access/groups \
   --user <PROVISIONER>@<REALM> --role VaultProvisioner --propagate 1
 pveum acl modify /access/realm/<REALM> \
-  --user <PROVISIONER>@<REALM> --role VaultProvisioner
+  --user <PROVISIONER>@<REALM> --role VaultProvisioner --propagate 0
 # vault-production-readers must already exist and have only the approved
 # PVEAuditor role/path binding documented in section 5.1.
 pveum user token add <PROVISIONER>@<REALM> vault \
   --privsep 0 --comment "Vault production verification token"
 ```
 
-The realm ACL is intentionally shown without `--propagate`: the required
+The realm ACL is explicitly shown with `--propagate 0`: the required
 `Realm.AllocateUser` grant is scoped to the exact `/access/realm/<REALM>` path.
-Use propagation only when the security review explicitly requires allocation
-in child realm paths and the evidence records that broader scope. In contrast,
-`--propagate 1` on the `/access/groups` parent is mandatory because creation
-checks `/access/groups/<group>` while renewal and revocation check the parent.
+Use `--propagate 1` only when the security review explicitly requires
+allocation in child realm paths and the evidence records that broader scope.
+In contrast, `--propagate 1` on the `/access/groups` parent is mandatory because
+creation checks `/access/groups/<group>` while renewal and revocation check the
+parent.
 
 Capture the token secret once into the approved secret manager. `privsep=0` is
 mandatory: the default `privsep=1` gives the provisioner token a separate empty
@@ -387,7 +392,7 @@ Use the pre-created `vault-production-readers` group and finite TTLs:
 
 ```bash
 vault write proxmox/roles/production-readers \
-  group="vault-production-readers" user_prefix="vault" realm="pve" \
+  group="vault-production-readers" user_prefix="vault" realm="<REALM>" \
   ttl=300 max_ttl=900
 vault read proxmox/roles/production-readers
 vault read proxmox/creds/production-readers
@@ -395,7 +400,7 @@ vault read proxmox/creds/production-readers
 
 The role write validates that the group exists and that the provisioner has
 the required effective permissions for the group child path and
-`/access/realm/pve`; a successful write is therefore evidence of those checks,
+`/access/realm/<REALM>`; a successful write is therefore evidence of those checks,
 not just a stored role definition. After issuance, verify in PVE that the
 synthetic user belongs to `vault-production-readers` and that its token has
 only the reviewed, inherited `PVEAuditor` access at the approved path. Confirm
