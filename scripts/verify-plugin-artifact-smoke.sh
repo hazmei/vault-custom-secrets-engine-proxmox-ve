@@ -4,7 +4,8 @@ set -u
 
 script_dir=$(cd -- "$(dirname -- "$0")" && pwd -P)
 verifier="$script_dir/verify-plugin-artifact.sh"
-fixture=$(mktemp -d "${TMPDIR:-/tmp}/verify-plugin.XXXXXX")
+fixture_base=${RUNNER_TEMP:-$script_dir/..}
+fixture=$(mktemp -d "$fixture_base/verify-plugin.XXXXXX")
 trap 'rm -rf "$fixture"' EXIT
 
 d="$fixture/plugins"
