@@ -177,9 +177,13 @@ This avoids staging the verifier in world-writable `/tmp`:
 
 ```bash
 ssh <node> 'EXPECTED_SHA="<SHA256_FROM_CHANGE_TICKET>" EXPECTED_OWNER="vault:vault" \
-  PLUGIN_DIR=/etc/vault/plugins bash -s; echo "exit=$?"' \
+  PLUGIN_DIR=/etc/vault/plugins bash -s; status=$?; echo "exit=$status"; exit "$status"' \
   < scripts/verify-plugin-artifact.sh
 ```
+
+The wrapper captures the streamed verifier's status before printing it, then
+returns that same status through SSH. A non-zero verifier result therefore
+stops the procedure instead of being masked by the diagnostic `echo`.
 
 Run the wrapper or standalone script once per Vault node. Set
 `VERIFY_PLUGIN_DIR`/`PLUGIN_DIR` to the node's absolute `plugin_directory`; the
@@ -214,7 +218,7 @@ directories:
 
 ```bash
 ssh <node> 'EXPECTED_SHA="<SHA256_FROM_CHANGE_TICKET>" EXPECTED_OWNER="vault:vault" \
-  PLUGIN_DIR=/etc/vault/plugins bash -s; echo "exit=$?"' \
+  PLUGIN_DIR=/etc/vault/plugins bash -s; status=$?; echo "exit=$status"; exit "$status"' \
   < scripts/verify-plugin-artifact.sh
 ```
 
