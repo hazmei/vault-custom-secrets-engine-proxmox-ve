@@ -112,6 +112,19 @@ expect_verifier() {
       exit 1
       ;;
   esac
+  if [ "$want_rc" -ne 0 ]; then
+    local fail_count=0 line
+    while IFS= read -r line; do
+      case "$line" in
+        "FAIL: "*) fail_count=$((fail_count + 1)) ;;
+      esac
+    done <<< "$output"
+    if [ "$fail_count" -ne 1 ]; then
+      printf '%s\n' "$output"
+      echo "$label: expected exactly 1 FAIL, got $fail_count"
+      exit 1
+    fi
+  fi
 }
 
 expect_verifier 0 "OK: digest matches the approved artifact" \
