@@ -1658,11 +1658,15 @@ are gated until its live PVE 9.2.10 evidence is recorded.**
     group read-back and WAL cleanup complete. Any post-create or read-back failure
     MUST compensate by revoking/deleting the live credential; if deletion fails,
     retain the nonce-gated WAL entry for rollback. If separate post-create password
-    setting is required, apply the same `DeleteUser` compensation and conditional WAL
-    cleanup rules. Explicitly decide and lock the password-mode comment read-back
-    policy: retain the token-mode soft warning, or make a nonce mismatch fatal and
-    delete the user before failing issuance. Treat renewal as design intent unless
-    P0 proves the original password still authenticates.
+    setting is required, P4 MUST apply the same `DeleteUser` compensation and
+    conditional WAL cleanup rules to password-setting failure. Explicitly decide and
+    lock the password-mode comment read-back policy: retain the token-mode soft
+    warning, or make a nonce mismatch fatal and delete the user before failing
+    issuance. Under the fatal policy, if `DeleteUser` fails after a nonce mismatch,
+    WAL is not an automatic retry path: `walRollback` drops nonce-mismatched entries
+    without deleting the user. Cleanup is therefore bounded by the PVE `expire`
+    lifetime or manual cleanup, as documented in P7. Treat renewal as design intent
+    unless P0 proves the original password still authenticates.
   - **Acceptance**: the plan, architecture, README, and operator guidance agree;
     no document claims unsupported PVE behavior or exposes a secret.
 
@@ -1710,9 +1714,14 @@ are gated until its live PVE 9.2.10 evidence is recorded.**
     read-back policy explicitly: either retain the token-mode soft warning, or make
     a nonce mismatch fatal, delete the user, and fail issuance. Do not inherit this
     behavior implicitly from token mode. If same-call creation succeeds but group
-    read-back fails (including a read-back error), call `DeleteUser`; delete the WAL
-    only when that deletion returns nil or `ErrUserNotFound`, and retain the WAL and
-    return the cleanup error when deletion fails transiently.
+    read-back fails (including a read-back error), reuse the existing `cleanupUser`
+    helper in `path_creds.go:354-387`; do not duplicate its compensation algorithm.
+    The same helper and the same WAL entry MUST also be used when a separate
+    post-create password-setting call fails. In both same-call and separate-call
+    paths, preserve `DeleteUser` before `DeleteWAL` ordering and transient-failure
+    WAL retention, and never pass the password to `cleanupUser` or persist it. The
+    helper must delete the WAL only when `DeleteUser` returns nil or
+    `ErrUserNotFound`, and retain the WAL while returning a transient cleanup error.
   - **Acceptance**: password issuance returns exactly the contract fields; mock
     assertions prove no token call; collision, tokenless failure, group read-back
     failure, conditional WAL cleanup, and user cleanup paths are covered; the
@@ -1741,8 +1750,10 @@ are gated until its live PVE 9.2.10 evidence is recorded.**
   - **Checklist**: add unit coverage for secret non-persistence, nonce ownership,
     crash recovery, compensation, renewal, revocation, compatibility, and log/error
     redaction; mock password-mode group read-back failure after same-call creation
-    and assert `DeleteUser`; assert that a transient `DeleteUser` failure retains
-    the WAL, while nil or `ErrUserNotFound` permits WAL deletion. Test the
+    and assert that both same-call group read-back failure and separate post-create
+    password-setting failure invoke the shared `cleanupUser` discipline. Cover
+    successful deletion, `ErrUserNotFound`, and transient `DeleteUser` failure;
+    verify the first two permit WAL deletion and the last retains the WAL. Test the
     P1-selected password comment mismatch policy, including any required delete
     and WAL behavior. Assert that password values are absent from logs, errors,
     WAL, `InternalData`, and stored Vault data. Add opt-in live coverage for
