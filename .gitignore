@@ -8,6 +8,9 @@
 *.so
 *.dylib
 
+# Smoke-test fixtures (scripts/verify-plugin-artifact-smoke.sh fallback base)
+/.smoke-tmp/
+
 # Go build
 vendor/
 *.out

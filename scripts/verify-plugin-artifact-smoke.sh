@@ -4,7 +4,29 @@ set -u
 
 script_dir=$(cd -- "$(dirname -- "$0")" && pwd -P)
 verifier="$script_dir/verify-plugin-artifact.sh"
-fixture_base=${RUNNER_TEMP:-$script_dir/..}
+fixture_base=${RUNNER_TEMP:-$script_dir/../.smoke-tmp}
+mkdir -p "$fixture_base" || exit 1
+fixture_base=$(cd -- "$fixture_base" && pwd -P) || exit 1
+
+# The verifier walks every ancestor of PLUGIN_DIR up to / and fails on any
+# group/other-writable directory, so the fixture's own location decides whether
+# the positive assertions can pass at all. Check that ancestry up front: without
+# this, a checkout under a shared path (/srv/src, a shared dev box, some
+# container images) fails with "direct positive: rc=1 want=0" and nothing points
+# at the fixture directory as the cause.
+p=$fixture_base
+while :; do
+  if [ -n "$(find "$p" -maxdepth 0 -perm /022 -print -quit 2>/dev/null)" ]; then
+    echo "cannot run smoke checks: $p is group/other writable" >&2
+    echo "the verifier rejects group/other-writable ancestors, so every positive" >&2
+    echo "assertion would fail here; set RUNNER_TEMP to a private directory" >&2
+    echo "(e.g. RUNNER_TEMP=\"${HOME:-/root}/.cache/vault-proxmox-smoke\") and re-run" >&2
+    exit 1
+  fi
+  [ "$p" = / ] && break
+  p=$(dirname "$p")
+done
+
 fixture=$(mktemp -d "$fixture_base/verify-plugin.XXXXXX")
 trap 'rm -rf "$fixture"' EXIT
 

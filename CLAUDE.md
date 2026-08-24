@@ -14,10 +14,15 @@ go test ./... -run TestXxx -v              # single test
 make testacc                              # operator-run acceptance tests (needs disposable/dev Proxmox)
 make lint                                # pinned golangci-lint + shellcheck scripts/*.sh
 make verify-artifact                      # operator-run artifact/permission verification
+make smoke                               # verify-plugin-artifact smoke checks (also run by CI)
 ```
 
-CI also runs the `verify-plugin-artifact` smoke test against valid and invalid
-artifact-verification inputs.
+`make smoke` exercises `scripts/verify-plugin-artifact.sh` against valid and
+invalid artifact-verification inputs; CI runs the same script in the lint job.
+It builds its fixture under `$RUNNER_TEMP`, falling back to `.smoke-tmp/` in the
+repo root, and refuses to run when any ancestor of that directory is
+group/other writable (the verifier rejects such ancestors, so every positive
+assertion would otherwise fail for an unrelated-looking reason).
 
 Current phase validation status, including the recorded PVE build, optional
 acceptance-test skip gates, and unverified production catalog registration, is

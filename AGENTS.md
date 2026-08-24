@@ -118,8 +118,18 @@ The admin token never needs to hold the delegated roles — those are bound to o
 - Run: `go build ./...`, `make test`, `make testacc` (operator-run live
   acceptance with required env preflight), `make lint`, `make verify-artifact`
   (operator-run artifact and permission verification with the required
-  `EXPECTED_SHA`, `EXPECTED_OWNER`, and `PLUGIN_DIR` environment variables).
-- **CI** (`.github/workflows/ci.yml`) runs build + unit tests + golangci-lint (pinned v2.12.2), ShellCheck, and the `verify-plugin-artifact` smoke test on every push/PR. The lint version is pinned in the Makefile (`GOLANGCI_LINT_VERSION`) so local and CI agree.
+  `EXPECTED_SHA`, `EXPECTED_OWNER`, and `PLUGIN_DIR` environment variables),
+  `make smoke` (the `verify-plugin-artifact` smoke checks — the same script CI
+  runs, so it is runnable locally before pushing).
+- **`make smoke` fixture location:** the smoke script builds its fixture under
+  `$RUNNER_TEMP`, falling back to `.smoke-tmp/` in the repo root (gitignored).
+  It aborts with an explicit message if any ancestor of that directory is
+  group/other writable, because `verify-plugin-artifact.sh` walks every ancestor
+  to `/` and fails on writable ones — without the precheck a checkout under a
+  shared path fails as `direct positive: rc=1 want=0` with no hint that the
+  fixture's own location is at fault. Set `RUNNER_TEMP` to a private directory
+  in that case.
+- **CI** (`.github/workflows/ci.yml`) runs build + unit tests + golangci-lint (pinned v2.12.2), ShellCheck, and the `verify-plugin-artifact` smoke test on every push/PR. The smoke step invokes the same `scripts/verify-plugin-artifact-smoke.sh` as `make smoke`. The lint version is pinned in the Makefile (`GOLANGCI_LINT_VERSION`) so local and CI agree.
 
 ## Docs
 

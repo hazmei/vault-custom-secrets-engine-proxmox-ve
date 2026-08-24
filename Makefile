@@ -55,10 +55,14 @@ verify-artifact:
 	EXPECTED_SHA="$(EXPECTED_SHA)" EXPECTED_OWNER="$(EXPECTED_OWNER)" \
 	PLUGIN_DIR="$(VERIFY_PLUGIN_DIR)" scripts/verify-plugin-artifact.sh
 
+.PHONY: smoke
+smoke:
+	scripts/verify-plugin-artifact-smoke.sh
+
 .PHONY: tidy
 tidy:
 	go mod tidy
 
 .PHONY: clean
 clean:
-	rm -rf $(PLUGIN_DIR) bin/ dist/
+	rm -rf $(PLUGIN_DIR) bin/ dist/ .smoke-tmp/
