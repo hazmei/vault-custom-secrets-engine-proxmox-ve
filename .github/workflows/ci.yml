@@ -66,6 +66,11 @@ jobs:
             PLUGIN_DIR="$d" scripts/verify-plugin-artifact.sh
           ! EXPECTED_SHA=deadbeef EXPECTED_OWNER="$(id -un):$(id -gn)" \
             PLUGIN_DIR="$d" scripts/verify-plugin-artifact.sh
+          if sh -c 'EXPECTED_SHA=deadbeef EXPECTED_OWNER="$2" PLUGIN_DIR="$1" bash -s; status=$?; echo "exit=$status"; exit "$status"' \
+            _ "$d" "$(id -un):$(id -gn)" < scripts/verify-plugin-artifact.sh; then
+            echo "streamed verifier unexpectedly succeeded"
+            exit 1
+          fi
           ! timeout 30 env EXPECTED_SHA="$sha" \
             EXPECTED_OWNER="$(id -un):$(id -gn)" PLUGIN_DIR=relative \
             scripts/verify-plugin-artifact.sh
