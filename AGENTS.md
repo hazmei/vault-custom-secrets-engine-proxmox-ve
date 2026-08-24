@@ -132,8 +132,10 @@ The admin token never needs to hold the delegated roles — those are bound to o
   verifier's `sha256sum`/`stat -c`/`find -perm /022` probes fail), the smoke
   script probes the same three tools up front and **skips cleanly** (`exit 0`
   with a `brew install coreutils findutils` hint) instead of asserting the
-  verifier exits 0 and surfacing that same opaque `direct positive` line;
-  full execution therefore runs on Linux/CI.
+  verifier exits 0 and surfacing that same opaque `direct positive` line —
+  **unless `CI` is set** (to anything other than the `false`/`0` opt-out), where
+  it instead refuses to skip and exits 1 so the CI gate cannot silently
+  self-disable. Full execution therefore runs on Linux/CI.
 - **CI** (`.github/workflows/ci.yml`) runs build + unit tests + golangci-lint (pinned v2.12.2), ShellCheck, and the `verify-plugin-artifact` smoke test on every push/PR. The smoke step invokes the same `scripts/verify-plugin-artifact-smoke.sh` as `make smoke`. The lint version is pinned in the Makefile (`GOLANGCI_LINT_VERSION`) so local and CI agree.
 
 ## Docs

@@ -18,17 +18,24 @@ command -v sha256sum >/dev/null 2>&1 && sha256sum /dev/null >/dev/null 2>&1 || t
 command -v stat >/dev/null 2>&1 && stat -c '%U:%G' / >/dev/null 2>&1 || tools_ok=0
 command -v find >/dev/null 2>&1 && find / -maxdepth 0 -perm /022 -print -quit >/dev/null 2>&1 || tools_ok=0
 if [ "$tools_ok" -ne 1 ]; then
-  echo "skipping plugin artifact smoke checks: GNU coreutils/findutils required" >&2
-  echo "(brew install coreutils findutils, or run in CI on Linux)" >&2
   # Skipping is right for a local `make smoke` on darwin, but NOT for the CI
   # gate: a silent exit 0 there would let the artifact-verification checks
   # self-disable (base-image change, container swap, a future macOS matrix
   # entry) with nothing but an unread skip line. GitHub Actions sets CI=true
-  # automatically, so refuse to skip when it is set.
-  if [ -n "${CI:-}" ]; then
-    echo "refusing to skip in CI: install GNU coreutils/findutils on the runner" >&2
-    exit 1
-  fi
+  # automatically, so refuse to skip when CI is set — but honor the
+  # CI=false / CI=0 opt-out idiom (CRA/webpack and several CI systems export
+  # it to disable CI behavior) so a developer can still take the skip path.
+  # Test CI before printing the skip message so a CI log reads one thing.
+  case ${CI:-} in
+    "" | false | 0) ;;
+    *)
+      echo "refusing to skip plugin artifact smoke checks in CI:" >&2
+      echo "install GNU coreutils/findutils on the runner" >&2
+      exit 1
+      ;;
+  esac
+  echo "skipping plugin artifact smoke checks: GNU coreutils/findutils required" >&2
+  echo "(brew install coreutils findutils, or run in CI on Linux)" >&2
   exit 0
 fi
 
