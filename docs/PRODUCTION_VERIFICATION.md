@@ -224,17 +224,18 @@ Configure the same real directory on every Vault server, for example:
 plugin_directory = "/etc/vault/plugins"
 ```
 
-Confirm the effective configuration and restart/reload according to the
-cluster's change procedure. After the restart/reload, re-run the verification
-loop from section 1 against every node in the same operator shell. It re-checks
-the digest, service-user execution, owner/group, symlink status, and write
- permissions on the artifact and its parent directories. Invalidate the
- pre-restart result before restarting, then re-run the loop so its final result
- is the result used by the registration gate below:
+Before restarting, invalidate the pre-restart result:
 
 ```bash
 verified=0
 ```
+
+Confirm the effective configuration and restart/reload according to the
+cluster's change procedure. After the restart/reload, re-run the verification
+loop from section 1 against every node in the same operator shell. It re-checks
+the digest, service-user execution, owner/group, symlink status, and write
+permissions on the artifact and its parent directories. The loop's final result
+is the result used by the registration gate below.
 
 Do not proceed with catalog registration until all nodes have the same artifact
 and directory configuration, and every post-restart verification succeeds.
