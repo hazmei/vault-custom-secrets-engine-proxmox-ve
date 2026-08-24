@@ -1715,13 +1715,16 @@ are gated until its live PVE 9.2.10 evidence is recorded.**
     a nonce mismatch fatal, delete the user, and fail issuance. Do not inherit this
     behavior implicitly from token mode. If same-call creation succeeds but group
     read-back fails (including a read-back error), reuse the existing `cleanupUser`
-    helper in `path_creds.go:354-387`; do not duplicate its compensation algorithm.
+    helper in `path_creds.go`; do not duplicate its compensation algorithm.
     The same helper and the same WAL entry MUST also be used when a separate
     post-create password-setting call fails. In both same-call and separate-call
-    paths, preserve `DeleteUser` before `DeleteWAL` ordering and transient-failure
-    WAL retention, and never pass the password to `cleanupUser` or persist it. The
-    helper must delete the WAL only when `DeleteUser` returns nil or
-    `ErrUserNotFound`, and retain the WAL while returning a transient cleanup error.
+    paths, reuse `cleanupUser` and preserve its `DeleteUser` before conditional
+    `DeleteWAL` ordering. If `DeleteUser` fails transiently, the WAL remains for
+    `walRollback`; `cleanupUser` logs and returns the cleanup error to its caller,
+    while the issuance path logs the cleanup failure and returns the original
+    issuance or read-back error. The WAL is deleted only when `DeleteUser` returns
+    nil or `ErrUserNotFound`. Do not persist or log the password, and redact it from
+    any applicable error or diagnostic output.
   - **Acceptance**: password issuance returns exactly the contract fields; mock
     assertions prove no token call; collision, tokenless failure, group read-back
     failure, conditional WAL cleanup, and user cleanup paths are covered; the
