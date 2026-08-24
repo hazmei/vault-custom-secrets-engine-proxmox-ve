@@ -28,11 +28,10 @@ tracking-only until the live PVE probe in P0 passes; these decisions do not auth
 password implementation in the current token-only release.
 
 - The role field is `mode` with values `token` and `password`.
-- An omitted `mode` means `token`, preserving existing role and lease behavior. This
-  compatibility rule MUST apply at read time as well as write time: omitted mode
-  defaults to `token` at both read and write time, and `getRole()` MUST normalize a
-  decoded empty `mode` to `token` before returning the role. Legacy stored-role tests
-  are required; write-time defaulting alone is not sufficient.
+- An omitted `mode` defaults to `token`, preserving existing role and lease behavior.
+  `getRole()` MUST normalize a decoded empty `mode` to `token` before returning the
+  role. Legacy stored-role tests are required; write-time defaulting alone is not
+  sufficient.
 - A password response contains exactly `user_id` and `password`.
 - Password mode creates no PVE API token and uses a separate Vault secret type.
 - The password is never stored in WAL or `Secret.InternalData`, and is never written to logs.
@@ -1654,10 +1653,14 @@ are gated until its live PVE 9.2.10 evidence is recorded.**
     (engine versus PVE), length, charset, `crypto/rand` entropy requirements, and
     PVE minimum/maximum constraints from P0 before P4 can start. Define redaction
     requirements for responses, errors, logs, WAL, and `InternalData`. Lock the
-    password API call shape and compensation ordering before P4; if separate
-    post-create password setting is required, require `DeleteUser` compensation and
-    conditional WAL cleanup for failures at that step. Treat renewal as design intent
-    unless P0 proves the original password still authenticates.
+    password API call shape and compensation ordering before P4. If the password is
+    supplied on `POST /access/users`, explicitly treat the credential as live before
+    group read-back and WAL cleanup complete. Any post-create or read-back failure
+    MUST compensate by revoking/deleting the live credential; if deletion fails,
+    retain the nonce-gated WAL entry for rollback. If separate post-create password
+    setting is required, apply the same `DeleteUser` compensation and conditional WAL
+    cleanup rules. Treat renewal as design intent unless P0 proves the original
+    password still authenticates.
   - **Acceptance**: the plan, architecture, README, and operator guidance agree;
     no document claims unsupported PVE behavior or exposes a secret.
 
@@ -1733,14 +1736,19 @@ are gated until its live PVE 9.2.10 evidence is recorded.**
     secrets; existing acceptance tests remain unchanged and green.
 
 - [ ] **P7 — Operator documentation and security review**
-  - **Files/scope**: `README.md`, `docs/ARCHITECTURE.md`,
+  - **Files/scope**: `README.md`, `docs/ARCHITECTURE.md`, `AGENTS.md`,
     `docs/PRODUCTION_VERIFICATION.md`, `docs/IMPLEMENTATION_PLAN.md`, and audit/
-    security review notes.
+    security review notes. Include `docs/ARCHITECTURE.md` and `AGENTS.md` in the
+    review when password creation changes existing orphan-handling assumptions.
   - **Dependencies**: P0–P6.
   - **Checklist**: document configuration, response handling, password lifetime,
     disablement/revocation expectations, audit evidence, privilege implications,
     compatibility, and recovery procedures; review logs, WAL, InternalData, error
-    paths, and operator workflows for secret exposure.
+    paths, and operator workflows for secret exposure. Document the live-credential
+    orphan window from same-call password creation through `WALRollbackMinAge` plus
+    rollback retry time, including the PVE `expire` backstop as mitigation. Reconcile
+    the resulting orphan-handling assumptions in `docs/ARCHITECTURE.md` and `AGENTS.md`
+    as appropriate.
   - **Acceptance**: security review is recorded; operator docs match the shipped
     behavior and probe evidence; no token-only production gate is weakened.
 
