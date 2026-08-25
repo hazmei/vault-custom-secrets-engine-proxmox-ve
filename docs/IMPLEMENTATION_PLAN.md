@@ -34,7 +34,9 @@ password implementation in the current token-only release.
   sufficient.
 - A password response contains exactly `user_id` and `password`.
 - Password mode creates no PVE API token and uses a separate Vault secret type.
-- The password is never stored in WAL or `Secret.InternalData`, and is never written to logs.
+- The password is never written to logs or errors, stored in WAL or `Secret.InternalData`,
+  or persisted in backend-controlled storage (`req.Storage`). This guarantee does not
+  cover Vault's encrypted lease storage, which persists the returned secret response.
 - Existing token roles and leases remain compatible and are not migrated.
 
 ### Probe-dependent password design intent
@@ -1708,7 +1710,8 @@ are gated until its live PVE 9.2.10 evidence is recorded.**
   - **Checklist**: define a distinct Vault secret type returning exactly `user_id`
     and `password`; implement only the generator contract locked in P1: explicit
     ownership, length, charset, `crypto/rand` entropy, and PVE min/max compliance;
-    keep password out of WAL, InternalData, logs, and error text, with redaction tests;
+    keep password out of WAL, `Secret.InternalData`, logs, error text, and
+    backend-controlled storage (`req.Storage`), with redaction and storage tests;
     register callbacks without changing the token secret type. P3 must not invent or
     silently choose any generator parameter left unresolved by P0/P1.
   - **Acceptance**: schema has no extra response fields; secret redaction tests pass;
@@ -1764,8 +1767,10 @@ are gated until its live PVE 9.2.10 evidence is recorded.**
     Group read-back failure, conditional WAL cleanup, success-path `DeleteWAL`
     failure, and user-cleanup paths are covered. The P1-selected comment
     mismatch policy is explicit and enforced; password values never appear in
-    logs, errors, WAL, `InternalData`, or Vault storage; token issuance is
-    behaviorally unchanged.
+    logs, errors, WAL, `InternalData`, or backend-controlled storage
+    (`req.Storage`). This does not include Vault lease storage, where Vault core
+    persists the returned secret response; token issuance is behaviorally
+    unchanged.
 
 - [ ] **P5 — Password renewal and revocation**
   - **Files/scope**: password secret callbacks, `secret_password.go`, and lifecycle
@@ -1802,9 +1807,11 @@ are gated until its live PVE 9.2.10 evidence is recorded.**
     the response, and that the credential is never handed to the caller without
     WAL/lease backing. Test the P1-selected password comment mismatch policy,
     including any required delete and WAL behavior. Assert that password values
-    are absent from logs, errors, WAL, `InternalData`, and stored Vault data. Add
-    opt-in live coverage for authentication, expiry, disablement, deletion, and
-    confirmed token interaction.
+    are absent from logs, errors, WAL, `InternalData`, and backend-controlled
+    storage (`req.Storage`). Do not assert their absence from Vault lease storage:
+    when the returned secret is persisted, Vault core stores the complete response
+    in the encrypted lease entry. Add opt-in live coverage for authentication,
+    expiry, disablement, deletion, and confirmed token interaction.
   - **Acceptance**: unit tests pass without live PVE; password acceptance tests are
     `VAULT_ACC=1` gated, require explicit P0 evidence/prerequisites, and never print
     secrets; existing acceptance tests remain unchanged and green.
@@ -1819,6 +1826,13 @@ are gated until its live PVE 9.2.10 evidence is recorded.**
     disablement/revocation expectations, audit evidence, privilege implications,
     compatibility, and recovery procedures; review logs, WAL, InternalData, error
     paths, and operator workflows for secret exposure. Document the live-credential
+    at-rest lifecycle separately: Vault core persists the returned password in the
+    encrypted lease entry, outside the backend-controlled `req.Storage` view. The
+    password secret type's revoke callback MUST delete the PVE user on explicit
+    revocation; document the corresponding lease-expiry handling and its deletion
+    expectations separately from issuance-time cleanup and WAL recovery. Review
+    the lease-entry lifecycle and retention implications without claiming that the
+    password is absent from Vault lease storage. Document the live-credential
     orphan windows separately: for a nonce-matched orphan, document the window from
     same-call password creation through `WALRollbackMinAge` plus rollback retry
     time. For a separate-call flow, note the reduced orphan risk because group
