@@ -905,7 +905,20 @@ Registered via `backend.WALRollback` and `backend.WALRollbackMinAge = 5 * time.M
 ```
 
 **Division of responsibility**:
-- **WALRollback**: Cleans up users orphaned by crash/failover BETWEEN `PutWAL` and `DeleteWAL` (i.e., WAL entry exists but issuance never completed, no Secret returned, no lease registered). It ALSO catches users left behind when an in-line cleanup `DeleteUser` fails transiently: the issuance path deletes its WAL entry ONLY when `DeleteUser` returns nil or `ErrUserNotFound`; if `DeleteUser` fails otherwise, the WAL entry is deliberately RETAINED and the error is returned so walRollback retries the delete. Before deleting, WALRollback verifies ownership by reading the PVE user and requiring the live `comment` to equal the WAL `nonce` (`vault-wal:<8-char-random>`). A missing/empty `user_id` is an error/retry condition because there is no safe lookup target. An empty or mismatched nonce is terminal for rollback: log and drop the WAL entry without deleting the user. This preserves safety for foreign users while keeping revoke idempotency separate.
+- **WALRollback**: Cleans up users orphaned by crash/failover BETWEEN `PutWAL` and
+  `DeleteWAL` (i.e., WAL entry exists but issuance never completed, no Secret
+  returned, no lease registered). It ALSO catches users left behind when an in-line
+  cleanup `DeleteUser` fails transiently: the issuance path deletes its WAL entry
+  ONLY when `DeleteUser` returns nil or `ErrUserNotFound`; if `DeleteUser` fails
+  otherwise, the WAL entry is deliberately RETAINED and the error is returned so
+  walRollback retries the delete. Before deleting, WALRollback verifies ownership
+  by reading the PVE user and requiring the live `comment` to equal the WAL `nonce`
+  (`vault-wal:<8-char-random>`). A missing/empty `user_id` is an error/retry
+  condition because there is no safe lookup target. If the WAL nonce is empty or
+  does not match the live user comment, the orphan case is terminal: log the
+  condition, drop the WAL entry, and do not delete the user. Keeping the empty-
+  and nonce-mismatched cases together preserves safety for foreign users while
+  keeping revoke idempotency separate.
 
   **Accepted risk — crash between `DeleteWAL` and lease persistence**: there is ONE window this does not cover: a crash between the successful `DeleteWAL` (issuance step 9) and Vault core persisting the returned Secret/lease. In that narrow window the WAL entry is already gone and no lease exists, so neither WALRollback nor Vault revocation fires. The PVE `expire` backstop (set to lease-end + grace at creation time) only **neutralizes** the credential — authentication is rejected once past `expire` (Probe 8) — it does **NOT** delete the user; PVE has no auto-reap, so the stale user record **persists in user.cfg until out-of-band cleanup**. This window is therefore a leak of an inert (auth-rejected) but undeleted user, not a live credential. Requires a crash inside that narrow window. Documented, not mitigated.
 - **Vault revocation retry**: Handles failed revocations on existing leases.
@@ -1716,10 +1729,13 @@ are gated until its live PVE 9.2.10 evidence is recorded.**
     behavior implicitly from token mode. If same-call creation succeeds but group
     read-back fails (including a read-back error), reuse the existing `cleanupUser`
     helper in `path_creds.go`; do not duplicate its compensation algorithm. For a
-    separate password-setting call, the ordering MUST be `CreateUser -> GetUser`
-    group read-back assertion -> `SetPassword` -> return secret. The password-setting
-    call occurs only after group read-back succeeds, preserving token-path safety and
-    detecting dropped or invalid groups before an authenticating password exists.
+    separate password-setting call, the complete ordering MUST be
+    `PutWAL -> CreateUser -> GetUser` group read-back assertion -> `SetPassword` ->
+    `DeleteWAL` -> return secret. The password-setting call occurs only after group
+    read-back succeeds, preserving token-path safety and detecting dropped or invalid
+    groups before an authenticating password exists. For same-call password creation,
+    the complete ordering MUST be `PutWAL -> CreateUser (password live) -> GetUser`
+    read-back assertion -> `DeleteWAL` -> return secret.
     The same helper and the same WAL entry MUST also be used when a separate
     post-create password-setting call fails. In both same-call and separate-call
     paths, reuse `cleanupUser` and preserve its `DeleteUser` before conditional
@@ -1727,7 +1743,9 @@ are gated until its live PVE 9.2.10 evidence is recorded.**
     `walRollback`; `cleanupUser` logs and returns the cleanup error to its caller,
     while the issuance path logs the cleanup failure and returns the original
     issuance or read-back error. The WAL is deleted only when `DeleteUser` returns
-    nil or `ErrUserNotFound`.
+    nil or `ErrUserNotFound`. The existing `DeleteWAL`-failure rule also applies to
+    both password orderings: cleanup is best effort, the credential is never returned
+    when `DeleteWAL` fails, and the WAL is retained if cleanup cannot delete the user.
   - **Acceptance**: password issuance returns exactly the contract fields; mock
     assertions prove no token call; collision, tokenless failure, group read-back
     failure, conditional WAL cleanup, and user cleanup paths are covered; the
