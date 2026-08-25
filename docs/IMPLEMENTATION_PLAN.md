@@ -21,6 +21,31 @@ These design choices are baked into the implementation and are **not open for re
 - **No issuance-time requested TTL**: `<mount>/creds/:role` declares NO `ttl` field, matching the database and terraform secrets engines. The effective TTL comes from role values with config defaults as fallback; `increment` is passed to `CalculateTTL` only on renewal (from `req.Secret.Increment`).
 - **`expire=0` (unlimited TTL) policy**: The engine REFUSES issuance when the effective TTL resolves to 0 (unlimited). Sending PVE `expire=0` creates a never-expiring user, disabling the `expire` backstop — the sole defense-in-depth if Vault revocation is delayed or fails. `creds/:role` returns a clear error: `"role %q resolves to an unlimited TTL; set a non-zero ttl/max_ttl on the role or config default_ttl/default_max_ttl (the PVE expire backstop requires a finite lease)"`. (Alternative considered and rejected as more complex: floor the PVE `expire` at `now + effMaxTTL + grace` when a finite max exists but ttl is 0.) This makes the backstop non-optional.
 
+## Confirmed Password Credential Decisions
+
+The following contract is confirmed for the future password credential feature. It is
+tracking-only until the live PVE probe in P0 passes; these decisions do not authorize
+password implementation in the current token-only release.
+
+- The role field is `mode` with values `token` and `password`.
+- An omitted `mode` defaults to `token`, preserving existing role and lease behavior.
+  `getRole()` MUST normalize a decoded empty `mode` to `token` before returning the
+  role. Legacy stored-role tests are required; write-time defaulting alone is not
+  sufficient.
+- A password response contains exactly `user_id` and `password`.
+- Password mode creates no PVE API token and uses a separate Vault secret type.
+- The password is never written to logs or errors, stored in WAL or `Secret.InternalData`,
+  or persisted in backend-controlled storage (`req.Storage`). This guarantee does not
+  cover Vault's encrypted lease storage, which persists the returned secret response.
+- Existing token roles and leases remain compatible and are not migrated.
+
+### Probe-dependent password design intent
+
+Password renewal is intended to extend the PVE user expiry only, without rotating or
+returning the password. This is not a confirmed PVE behavior yet. It remains
+conditional on P0 evidence for the exact engine renewal shape and a successful
+authentication attempt with the original password after renewal.
+
 ## Repository Layout
 
 ```
@@ -882,7 +907,20 @@ Registered via `backend.WALRollback` and `backend.WALRollbackMinAge = 5 * time.M
 ```
 
 **Division of responsibility**:
-- **WALRollback**: Cleans up users orphaned by crash/failover BETWEEN `PutWAL` and `DeleteWAL` (i.e., WAL entry exists but issuance never completed, no Secret returned, no lease registered). It ALSO catches users left behind when an in-line cleanup `DeleteUser` fails transiently: the issuance path deletes its WAL entry ONLY when `DeleteUser` returns nil or `ErrUserNotFound`; if `DeleteUser` fails otherwise, the WAL entry is deliberately RETAINED and the error is returned so walRollback retries the delete. Before deleting, WALRollback verifies ownership by reading the PVE user and requiring the live `comment` to equal the WAL `nonce` (`vault-wal:<8-char-random>`). A missing/empty `user_id` is an error/retry condition because there is no safe lookup target. An empty or mismatched nonce is terminal for rollback: log and drop the WAL entry without deleting the user. This preserves safety for foreign users while keeping revoke idempotency separate.
+- **WALRollback**: Cleans up users orphaned by crash/failover BETWEEN `PutWAL` and
+  `DeleteWAL` (i.e., WAL entry exists but issuance never completed, no Secret
+  returned, no lease registered). It ALSO catches users left behind when an in-line
+  cleanup `DeleteUser` fails transiently: the issuance path deletes its WAL entry
+  ONLY when `DeleteUser` returns nil or `ErrUserNotFound`; if `DeleteUser` fails
+  otherwise, the WAL entry is deliberately RETAINED and the error is returned so
+  walRollback retries the delete. Before deleting, WALRollback verifies ownership
+  by reading the PVE user and requiring the live `comment` to equal the WAL `nonce`
+  (`vault-wal:<8-char-random>`). A missing/empty `user_id` is an error/retry
+  condition because there is no safe lookup target. If the WAL nonce is empty or
+  does not match the live user comment, the orphan case is terminal: log the
+  condition, drop the WAL entry, and do not delete the user. Keeping the empty-
+  and nonce-mismatched cases together preserves safety for foreign users while
+  keeping revoke idempotency separate.
 
   **Accepted risk — crash between `DeleteWAL` and lease persistence**: there is ONE window this does not cover: a crash between the successful `DeleteWAL` (issuance step 9) and Vault core persisting the returned Secret/lease. In that narrow window the WAL entry is already gone and no lease exists, so neither WALRollback nor Vault revocation fires. The PVE `expire` backstop (set to lease-end + grace at creation time) only **neutralizes** the credential — authentication is rejected once past `expire` (Probe 8) — it does **NOT** delete the user; PVE has no auto-reap, so the stale user record **persists in user.cfg until out-of-band cleanup**. This window is therefore a leak of an inert (auth-rejected) but undeleted user, not a live credential. Requires a crash inside that narrow window. Documented, not mitigated.
 - **Vault revocation retry**: Handles failed revocations on existing leases.
@@ -971,6 +1009,18 @@ recorded a `DeleteUser` for the just-created userid. No live PVE needed.
 | `TestAccDeleteConfigGuard` | Write config → DELETE without `force=true` → assert refused with clear error;<br/>DELETE with `force=true` → assert succeeds and config gone. Also confirms `force` actually reaches the handler as a query param through whatever client the test uses |
 
 **References**: `docs/ARCHITECTURE.md` — Testing Strategy section, Acceptance Tests — authorization contract canary, failure injection, DELETE config guard.
+
+### Password Credential Testing Strategy (gated)
+
+Password tests remain pending until P0 records live PVE 9.2.10 behavior. Unit tests
+must use the mock client and assert the contract without exposing password values in
+test logs or failure messages. They must cover mode defaulting and validation, the
+separate secret schema, password-only issuance with no token call, compensation and
+WAL ordering, renewal without rotation or password return, revocation, and
+compatibility with token roles and pre-existing token leases. Acceptance coverage
+must be opt-in and operator-run against the probed PVE behavior, including password
+authentication, expiry, disablement, deletion, and any confirmed interaction with
+token credentials. No password acceptance test may run before P0 is complete.
 
 ## Build & Run
 
@@ -1576,26 +1626,226 @@ engine therefore continues to send explicit `append=1` with `expire` +
 
 ### Password Credential Support (gated future feature)
 
-Password credentials are deliberately not implemented; the engine currently
-issues only PVE API tokens. Do not make token-only production adoption depend
-on this feature, add password fields, or alter the token lifecycle as part of
-the release gates. Complete these phases in order:
-- [ ] **Phase 1 — PVE password behavior probe**: verify user creation,
-  authentication, rotation/update, expiry, disablement, deletion, and
-  interaction with token credentials and the user-level `expire` backstop;
-  record evidence in `docs/PVE_PROBES.md`.
-- [ ] **Phase 2 — Role-level opt-in credential mode**: after the probe, add an
-  explicit mode with `token` as the default, preserving existing token-only
-  roles and leases; update schema, validation, architecture, plan, and tests.
-- [ ] **Phase 3 — Password issuance**: after mode design and tests are
-  approved, implement opt-in password generation and issuance with one-time
-  secret handling and token-path-equivalent collision/error compensation.
-- [ ] **Phase 4 — Password lifecycle handling**: define and test renewal,
-  revocation, WAL rollback, expiry, disablement, and out-of-band password
-  changes so token and password cleanup cannot silently diverge.
-- [ ] **Phase 5 — Documentation and security review**: review threat model,
-  privileges, audit expectations, secret handling, migration/compatibility,
-  and operator procedures; update the affected project documentation.
+Password credentials are deliberately not implemented; the engine currently issues
+only PVE API tokens. Do not make token-only production adoption depend on this work,
+add password fields, or alter the token lifecycle as part of the release gates.
+Complete the following tasks in order. **P0 is pending, and all implementation tasks
+are gated until its live PVE 9.2.10 evidence is recorded.**
+
+- [ ] **P0 — Live PVE password behavior probe (pre-implementation)**
+  - **Files/scope**: `docs/PVE_PROBES.md`, disposable PVE 9.2.10 target, probe
+    notes/scripts as appropriate; no application code.
+  - **Dependencies**: operator-provided disposable PVE 9.2.10 cluster and
+    credentials; none of the implementation tasks may start before this task is
+    complete.
+  - **Checklist**: verify password user creation and authentication; determine
+    password rotation/update behavior; verify expiry, disablement, deletion, and
+    interaction with token credentials and the user-level `expire` backstop. Exercise
+    the exact engine renewal shape `expire + groups + enable + append=1`, read the
+    user back, and authenticate with the original password afterward. Probe which
+    realm types accept password credentials (including the configured/default `pve`
+    realm and non-password realms), recording the exact HTTP status and redacted body
+    for every failure. Probe the privileges required to create/set a password,
+    recording the exact ACL path, privilege, and propagation flag; compare them with
+    the existing `/access/groups` and `/access/realm/<realm>` checks. Record PVE
+    password minimum and maximum constraints needed by the generator. Determine and
+    record the exact password API call shape: whether the password is supplied on
+    `POST /access/users` or set by a separate password-setting call, including request
+    ordering and response/error behavior. Capture exact status/body behavior
+    throughout and redact all password values from evidence.
+  - **Acceptance**: reproducible probe evidence is recorded in `docs/PVE_PROBES.md`
+    with no password values; unresolved behavior is explicitly listed; implementation
+    gate is opened only after review.
+
+- [ ] **P1 — Contract and documentation finalization (pre-implementation)**
+  - **Files/scope**: `docs/IMPLEMENTATION_PLAN.md`, `docs/ARCHITECTURE.md`,
+    `README.md`, and any password-specific operator documentation.
+  - **Dependencies**: P0 evidence and review.
+  - **Checklist**: reconcile the confirmed `mode` contract with probe findings;
+    document exact response fields, separate secret type, no-token behavior,
+    one-time password handling, compatibility, and error paths; define migration
+    behavior for existing token roles/leases. Lock password-generator ownership
+    (engine versus PVE), length, charset, `crypto/rand` entropy requirements, and
+    PVE minimum/maximum constraints from P0 before P4 can start. Define redaction
+    requirements for responses, errors, logs, WAL, and `InternalData`. Lock the
+    password API call shape and compensation ordering before P4. If the password is
+    supplied on `POST /access/users`, explicitly treat the credential as live before
+    group read-back and WAL cleanup complete. Any post-create or read-back failure
+    MUST compensate by revoking/deleting the live credential; if deletion fails,
+    retain the nonce-gated WAL entry for rollback. If separate post-create password
+    setting is required, P4 MUST apply the same `DeleteUser` compensation and
+    conditional WAL cleanup rules to password-setting failure. Explicitly decide and
+    lock the password-mode comment read-back policy: retain the token-mode soft
+    warning, or make a nonce mismatch fatal and delete the user before failing
+    issuance. Under the fatal policy, if `DeleteUser` fails after a nonce mismatch,
+    WAL is not an automatic retry path: `walRollback` drops nonce-mismatched entries
+    without deleting the user. Cleanup is therefore bounded by the PVE `expire`
+    lifetime or manual cleanup, as documented in P7. Treat renewal as design intent
+    unless P0 proves the original password still authenticates.
+  - **Acceptance**: the plan, architecture, README, and operator guidance agree;
+    no document claims unsupported PVE behavior or exposes a secret.
+
+- [ ] **P2 — Role schema and validation**
+  - **Files/scope**: `path_config.go`, `path_roles.go`, privilege documentation and
+    tests if P0 identifies new requirements, role storage/schema documentation, and
+    relevant compatibility tests.
+  - **Dependencies**: P1; preserve existing token role decoding and validation.
+  - **Checklist**: add `mode` validation for `token`/`password`; default omission to
+    `token` on both write and read, and require `getRole()` to normalize decoded
+    `mode == ""` to `token` before returning the role; add tests for legacy stored roles with absent or
+    empty mode; persist/read the field without changing existing role or lease data;
+    reject unsupported values clearly; ensure role responses and help text are exact.
+    Add password-mode realm applicability validation at role-write time, based on P0's
+    exact status/body evidence, while preserving token-mode realm behavior. If P0
+    finds password-specific privileges, update the config precheck in
+    `path_config.go`, role precheck in `path_roles.go`, ACL/operator privilege docs,
+    and their tests; retain the existing token privilege behavior unchanged.
+  - **Acceptance**: old roles round-trip as token roles; invalid modes fail; new
+    password roles round-trip; token role tests remain green.
+
+- [ ] **P3 — Separate password secret type**
+  - **Files/scope**: new password secret implementation (likely
+    `secret_password.go`), `backend.go`, and secret unit tests.
+  - **Dependencies**: P1 and P2; use only the confirmed PVE behavior.
+  - **Checklist**: define a distinct Vault secret type returning exactly `user_id`
+    and `password`; implement only the generator contract locked in P1: explicit
+    ownership, length, charset, `crypto/rand` entropy, and PVE min/max compliance;
+    keep password out of WAL, `Secret.InternalData`, logs, error text, and
+    backend-controlled storage (`req.Storage`), with redaction and storage tests;
+    register callbacks without changing the token secret type. P3 must not invent or
+    silently choose any generator parameter left unresolved by P0/P1.
+  - **Acceptance**: schema has no extra response fields; secret redaction tests pass;
+    token secret registration and existing leases remain unchanged.
+
+- [ ] **P4 — Password issuance and compensation**
+  - **Files/scope**: `path_creds.go` or password issuance helper, `wal.go`,
+    `internal/pveapi/*`, and issuance/compensation tests.
+  - **Dependencies**: P0–P3; blocked until P0 evidence and the P1/P3 password
+    generator and redaction gates are locked.
+  - **Checklist**: branch on role mode; create the PVE user with the confirmed
+    password request shape and existing expiry/group safeguards; never create an API
+    token in password mode; return the password once; preserve nonce-gated WAL
+    ownership and collision handling; compensate every post-WAL failure without
+    persisting or logging the password. Apply the P1-locked password comment
+    read-back policy explicitly: either retain the token-mode soft warning, or make
+    a nonce mismatch fatal, delete the user, and fail issuance. Do not inherit this
+    behavior implicitly from token mode. If same-call creation succeeds but group
+    read-back fails (including a read-back error), reuse the existing `cleanupUser`
+    helper in `path_creds.go`; do not duplicate its compensation algorithm. For a
+    separate password-setting call, the complete ordering MUST be
+    `PutWAL -> CreateUser -> GetUser` read-back (`Groups` assertion is hard;
+    comment/nonce handling follows the P1-selected policy) -> `SetPassword` ->
+    `DeleteWAL` -> return secret. The password-setting call occurs only after group
+    read-back succeeds, preserving token-path safety and detecting dropped or invalid
+    groups before an authenticating password exists. For same-call password creation,
+    the complete ordering MUST be `PutWAL -> CreateUser (password live) -> GetUser`
+    read-back (`Groups` assertion is hard; comment/nonce handling follows the
+    P1-selected policy) -> `DeleteWAL` -> return secret.
+    The same helper and the same WAL entry MUST also be used when a separate
+    post-create password-setting call fails. In both same-call and separate-call
+    paths, reuse `cleanupUser` and preserve its `DeleteUser` before conditional
+    `DeleteWAL` ordering. If `DeleteUser` fails transiently, the WAL remains for
+    `walRollback`; `cleanupUser` logs and returns the cleanup error to its caller,
+    while the issuance path logs the cleanup failure and returns the original
+    issuance or read-back error. The WAL is deleted only when `DeleteUser` returns
+    nil or `ErrUserNotFound`. The existing `DeleteWAL`-failure rule also applies to
+    both password orderings: cleanup is best effort, the credential is never returned
+    when `DeleteWAL` fails, and the WAL is retained if cleanup cannot delete the user.
+  - **Acceptance**: password issuance returns exactly the contract fields; mock
+    assertions prove that `CreateToken` is never called in password mode. Every
+    password-mode retry attempt must avoid `CreateToken`, and collision exhaustion
+    must return an error containing no password. Password tests cover userid
+    collision retry and collision exhaustion, while the existing shared
+    mode-independent/token-path collision tests cover the common retry-loop
+    mechanics. Separate-call post-create failure before the credential exists is
+    covered; same-call post-create failure with the credential already live is
+    covered with an assertion that the live credential's user is deleted via the
+    shared `cleanupUser` helper. This is issuance-time compensation: no lease
+    exists, so the password secret type's revoke callback is not involved.
+    For password-mode leases, that callback (P5) is the lease-revocation path,
+    while retained-WAL recovery remains the responsibility of `walRollback`.
+    Group read-back failure, conditional WAL cleanup, success-path `DeleteWAL`
+    failure, and user-cleanup paths are covered. The P1-selected comment
+    mismatch policy is explicit and enforced; password values never appear in
+    logs, errors, WAL, `InternalData`, or backend-controlled storage
+    (`req.Storage`). This does not include Vault lease storage, where Vault core
+    persists the returned secret response; token issuance is behaviorally
+    unchanged.
+
+- [ ] **P5 — Password renewal and revocation**
+  - **Files/scope**: password secret callbacks, `secret_password.go`, and lifecycle
+    tests; update architecture references if probe results require it.
+  - **Dependencies**: P0–P4.
+  - **Checklist**: if P0 proves the exact renewal PUT preserves authentication,
+    renewal extends expiry only using the existing TTL rules; otherwise stop and
+    revise the lifecycle design before implementation. Do not rotate or return a
+    password unless P0/P1 explicitly change that contract. Revoke the PVE user
+    idempotently; define behavior for disabled users, expired users, and out-of-band
+    password changes from probe data.
+  - **Acceptance**: conditional on P0 evidence, renewal never invokes password
+    rotation and never returns a password; revocation removes the user and is
+    retry-safe; token renew/revoke tests remain green.
+
+- [ ] **P6 — WAL and lifecycle test coverage**
+  - **Files/scope**: `wal_test.go`, `path_creds_test.go`, `secret_password_test.go`,
+    `acceptance_test.go` (gated `TestAcc*` additions), and testing documentation.
+  - **Dependencies**: P0–P5.
+  - **Checklist**: add unit coverage for secret non-persistence, nonce ownership,
+    crash recovery, compensation, renewal, revocation, compatibility, and log/error
+    redaction; mock password-mode group read-back failure after same-call creation
+    and assert that both same-call group read-back failure and separate post-create
+    password-setting failure invoke the shared `cleanupUser` discipline. Cover
+    successful deletion, `ErrUserNotFound`, and transient `DeleteUser` failure;
+    verify that the first two permit WAL deletion and the last retains the WAL.
+    Test password-mode collision retry and collision exhaustion, and assert that
+    `CreateToken` is never called in password mode. The existing shared
+    mode-independent/token-path collision tests cover the common retry loop. Test
+    the password-mode success path where the final `DeleteWAL` fails after the
+    password is live, mirroring `TestCredsRead_DeleteWAL_Fail_OnSuccessPath`;
+    isolate this final-delete failure so a collision retry cannot mask the branch
+    under test. Assert best-effort `DeleteUser`, an error return, no password in
+    the response, and that the credential is never handed to the caller without
+    WAL/lease backing. Test the P1-selected password comment mismatch policy,
+    including any required delete and WAL behavior. Assert that password values
+    are absent from logs, errors, WAL, `InternalData`, and backend-controlled
+    storage (`req.Storage`). Do not assert their absence from Vault lease storage:
+    when the returned secret is persisted, Vault core stores the complete response
+    in the encrypted lease entry. Add opt-in live coverage for authentication,
+    expiry, disablement, deletion, and confirmed token interaction.
+  - **Acceptance**: unit tests pass without live PVE; password acceptance tests are
+    `VAULT_ACC=1` gated, require explicit P0 evidence/prerequisites, and never print
+    secrets; existing acceptance tests remain unchanged and green.
+
+- [ ] **P7 — Operator documentation and security review**
+  - **Files/scope**: `README.md`, `docs/ARCHITECTURE.md`, `AGENTS.md`,
+    `docs/PRODUCTION_VERIFICATION.md`, `docs/IMPLEMENTATION_PLAN.md`, and audit/
+    security review notes. Include `docs/ARCHITECTURE.md` and `AGENTS.md` in the
+    review when password creation changes existing orphan-handling assumptions.
+  - **Dependencies**: P0–P6.
+  - **Checklist**: document configuration, response handling, password lifetime,
+    disablement/revocation expectations, audit evidence, privilege implications,
+    compatibility, and recovery procedures; review logs, WAL, InternalData, error
+    paths, and operator workflows for secret exposure. Document the live-credential
+    at-rest lifecycle separately: Vault core persists the returned password in the
+    encrypted lease entry, outside the backend-controlled `req.Storage` view. The
+    password secret type's revoke callback MUST delete the PVE user. The same callback
+    is invoked for explicit revocation and lease expiry; only the trigger and timing
+    differ. Keep this lease-revocation path distinct from issuance-time cleanup and
+    WAL recovery. Review the lease-entry lifecycle and retention implications
+    without claiming that the password is absent from Vault lease storage. Document
+    the live-credential orphan windows separately: for a nonce-matched orphan,
+    document the window from same-call password creation through
+    `WALRollbackMinAge` plus rollback retry time. For a separate-call flow, note the
+    reduced orphan risk because group read-back succeeds before an authenticating
+    password exists, while still documenting the post-password-setting cleanup
+    window. For an empty or nonce-mismatched orphan, document that it may persist
+    through the full PVE `expire` lifetime or until manual cleanup because
+    `walRollback` intentionally drops that WAL entry without deleting a foreign or
+    mismatched user. Include the PVE `expire` backstop as mitigation for all three
+    cases. Reconcile the resulting orphan-handling assumptions in
+    `docs/ARCHITECTURE.md` and `AGENTS.md` as appropriate.
+  - **Acceptance**: security review is recorded; operator docs match the shipped
+    behavior and probe evidence; no token-only production gate is weakened.
 
 ---
 
