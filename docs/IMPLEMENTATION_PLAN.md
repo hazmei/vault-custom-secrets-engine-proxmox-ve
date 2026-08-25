@@ -1831,10 +1831,10 @@ are gated until its live PVE 9.2.10 evidence is recorded.**
     password secret type's revoke callback MUST delete the PVE user. The same
     callback is invoked for explicit revocation and lease expiry; only the trigger
     and timing differ. Keep this lease-revocation path distinct from issuance-time
-    cleanup and WAL recovery. Review
-    the lease-entry lifecycle and retention implications without claiming that the
-    password is absent from Vault lease storage. Document the live-credential
-    orphan windows separately: for a nonce-matched orphan, document the window from
+    cleanup and WAL recovery. Review the lease-entry lifecycle and retention
+    implications without claiming that the password is absent from Vault lease
+    storage. Document the live-credential orphan windows separately: for a nonce-matched
+    orphan, document the window from
     same-call password creation through `WALRollbackMinAge` plus rollback retry
     time. For a separate-call flow, note the reduced orphan risk because group
     read-back succeeds before an authenticating password exists, while still
