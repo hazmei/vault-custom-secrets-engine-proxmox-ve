@@ -1715,7 +1715,11 @@ are gated until its live PVE 9.2.10 evidence is recorded.**
     a nonce mismatch fatal, delete the user, and fail issuance. Do not inherit this
     behavior implicitly from token mode. If same-call creation succeeds but group
     read-back fails (including a read-back error), reuse the existing `cleanupUser`
-    helper in `path_creds.go`; do not duplicate its compensation algorithm.
+    helper in `path_creds.go`; do not duplicate its compensation algorithm. For a
+    separate password-setting call, the ordering MUST be `CreateUser -> GetUser`
+    group read-back assertion -> `SetPassword` -> return secret. The password-setting
+    call occurs only after group read-back succeeds, preserving token-path safety and
+    detecting dropped or invalid groups before an authenticating password exists.
     The same helper and the same WAL entry MUST also be used when a separate
     post-create password-setting call fails. In both same-call and separate-call
     paths, reuse `cleanupUser` and preserve its `DeleteUser` before conditional
@@ -1723,8 +1727,7 @@ are gated until its live PVE 9.2.10 evidence is recorded.**
     `walRollback`; `cleanupUser` logs and returns the cleanup error to its caller,
     while the issuance path logs the cleanup failure and returns the original
     issuance or read-back error. The WAL is deleted only when `DeleteUser` returns
-    nil or `ErrUserNotFound`. Do not persist or log the password, and redact it from
-    any applicable error or diagnostic output.
+    nil or `ErrUserNotFound`.
   - **Acceptance**: password issuance returns exactly the contract fields; mock
     assertions prove no token call; collision, tokenless failure, group read-back
     failure, conditional WAL cleanup, and user cleanup paths are covered; the
@@ -1776,7 +1779,10 @@ are gated until its live PVE 9.2.10 evidence is recorded.**
     compatibility, and recovery procedures; review logs, WAL, InternalData, error
     paths, and operator workflows for secret exposure. Document the live-credential
     orphan windows separately: for a nonce-matched orphan, from same-call password
-    creation through `WALRollbackMinAge` plus rollback retry time; for an empty- or
+    creation through `WALRollbackMinAge` plus rollback retry time; for a separate-call
+    flow, note the reduced orphan risk because group read-back succeeds before an
+    authenticating password exists, while still documenting the post-password-setting
+    cleanup window; for an empty- or
     nonce-mismatched orphan, potentially through the full PVE `expire` lifetime or
     until manual cleanup, because `walRollback` intentionally drops that WAL entry
     without deleting a foreign/mismatched user. Include the PVE `expire` backstop as
