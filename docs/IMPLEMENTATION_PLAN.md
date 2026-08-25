@@ -1828,9 +1828,10 @@ are gated until its live PVE 9.2.10 evidence is recorded.**
     paths, and operator workflows for secret exposure. Document the live-credential
     at-rest lifecycle separately: Vault core persists the returned password in the
     encrypted lease entry, outside the backend-controlled `req.Storage` view. The
-    password secret type's revoke callback MUST delete the PVE user on explicit
-    revocation; document the corresponding lease-expiry handling and its deletion
-    expectations separately from issuance-time cleanup and WAL recovery. Review
+    password secret type's revoke callback MUST delete the PVE user. The same
+    callback is invoked for explicit revocation and lease expiry; only the trigger
+    and timing differ. Keep this lease-revocation path distinct from issuance-time
+    cleanup and WAL recovery. Review
     the lease-entry lifecycle and retention implications without claiming that the
     password is absent from Vault lease storage. Document the live-credential
     orphan windows separately: for a nonce-matched orphan, document the window from
