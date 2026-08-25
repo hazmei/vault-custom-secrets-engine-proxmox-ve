@@ -1828,23 +1828,22 @@ are gated until its live PVE 9.2.10 evidence is recorded.**
     paths, and operator workflows for secret exposure. Document the live-credential
     at-rest lifecycle separately: Vault core persists the returned password in the
     encrypted lease entry, outside the backend-controlled `req.Storage` view. The
-    password secret type's revoke callback MUST delete the PVE user. The same
-    callback is invoked for explicit revocation and lease expiry; only the trigger
-    and timing differ. Keep this lease-revocation path distinct from issuance-time
-    cleanup and WAL recovery. Review the lease-entry lifecycle and retention
-    implications without claiming that the password is absent from Vault lease
-    storage. Document the live-credential orphan windows separately: for a nonce-matched
-    orphan, document the window from
-    same-call password creation through `WALRollbackMinAge` plus rollback retry
-    time. For a separate-call flow, note the reduced orphan risk because group
-    read-back succeeds before an authenticating password exists, while still
-    documenting the post-password-setting cleanup window. For an empty or
-    nonce-mismatched orphan, document that it may persist through the full PVE
-    `expire` lifetime or until manual cleanup because `walRollback` intentionally
-    drops that WAL entry without deleting a foreign or mismatched user. Include the
-    PVE `expire` backstop as mitigation for all three cases. Reconcile the resulting
-    orphan-handling assumptions in `docs/ARCHITECTURE.md` and `AGENTS.md` as
-    appropriate.
+    password secret type's revoke callback MUST delete the PVE user. The same callback
+    is invoked for explicit revocation and lease expiry; only the trigger and timing
+    differ. Keep this lease-revocation path distinct from issuance-time cleanup and
+    WAL recovery. Review the lease-entry lifecycle and retention implications
+    without claiming that the password is absent from Vault lease storage. Document
+    the live-credential orphan windows separately: for a nonce-matched orphan,
+    document the window from same-call password creation through
+    `WALRollbackMinAge` plus rollback retry time. For a separate-call flow, note the
+    reduced orphan risk because group read-back succeeds before an authenticating
+    password exists, while still documenting the post-password-setting cleanup
+    window. For an empty or nonce-mismatched orphan, document that it may persist
+    through the full PVE `expire` lifetime or until manual cleanup because
+    `walRollback` intentionally drops that WAL entry without deleting a foreign or
+    mismatched user. Include the PVE `expire` backstop as mitigation for all three
+    cases. Reconcile the resulting orphan-handling assumptions in
+    `docs/ARCHITECTURE.md` and `AGENTS.md` as appropriate.
   - **Acceptance**: security review is recorded; operator docs match the shipped
     behavior and probe evidence; no token-only production gate is weakened.
 
