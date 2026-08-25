@@ -1756,9 +1756,13 @@ are gated until its live PVE 9.2.10 evidence is recorded.**
     mode-independent/token-path collision tests cover the common retry-loop
     mechanics. Separate-call post-create failure before the credential exists is
     covered; same-call post-create failure with the credential already live is
-    covered with an assertion that the live credential is revoked. Group read-back
-    failure, conditional WAL cleanup, success-path `DeleteWAL` failure, and
-    user-cleanup paths are covered. The P1-selected comment mismatch policy is
+    covered with an assertion that the live credential's user is deleted via the
+    shared `cleanupUser` helper. This is issuance-time compensation: no lease
+    exists, so `secretTokenRevoke` is not involved. `secretTokenRevoke` remains
+    the lease-revocation path, while retained-WAL recovery remains the
+    responsibility of `walRollback`. Group read-back failure, conditional WAL
+    cleanup, success-path `DeleteWAL` failure, and user-cleanup paths are covered.
+    The P1-selected comment mismatch policy is
     explicit and enforced; password values never appear in logs, errors, WAL,
     `InternalData`, or Vault storage; token issuance is behaviorally unchanged.
 
