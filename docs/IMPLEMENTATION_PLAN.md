@@ -1758,13 +1758,14 @@ are gated until its live PVE 9.2.10 evidence is recorded.**
     covered; same-call post-create failure with the credential already live is
     covered with an assertion that the live credential's user is deleted via the
     shared `cleanupUser` helper. This is issuance-time compensation: no lease
-    exists, so `secretTokenRevoke` is not involved. `secretTokenRevoke` remains
-    the lease-revocation path, while retained-WAL recovery remains the
-    responsibility of `walRollback`. Group read-back failure, conditional WAL
-    cleanup, success-path `DeleteWAL` failure, and user-cleanup paths are covered.
-    The P1-selected comment mismatch policy is
-    explicit and enforced; password values never appear in logs, errors, WAL,
-    `InternalData`, or Vault storage; token issuance is behaviorally unchanged.
+    exists, so the password secret type's revoke callback is not involved.
+    For password-mode leases, that callback (P5) is the lease-revocation path,
+    while retained-WAL recovery remains the responsibility of `walRollback`.
+    Group read-back failure, conditional WAL cleanup, success-path `DeleteWAL`
+    failure, and user-cleanup paths are covered. The P1-selected comment
+    mismatch policy is explicit and enforced; password values never appear in
+    logs, errors, WAL, `InternalData`, or Vault storage; token issuance is
+    behaviorally unchanged.
 
 - [ ] **P5 — Password renewal and revocation**
   - **Files/scope**: password secret callbacks, `secret_password.go`, and lifecycle
