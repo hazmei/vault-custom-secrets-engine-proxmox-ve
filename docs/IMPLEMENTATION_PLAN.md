@@ -1749,9 +1749,11 @@ are gated until its live PVE 9.2.10 evidence is recorded.**
     both password orderings: cleanup is best effort, the credential is never returned
     when `DeleteWAL` fails, and the WAL is retained if cleanup cannot delete the user.
   - **Acceptance**: password issuance returns exactly the contract fields; mock
-    assertions prove no token call; collision, tokenless failure, group read-back
-    failure, conditional WAL cleanup, success-path `DeleteWAL` failure, and user
-    cleanup paths are covered; the
+    assertions prove that `CreateToken` is never called in password mode. Password
+    tests cover userid collision retry and collision exhaustion, while the existing
+    shared mode-independent/token-path collision tests cover the common retry loop.
+    Tokenless failure, group read-back failure, conditional WAL cleanup,
+    success-path `DeleteWAL` failure, and user cleanup paths are covered. The
     P1-selected comment mismatch policy is explicit and enforced; password values
     never appear in logs, errors, WAL, `InternalData`, or Vault storage; token
     issuance is behaviorally unchanged.
@@ -1780,17 +1782,20 @@ are gated until its live PVE 9.2.10 evidence is recorded.**
     and assert that both same-call group read-back failure and separate post-create
     password-setting failure invoke the shared `cleanupUser` discipline. Cover
     successful deletion, `ErrUserNotFound`, and transient `DeleteUser` failure;
-    verify the first two permit WAL deletion and the last retains the WAL. Test the
-    password-mode success path where the final `DeleteWAL` fails after the password
-    is live, mirroring `TestCredsRead_DeleteWAL_Fail_OnSuccessPath`: isolate this
-    final-delete failure so a collision retry cannot mask the branch under test;
-    assert best-effort `DeleteUser`, an error return, no password in the response,
-    and that the credential is never handed to the caller without WAL/lease backing.
-    Test the
-    P1-selected password comment mismatch policy, including any required delete
-    and WAL behavior. Assert that password values are absent from logs, errors,
-    WAL, `InternalData`, and stored Vault data. Add opt-in live coverage for
-    authentication, expiry, disablement, deletion, and confirmed token interaction.
+    verify that the first two permit WAL deletion and the last retains the WAL.
+    Test password-mode collision retry and collision exhaustion, and assert that
+    `CreateToken` is never called in password mode. The existing shared
+    mode-independent/token-path collision tests cover the common retry loop. Test
+    the password-mode success path where the final `DeleteWAL` fails after the
+    password is live, mirroring `TestCredsRead_DeleteWAL_Fail_OnSuccessPath`;
+    isolate this final-delete failure so a collision retry cannot mask the branch
+    under test. Assert best-effort `DeleteUser`, an error return, no password in
+    the response, and that the credential is never handed to the caller without
+    WAL/lease backing. Test the P1-selected password comment mismatch policy,
+    including any required delete and WAL behavior. Assert that password values
+    are absent from logs, errors, WAL, `InternalData`, and stored Vault data. Add
+    opt-in live coverage for authentication, expiry, disablement, deletion, and
+    confirmed token interaction.
   - **Acceptance**: unit tests pass without live PVE; password acceptance tests are
     `VAULT_ACC=1` gated, require explicit P0 evidence/prerequisites, and never print
     secrets; existing acceptance tests remain unchanged and green.
@@ -1805,16 +1810,17 @@ are gated until its live PVE 9.2.10 evidence is recorded.**
     disablement/revocation expectations, audit evidence, privilege implications,
     compatibility, and recovery procedures; review logs, WAL, InternalData, error
     paths, and operator workflows for secret exposure. Document the live-credential
-    orphan windows separately: for a nonce-matched orphan, from same-call password
-    creation through `WALRollbackMinAge` plus rollback retry time; for a separate-call
-    flow, note the reduced orphan risk because group read-back succeeds before an
-    authenticating password exists, while still documenting the post-password-setting
-    cleanup window; for an empty- or
-    nonce-mismatched orphan, potentially through the full PVE `expire` lifetime or
-    until manual cleanup, because `walRollback` intentionally drops that WAL entry
-    without deleting a foreign/mismatched user. Include the PVE `expire` backstop as
-    mitigation for both cases. Reconcile the resulting orphan-handling assumptions
-    in `docs/ARCHITECTURE.md` and `AGENTS.md` as appropriate.
+    orphan windows separately: for a nonce-matched orphan, document the window from
+    same-call password creation through `WALRollbackMinAge` plus rollback retry
+    time. For a separate-call flow, note the reduced orphan risk because group
+    read-back succeeds before an authenticating password exists, while still
+    documenting the post-password-setting cleanup window. For an empty or
+    nonce-mismatched orphan, document that it may persist through the full PVE
+    `expire` lifetime or until manual cleanup because `walRollback` intentionally
+    drops that WAL entry without deleting a foreign or mismatched user. Include the
+    PVE `expire` backstop as mitigation for both cases. Reconcile the resulting
+    orphan-handling assumptions in `docs/ARCHITECTURE.md` and `AGENTS.md` as
+    appropriate.
   - **Acceptance**: security review is recorded; operator docs match the shipped
     behavior and probe evidence; no token-only production gate is weakened.
 
