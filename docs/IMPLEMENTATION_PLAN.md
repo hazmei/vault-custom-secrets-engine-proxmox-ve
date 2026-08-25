@@ -1749,10 +1749,13 @@ are gated until its live PVE 9.2.10 evidence is recorded.**
     both password orderings: cleanup is best effort, the credential is never returned
     when `DeleteWAL` fails, and the WAL is retained if cleanup cannot delete the user.
   - **Acceptance**: password issuance returns exactly the contract fields; mock
-    assertions prove that `CreateToken` is never called in password mode. Password
-    tests cover userid collision retry and collision exhaustion, while the existing
-    shared mode-independent/token-path collision tests cover the common retry loop.
-    Tokenless failure, group read-back failure, conditional WAL cleanup,
+    assertions prove that `CreateToken` is never called in password mode. Every
+    password-mode retry attempt must avoid `CreateToken`, and collision exhaustion
+    must return an error containing no password. Password tests cover userid
+    collision retry and collision exhaustion, while the existing shared
+    mode-independent/token-path collision tests cover the common retry-loop
+    mechanics. Post-create failure before the credential exists, group read-back
+    failure, conditional WAL cleanup,
     success-path `DeleteWAL` failure, and user cleanup paths are covered. The
     P1-selected comment mismatch policy is explicit and enforced; password values
     never appear in logs, errors, WAL, `InternalData`, or Vault storage; token
@@ -1818,7 +1821,7 @@ are gated until its live PVE 9.2.10 evidence is recorded.**
     nonce-mismatched orphan, document that it may persist through the full PVE
     `expire` lifetime or until manual cleanup because `walRollback` intentionally
     drops that WAL entry without deleting a foreign or mismatched user. Include the
-    PVE `expire` backstop as mitigation for both cases. Reconcile the resulting
+    PVE `expire` backstop as mitigation for all three cases. Reconcile the resulting
     orphan-handling assumptions in `docs/ARCHITECTURE.md` and `AGENTS.md` as
     appropriate.
   - **Acceptance**: security review is recorded; operator docs match the shipped
