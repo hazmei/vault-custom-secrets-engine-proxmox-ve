@@ -1754,12 +1754,13 @@ are gated until its live PVE 9.2.10 evidence is recorded.**
     must return an error containing no password. Password tests cover userid
     collision retry and collision exhaustion, while the existing shared
     mode-independent/token-path collision tests cover the common retry-loop
-    mechanics. Post-create failure before the credential exists, group read-back
-    failure, conditional WAL cleanup,
-    success-path `DeleteWAL` failure, and user cleanup paths are covered. The
-    P1-selected comment mismatch policy is explicit and enforced; password values
-    never appear in logs, errors, WAL, `InternalData`, or Vault storage; token
-    issuance is behaviorally unchanged.
+    mechanics. Separate-call post-create failure before the credential exists is
+    covered; same-call post-create failure with the credential already live is
+    covered with an assertion that the live credential is revoked. Group read-back
+    failure, conditional WAL cleanup, success-path `DeleteWAL` failure, and
+    user-cleanup paths are covered. The P1-selected comment mismatch policy is
+    explicit and enforced; password values never appear in logs, errors, WAL,
+    `InternalData`, or Vault storage; token issuance is behaviorally unchanged.
 
 - [ ] **P5 — Password renewal and revocation**
   - **Files/scope**: password secret callbacks, `secret_password.go`, and lifecycle
