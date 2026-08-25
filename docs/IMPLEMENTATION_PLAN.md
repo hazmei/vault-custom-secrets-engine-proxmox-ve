@@ -1730,12 +1730,14 @@ are gated until its live PVE 9.2.10 evidence is recorded.**
     read-back fails (including a read-back error), reuse the existing `cleanupUser`
     helper in `path_creds.go`; do not duplicate its compensation algorithm. For a
     separate password-setting call, the complete ordering MUST be
-    `PutWAL -> CreateUser -> GetUser` group read-back assertion -> `SetPassword` ->
+    `PutWAL -> CreateUser -> GetUser` read-back (`Groups` assertion is hard;
+    comment/nonce handling follows the P1-selected policy) -> `SetPassword` ->
     `DeleteWAL` -> return secret. The password-setting call occurs only after group
     read-back succeeds, preserving token-path safety and detecting dropped or invalid
     groups before an authenticating password exists. For same-call password creation,
     the complete ordering MUST be `PutWAL -> CreateUser (password live) -> GetUser`
-    read-back assertion -> `DeleteWAL` -> return secret.
+    read-back (`Groups` assertion is hard; comment/nonce handling follows the
+    P1-selected policy) -> `DeleteWAL` -> return secret.
     The same helper and the same WAL entry MUST also be used when a separate
     post-create password-setting call fails. In both same-call and separate-call
     paths, reuse `cleanupUser` and preserve its `DeleteUser` before conditional
@@ -1778,6 +1780,10 @@ are gated until its live PVE 9.2.10 evidence is recorded.**
     password-setting failure invoke the shared `cleanupUser` discipline. Cover
     successful deletion, `ErrUserNotFound`, and transient `DeleteUser` failure;
     verify the first two permit WAL deletion and the last retains the WAL. Test the
+    password-mode success path where `DeleteWAL` fails after the password is live,
+    mirroring `TestCredsRead_DeleteWAL_Fail_OnSuccessPath`: assert best-effort
+    `DeleteUser`, an error return, no password in the response, and that the
+    credential is never handed to the caller without WAL/lease backing. Test the
     P1-selected password comment mismatch policy, including any required delete
     and WAL behavior. Assert that password values are absent from logs, errors,
     WAL, `InternalData`, and stored Vault data. Add opt-in live coverage for
