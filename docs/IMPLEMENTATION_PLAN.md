@@ -1750,7 +1750,8 @@ are gated until its live PVE 9.2.10 evidence is recorded.**
     when `DeleteWAL` fails, and the WAL is retained if cleanup cannot delete the user.
   - **Acceptance**: password issuance returns exactly the contract fields; mock
     assertions prove no token call; collision, tokenless failure, group read-back
-    failure, conditional WAL cleanup, and user cleanup paths are covered; the
+    failure, conditional WAL cleanup, success-path `DeleteWAL` failure, and user
+    cleanup paths are covered; the
     P1-selected comment mismatch policy is explicit and enforced; password values
     never appear in logs, errors, WAL, `InternalData`, or Vault storage; token
     issuance is behaviorally unchanged.
@@ -1780,10 +1781,12 @@ are gated until its live PVE 9.2.10 evidence is recorded.**
     password-setting failure invoke the shared `cleanupUser` discipline. Cover
     successful deletion, `ErrUserNotFound`, and transient `DeleteUser` failure;
     verify the first two permit WAL deletion and the last retains the WAL. Test the
-    password-mode success path where `DeleteWAL` fails after the password is live,
-    mirroring `TestCredsRead_DeleteWAL_Fail_OnSuccessPath`: assert best-effort
-    `DeleteUser`, an error return, no password in the response, and that the
-    credential is never handed to the caller without WAL/lease backing. Test the
+    password-mode success path where the final `DeleteWAL` fails after the password
+    is live, mirroring `TestCredsRead_DeleteWAL_Fail_OnSuccessPath`: isolate this
+    final-delete failure so a collision retry cannot mask the branch under test;
+    assert best-effort `DeleteUser`, an error return, no password in the response,
+    and that the credential is never handed to the caller without WAL/lease backing.
+    Test the
     P1-selected password comment mismatch policy, including any required delete
     and WAL behavior. Assert that password values are absent from logs, errors,
     WAL, `InternalData`, and stored Vault data. Add opt-in live coverage for
