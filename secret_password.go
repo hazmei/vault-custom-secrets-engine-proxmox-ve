@@ -9,10 +9,11 @@
 // renewal and revocation act only on the synthetic PVE user recorded in the
 // lease InternalData, and that user is identical in both modes.
 //
-//   - Renew: PUT /access/users with expire+groups+enable+append=1. PVE 9.2.10
-//     evidence (docs/PVE_PROBES.md Probe P0, 28 Aug 2026) confirms the ORIGINAL
-//     password still authenticates after exactly this renewal shape, so renewal
-//     extends expiry only. It never rotates and never returns a password.
+//   - Renew: PUT /access/users with expire+groups+enable+append=1. Evidence from
+//     pve-manager/9.2.14/a1480fa6b8d899cb (docs/PVE_PROBES.md Probe P0) confirms
+//     the ORIGINAL password still authenticates after exactly this renewal shape;
+//     9.2.10 has no password evidence. Renewal extends expiry only. It never
+//     rotates and never returns a password.
 //   - Revoke: idempotent DELETE /access/users/{userid}, cascading to the user's
 //     group memberships and ACL entries.
 //

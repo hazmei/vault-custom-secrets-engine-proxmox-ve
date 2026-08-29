@@ -1653,13 +1653,23 @@ pass through a real `vault server` with `-dev-plugin-dir` also completed. See
 `docs/PVE_PROBES.md` — "Probe P0 verification run ... on PVE 9.2.14". The shipped scope is bounded by the P0 evidence that
 actually exists (`docs/PVE_PROBES.md` Probe P0):
 
-- **Verified build scope**: password mode is verified end to end ONLY on
-  `pve-manager/9.2.14/a1480fa6b8d899cb`. The declared target
+- **Verified build scope (ENFORCED)**: password mode is verified end to end ONLY
+  on `pve-manager/9.2.14/a1480fa6b8d899cb`. The declared target
   `9.2.10/43df2e01f27a1a19` has NO password evidence — its probes predate the
-  feature — and P0 is still partial/open. Role writes with `mode=password`
-  return a warning naming the verified build. Recording equivalent 9.2.10
-  evidence, or dropping 9.2.10 as a supported build for password mode, remains
-  an open decision.
+  feature — and P0 is still partial/open. The engine gates on this rather than
+  only warning: role write refuses `mode=password` unless `GET /version` reports
+  exactly `version=9.2.14` + `repoid=a1480fa6b8d899cb` (`path_roles.go` Step 7c),
+  and `creds/:role` re-checks the live build before generating any password
+  (`path_creds.go` Step 3b) because the cluster may be upgraded between the two.
+  Role writes that pass the gate still return a warning naming the verified build.
+  Renew and revoke are deliberately NOT gated, so an upgrade breaks new issuance
+  while already-issued leases stay renewable and revocable. Recording equivalent
+  9.2.10 evidence, or dropping 9.2.10 as a supported build for password mode,
+  remains an open decision. **Open evidence gap**: no `GET /version` response body
+  from the 9.2.14 target is recorded in `docs/PVE_PROBES.md`; the gate's expected
+  `repoid` is derived from the `pveversion` build string, which matches the
+  recorded 9.2.10 `/version` body (Probe 0). Capture the 9.2.14 `/version` body on
+  the next live run.
 - **In scope and implemented**: `mode=password` roles on the `pve` realm;
   engine-generated password supplied on `POST /access/users` (single call);
   no API token minted; renewal extends the PVE `expire` only; revocation

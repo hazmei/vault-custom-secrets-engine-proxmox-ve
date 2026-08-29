@@ -1393,6 +1393,15 @@ make testacc
 go test -count=1 -v -timeout=30m ./... -run '^TestAccPasswordLifecycle$'
 ```
 
+**Open evidence gap — `GET /version` body on 9.2.14.** The engine now gates
+password mode on the `version` and `repoid` fields of `GET /version` matching
+`9.2.14` / `a1480fa6b8d899cb`. The expected `repoid` is taken from the
+`pve-manager` build string, not from a recorded API response on this build: the
+only `/version` body recorded here is Probe 0's on 9.2.10 (see that probe's
+Body string row), where `repoid` does equal the build-string suffix. Capture and record the raw
+9.2.14 `/version` body on the next live run to close this gap; if the two ever
+disagree, the gate rejects the one verified build.
+
 | Behavior (realm `pve`) | Result on 9.2.14 |
 |---|---|
 | Password supplied on `POST /access/users` (single call) | Accepted; user read-back HTTP 200 with expected group and comment marker |

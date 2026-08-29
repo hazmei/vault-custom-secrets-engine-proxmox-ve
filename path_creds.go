@@ -162,6 +162,19 @@ func (b *backend) handleCredsRead(ctx context.Context, req *logical.Request, d *
 	passwordMode := role.Mode == modePassword
 	var password string
 	if passwordMode {
+		version, versionErr := client.GetVersionInfo(ctx)
+		if versionErr != nil {
+			return nil, fmt.Errorf("proxmox: creds/%s: verify password-mode PVE build: %w", roleName, versionErr)
+		}
+		if version.Version != passwordVerifiedVersion || version.RepoID != passwordVerifiedRepoID {
+			// Operator/environment condition, not an engine fault: surface as a
+			// 400-class response like the zero-TTL refusal above, not a 500.
+			return logical.ErrorResponse(
+				"password mode requires verified PVE build %s; this cluster reports version=%q repoid=%q "+
+					"(docs/PVE_PROBES.md Probe P0 records password behavior only on the verified build)",
+				passwordVerifiedBuild, version.Version, version.RepoID,
+			), nil
+		}
 		password, err = generatePassword()
 		if err != nil {
 			// generatePassword never puts generated material in its error.

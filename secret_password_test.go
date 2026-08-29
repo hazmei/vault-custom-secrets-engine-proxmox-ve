@@ -33,6 +33,65 @@ func passwordRoleData() map[string]interface{} {
 	return d
 }
 
+func verifiedPasswordVersion() pveapi.VersionInfo {
+	return pveapi.VersionInfo{
+		Version: "9.2.14",
+		RepoID:  "a1480fa6b8d899cb",
+	}
+}
+
+// TestCredsRead_PasswordModeRequiresVerifiedBuild rejects password issuance
+// unless /version reports the exact version and repoid with the recorded P0
+// evidence. The rejection must happen before the first CreateUser call.
+func TestCredsRead_PasswordModeRequiresVerifiedBuild(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	tests := []struct {
+		name        string
+		version     pveapi.VersionInfo
+		versionErr  error
+		wantSuccess bool
+	}{
+		{name: "exact match", version: verifiedPasswordVersion(), wantSuccess: true},
+		{name: "different version", version: pveapi.VersionInfo{Version: "9.2.10", RepoID: "43df2e01f27a1a19"}},
+		{name: "same version different repoid", version: pveapi.VersionInfo{Version: "9.2.14", RepoID: "different-repoid"}},
+		{name: "missing repoid", version: pveapi.VersionInfo{Version: "9.2.14"}},
+		{name: "malformed metadata", versionErr: errors.New("pveapi: GetVersionInfo: parse response")},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var mc *pveapi.MockClient
+			// The role is written on the verified build (role-write gates too);
+			// the cluster then "changes" underneath the role before issuance.
+			b, storage := setupBackendForCreds(t, "pwrole", passwordRoleData(), func(m *pveapi.MockClient) {
+				mc = m
+				m.GetVersionInfoFn = func(_ context.Context) (pveapi.VersionInfo, error) {
+					return verifiedPasswordVersion(), nil
+				}
+			})
+			mc.GetVersionInfoFn = func(_ context.Context) (pveapi.VersionInfo, error) {
+				return tc.version, tc.versionErr
+			}
+
+			resp, err := readCreds(ctx, b, storage, "pwrole")
+			if tc.wantSuccess {
+				if err != nil || resp == nil || resp.IsError() || !mc.HasCall("CreateUser") {
+					t.Fatalf("exact verified build must issue before CreateUser gate: resp=%#v err=%v calls=%v", resp, err, mc.CallsFor("CreateUser"))
+				}
+				return
+			}
+			if err == nil && (resp == nil || !resp.IsError()) {
+				t.Fatal("unverified or malformed build must reject password issuance")
+			}
+			if mc.HasCall("CreateUser") {
+				t.Error("password build rejection must occur before CreateUser")
+			}
+		})
+	}
+}
+
 // issuedPassword extracts the password from a creds response, failing the test
 // if the response does not carry one.
 func issuedPassword(t *testing.T, resp *logical.Response) string {
@@ -136,6 +195,9 @@ func TestRoleWrite_ModeValidation(t *testing.T) {
 					"/access/realm/pve":              {"Realm.AllocateUser": 1},
 					"/access/realm/pam":              {"Realm.AllocateUser": 1},
 				}
+				mc.GetVersionInfoFn = func(_ context.Context) (pveapi.VersionInfo, error) {
+					return verifiedPasswordVersion(), nil
+				}
 			})
 
 			data := credRoleData()
@@ -184,7 +246,11 @@ func TestRoleWrite_PasswordModeWarnsAboutVerifiedBuild(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 
-	b, storage := setupBackendForCreds(t, "seed", credRoleData(), nil)
+	b, storage := setupBackendForCreds(t, "seed", credRoleData(), func(mc *pveapi.MockClient) {
+		mc.GetVersionInfoFn = func(_ context.Context) (pveapi.VersionInfo, error) {
+			return verifiedPasswordVersion(), nil
+		}
+	})
 
 	resp, err := writeRole(ctx, b, storage, "pwrole", passwordRoleData())
 	if err != nil {
@@ -258,6 +324,7 @@ func TestCredsRead_PasswordMode_HappyPath(t *testing.T) {
 	var mc *pveapi.MockClient
 	b, storage := setupBackendForCreds(t, "pwrole", passwordRoleData(), func(m *pveapi.MockClient) {
 		mc = m
+		m.GetVersionInfoFn = func(_ context.Context) (pveapi.VersionInfo, error) { return verifiedPasswordVersion(), nil }
 	})
 
 	resp, err := readCreds(ctx, b, storage, "pwrole")
@@ -332,6 +399,7 @@ func TestCredsRead_PasswordMode_GroupReadBackFailure(t *testing.T) {
 	var mc *pveapi.MockClient
 	b, storage := setupBackendForCreds(t, "pwrole", passwordRoleData(), func(m *pveapi.MockClient) {
 		mc = m
+		m.GetVersionInfoFn = func(_ context.Context) (pveapi.VersionInfo, error) { return verifiedPasswordVersion(), nil }
 		// Read-back returns a user with no group membership.
 		m.GetUserFn = func(_ context.Context, _ string) (pveapi.UserInfo, error) {
 			return pveapi.UserInfo{Groups: nil, Enable: true}, nil
@@ -367,6 +435,7 @@ func TestCredsRead_PasswordMode_CommentMismatchIsFatal(t *testing.T) {
 	var mc *pveapi.MockClient
 	b, storage := setupBackendForCreds(t, "pwrole", passwordRoleData(), func(m *pveapi.MockClient) {
 		mc = m
+		m.GetVersionInfoFn = func(_ context.Context) (pveapi.VersionInfo, error) { return verifiedPasswordVersion(), nil }
 		m.GetUserFn = func(_ context.Context, _ string) (pveapi.UserInfo, error) {
 			// Group is correct; the ownership marker was dropped.
 			return pveapi.UserInfo{Groups: []string{"vault-vm-admins"}, Enable: true, Comment: "edited-by-hand"}, nil
@@ -419,6 +488,7 @@ func TestCredsRead_PasswordMode_TransientDeleteRetainsWAL(t *testing.T) {
 	ctx := context.Background()
 
 	b, storage := setupBackendForCreds(t, "pwrole", passwordRoleData(), func(m *pveapi.MockClient) {
+		m.GetVersionInfoFn = func(_ context.Context) (pveapi.VersionInfo, error) { return verifiedPasswordVersion(), nil }
 		m.GetUserFn = func(_ context.Context, _ string) (pveapi.UserInfo, error) {
 			return pveapi.UserInfo{Groups: nil, Enable: true}, nil
 		}
@@ -451,6 +521,7 @@ func TestCredsRead_PasswordMode_CollisionRetryAndExhaustion(t *testing.T) {
 		calls := 0
 		b, storage := setupBackendForCreds(t, "pwrole", passwordRoleData(), func(m *pveapi.MockClient) {
 			mc = m
+			m.GetVersionInfoFn = func(_ context.Context) (pveapi.VersionInfo, error) { return verifiedPasswordVersion(), nil }
 			m.CreateUserFn = func(_ context.Context, req pveapi.CreateUserRequest) error {
 				calls++
 				if calls == 1 {
@@ -483,6 +554,7 @@ func TestCredsRead_PasswordMode_CollisionRetryAndExhaustion(t *testing.T) {
 		var mc *pveapi.MockClient
 		b, storage := setupBackendForCreds(t, "pwrole", passwordRoleData(), func(m *pveapi.MockClient) {
 			mc = m
+			m.GetVersionInfoFn = func(_ context.Context) (pveapi.VersionInfo, error) { return verifiedPasswordVersion(), nil }
 			m.CreateUserFn = func(_ context.Context, _ pveapi.CreateUserRequest) error {
 				return pveapi.ErrConflict
 			}
@@ -523,6 +595,7 @@ func TestCredsRead_PasswordMode_DeleteWALFailOnSuccessPath(t *testing.T) {
 		"/access/realm/pve":              {"Realm.AllocateUser": 1},
 	}
 	mc.Groups = map[string]bool{"vault-vm-admins": true}
+	mc.GetVersionInfoFn = func(_ context.Context) (pveapi.VersionInfo, error) { return verifiedPasswordVersion(), nil }
 
 	innerConfig := logical.TestBackendConfig()
 	innerConfig.StorageView = &logical.InmemStorage{}
@@ -654,5 +727,57 @@ func TestSecretPassword_RevokeDeletesUser(t *testing.T) {
 	mc.DeleteUserError = pveapi.ErrUserNotFound
 	if _, err := b.Secret(secretTypePassword).Revoke(ctx, makeRevokeRequest(storage, standardRenewInternalData(24*time.Hour)), nil); err != nil {
 		t.Fatalf("idempotent revoke: %v", err)
+	}
+}
+
+// TestRoleWrite_PasswordModeRejectsUnverifiedBuild covers the write-time half of
+// the build gate: an operator opting into password mode on any build other than
+// passwordVerifiedBuild is refused at role write, not only at first issuance.
+func TestRoleWrite_PasswordModeRejectsUnverifiedBuild(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	b, storage := setupBackendForCreds(t, "seed", credRoleData(), func(mc *pveapi.MockClient) {
+		// MockClient's default build is the unverified 9.2.10 target.
+		mc.GetVersionInfoFn = nil
+	})
+
+	resp, err := writeRole(ctx, b, storage, "pwrole", passwordRoleData())
+	if err != nil {
+		t.Fatalf("writeRole: %v", err)
+	}
+	if resp == nil || !resp.IsError() {
+		t.Fatalf("password role on an unverified build must be refused at write; got %#v", resp)
+	}
+	if !strings.Contains(resp.Error().Error(), passwordVerifiedBuild) {
+		t.Errorf("refusal must name the verified build %q; got %q", passwordVerifiedBuild, resp.Error())
+	}
+
+	role, err := getRole(ctx, storage, "pwrole")
+	if err != nil {
+		t.Fatalf("getRole: %v", err)
+	}
+	if role != nil {
+		t.Error("refused password role must not be stored")
+	}
+}
+
+// TestCredsRead_TokenModeSkipsBuildGate keeps the build check confined to
+// password mode: token issuance must not spend a /version round trip.
+func TestCredsRead_TokenModeSkipsBuildGate(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	var mc *pveapi.MockClient
+	b, storage := setupBackendForCreds(t, "tokrole", credRoleData(), func(m *pveapi.MockClient) {
+		mc = m
+	})
+
+	resp, err := readCreds(ctx, b, storage, "tokrole")
+	if err != nil || resp == nil || resp.IsError() {
+		t.Fatalf("token issuance: resp=%#v err=%v", resp, err)
+	}
+	if mc.HasCall("GetVersionInfo") {
+		t.Error("token mode must not call GetVersionInfo")
 	}
 }

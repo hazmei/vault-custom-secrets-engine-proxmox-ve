@@ -125,9 +125,23 @@ const (
 // PVE 9.2.14"). The project's declared target elsewhere is
 // pve-manager/9.2.10/43df2e01f27a1a19, and password behavior was NOT verified
 // there — the 9.2.10 probes predate the feature and P0 remains partial/open.
-// Password roles are therefore accepted but warn, so an operator on any other
-// build knows the credential path is unverified for their cluster.
-const passwordVerifiedBuild = "pve-manager/9.2.14/a1480fa6b8d899cb"
+//
+// Password mode is therefore GATED, not merely advisory: role-write refuses a
+// mode=password role on any other build, and creds issuance re-checks the live
+// build and refuses there too (the cluster can be upgraded between the two).
+// Renew and revoke are deliberately NOT gated — an upgraded cluster must still
+// be able to extend and clean up password leases issued before the upgrade.
+//
+// passwordVerifiedVersion and passwordVerifiedRepoID are compared against the
+// `version` and `repoid` fields of GET /version. Those two fields reproduce the
+// pve-manager build string exactly: PVE_PROBES.md Probe 0 records
+// {"version":"9.2.10",...,"repoid":"43df2e01f27a1a19"} against build
+// pve-manager/9.2.10/43df2e01f27a1a19.
+const (
+	passwordVerifiedVersion = "9.2.14"
+	passwordVerifiedRepoID  = "a1480fa6b8d899cb"
+	passwordVerifiedBuild   = "pve-manager/" + passwordVerifiedVersion + "/" + passwordVerifiedRepoID
+)
 
 // passwordRealm is the only PVE realm with recorded live evidence for
 // password credentials (docs/PVE_PROBES.md Probe P0: `pve` creation,
@@ -478,6 +492,27 @@ func (b *backend) roleWrite(ctx context.Context, req *logical.Request, d *framew
 		), nil
 	}
 
+	// Step 7c: Password mode — refuse unless the live cluster is the one build
+	// with recorded P0 evidence. Checked here so the operator learns at opt-in
+	// time; creds issuance re-checks (the cluster may be upgraded afterwards).
+	if mode == modePassword {
+		info, versionErr := client.GetVersionInfo(ctx)
+		if versionErr != nil {
+			if errors.Is(versionErr, pveapi.ErrUnauthenticated) {
+				return logical.ErrorResponse("PVE returned 401 on GET /version during role-write — admin token is unauthenticated; check config token_id/token_secret"), nil
+			}
+			return nil, fmt.Errorf("proxmox: verify password-mode PVE build: %w", versionErr)
+		}
+		if info.Version != passwordVerifiedVersion || info.RepoID != passwordVerifiedRepoID {
+			return logical.ErrorResponse(
+				"mode=%q requires verified PVE build %s; this cluster reports version=%q repoid=%q. "+
+					"Password behavior is recorded only on the verified build (docs/PVE_PROBES.md Probe P0); "+
+					"credential issuance refuses any other build",
+				modePassword, passwordVerifiedBuild, info.Version, info.RepoID,
+			), nil
+		}
+	}
+
 	// Step 8: Store role.
 	role := &proxmoxRole{
 		Group:      group,
@@ -505,8 +540,11 @@ func (b *backend) roleWrite(ctx context.Context, req *logical.Request, d *framew
 		resp.AddWarning(fmt.Sprintf(
 			"password mode is verified end to end only on %s; the project's declared target "+
 				"(pve-manager/9.2.10) has no password evidence and P0 remains partial/open. "+
-				"Verify password issuance, authentication, renewal, and revocation on your own "+
-				"cluster before relying on this role (see docs/PVE_PROBES.md)",
+				"Credential issuance re-checks the live build and REFUSES on any other one, so "+
+				"upgrading this cluster will break issuance for this role (renewal and revocation "+
+				"of already-issued leases keep working). Verify password issuance, authentication, "+
+				"renewal, and revocation on your own cluster before relying on this role "+
+				"(see docs/PVE_PROBES.md)",
 			passwordVerifiedBuild,
 		))
 		return resp, nil

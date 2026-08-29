@@ -1,13 +1,14 @@
 // Package proxmox — password generation for password-mode dynamic credentials.
 //
-// Contract locked in docs/IMPLEMENTATION_PLAN.md P1, from the PVE 9.2.10
-// evidence in docs/PVE_PROBES.md Probe P0:
+// Contract locked in docs/IMPLEMENTATION_PLAN.md P1, from the verified
+// pve-manager/9.2.14/a1480fa6b8d899cb evidence in docs/PVE_PROBES.md Probe P0.
+// PVE 9.2.10 has no password evidence:
 //
 //   - Ownership: the ENGINE generates the password. PVE never generates one,
 //     and PUT /access/password (PVE-side rotation) requires a password-
 //     authenticated ticket the engine cannot obtain with API-token auth.
 //   - Entropy source: crypto/rand only, with rejection sampling (no modulo bias).
-//   - Length: passwordLength characters, inside PVE's confirmed 8..64 bound.
+//   - Length: passwordLength characters, inside the verified PVE 8..64 bound.
 //   - Charset: ASCII alphanumerics. Deliberately excludes punctuation so the
 //     value is safe to paste into shells, URLs, and config files without
 //     quoting; the entropy budget below already covers the loss.
@@ -29,7 +30,8 @@ const (
 
 	// passwordLength is the generated password length in characters.
 	// 32 × log2(62) ≈ 190 bits of entropy, well inside PVE's 8..64 limit
-	// (confirmed PVE 9.2.10: 7 rejected, 8 accepted, 64 accepted, 65 rejected).
+	// (pve-manager/9.2.14/a1480fa6b8d899cb: 7 rejected, 8 accepted, 64 accepted,
+	// 65 rejected).
 	passwordLength = 32
 
 	// pvePasswordMinLength and pvePasswordMaxLength are PVE's confirmed

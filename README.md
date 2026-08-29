@@ -596,13 +596,20 @@ credential does.
 
 Operator notes:
 
-- **Password mode is verified only on `pve-manager/9.2.14/a1480fa6b8d899cb`.**
-  The project's declared target is 9.2.10, whose probe evidence predates this
-  feature and contains no password results, and the password P0 task is still
-  partial/open. A password role write returns a warning saying so. Verify
-  issuance, authentication, renewal, and revocation on your own cluster before
-  relying on it — `TestAccPasswordLifecycle` (`VAULT_ACC=1` plus
-  `PVE_PASSWORD_ACC=1`) does exactly that.
+- **Password mode is gated to `pve-manager/9.2.14/a1480fa6b8d899cb`, the only
+  verified build.** The project's declared target is 9.2.10, whose probe evidence
+  predates this feature and contains no password results, and the password P0
+  task is still partial/open. The engine enforces this rather than merely warning:
+  a `mode=password` role write is REFUSED unless `GET /version` reports exactly
+  `version=9.2.14` and `repoid=a1480fa6b8d899cb`, and `creds/:role` re-checks the
+  live build at every issuance and refuses there too (the cluster can be upgraded
+  after the role is written). A role write on the verified build still returns a
+  warning describing the narrow verification record. **Renewal and revocation are
+  NOT gated** — upgrading the cluster breaks new password issuance, but leases
+  already issued keep renewing and revoking normally. Verify issuance,
+  authentication, renewal, and revocation on your own cluster before relying on
+  it — `TestAccPasswordLifecycle` (`VAULT_ACC=1` plus `PVE_PASSWORD_ACC=1`) does
+  exactly that.
 - **`mode=password` requires `realm=pve`.** Role writes for any other realm are
   refused. PVE-realm password behavior is confirmed live
   (`docs/PVE_PROBES.md` Probe P0); PAM password creation failed in the automated
