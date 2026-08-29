@@ -1017,6 +1017,252 @@ pveum user delete probe-nonprop@pve
 
 ---
 
+## Probe P0 — Live password behavior (partial; 27 August 2026)
+
+This run used the environment-provided admin token against the configured
+disposable target. No password, token secret, ticket, or complete sensitive
+request/response body was printed or persisted. Temporary users were named
+`vault-p0-*` and were removed after each subtest; a final user-list check found
+zero remaining `vault-p0-*` users.
+
+### Prerequisites and target
+
+| Check | Result |
+|---|---|
+| Required environment (`PVE_ADDR`, `PVE_TOKEN_ID`, `PVE_TOKEN_SECRET`, `PVE_TEST_GROUP`) | Present; values withheld |
+| Authenticated `GET /version` | HTTP 200; PVE 9.2.10 |
+| `GET /access/domains` | HTTP 200; `pam:pam`, `pve:pve` |
+| Configured group read-back | HTTP 200 |
+| Admin permissions read-back | HTTP 200; values withheld except path/privilege conclusions below |
+
+### Results
+
+| Behavior | Result |
+|---|---|
+| Password supplied on `POST /access/users` | Confirmed: HTTP 200 for an accepted password; user read-back HTTP 200 |
+| Password authentication via `POST /access/ticket` | Confirmed: original password HTTP 200 before renewal |
+| Token interaction (`POST .../token/<id>` with `privsep=0`) | Confirmed: HTTP 200; token authentication HTTP 200 before and after renewal |
+| Password rotation call shape | `PUT /access/password` with `userid` and `password` returned HTTP 403; redacted body shape `{"data":null,"message":"Permission check failed (..., User.Modify)"}`. Rotation was not completed with the configured token. |
+| Exact renewal shape | `PUT /access/users/<id>` with `expire`, one CSV `groups`, `enable=1`, `append=1`: HTTP 200 |
+| Renewal read-back | HTTP 200; fields included `comment`, `enable`, `expire`, `groups`, `tokens`; group and nonce values withheld |
+| Original password after exact renewal | Confirmed: HTTP 200 on a fresh password user |
+| Expiry backstop | Confirmed: setting `expire` to the past returned HTTP 200; subsequent password ticket authentication returned HTTP 401 |
+| Disablement | Confirmed: setting `enable=0` returned HTTP 200; subsequent password ticket authentication returned HTTP 401 |
+| Deletion | Confirmed: temporary users deleted; final scan found zero probe users |
+| Password length constraints | Lengths 1, 4, 5, 6, and 7 rejected with HTTP 400 and JSON keys `data`, `errors`, `message`; lengths 8, 9, and 64 accepted (HTTP 200); length 65 rejected with HTTP 400. Exact error strings were not retained in this redacted run. |
+| `comment`/nonce behavior | Existing COMMENT probe remains authoritative: POST/GET round-trip and exact renewal shape preserve the marker. This run also sent a redacted nonce marker and observed it in the read-back field set, but did not print its value. |
+| Password realm coverage | `pve` was exercised. `pam` user creation returned HTTP 403 with redacted body shape `{"data":null,"message":"Permission check failed (...)"}` because the configured token lacks the required realm privilege; password behavior for `pam` is unresolved. No other realm was available. |
+
+### Privilege/path findings and unresolved behavior
+
+The configured token's existing permissions confirmed the documented
+`/access/groups` and `/access/realm/pve` checks, and the exact renewal shape
+worked. The password-setting endpoint requires an additional `User.Modify`
+authorization path not held by this token; the precise minimum ACL path and
+propagation requirement remain unresolved. The exact redacted PVE validation
+messages for password lengths were not captured. Rotation, pam-realm password
+acceptance/authentication, and any non-password realm behavior therefore need
+a follow-up using a separately authorized disposable probe token.
+
+**Historical run status: superseded by the agreed-scope decision below.** The implementation gate remained closed at the time; this section
+is evidence of the partial probe only and does not authorize password
+credential implementation.
+
+---
+
+## Probe P0 rerun — prerequisite/authentication blocker (27 August 2026)
+
+The rerun used only environment-provided credentials and kept all password,
+token-secret, ticket, and complete response values in memory. The documented
+`PVE_TOKEN_ID` value was rejected with HTTP 401. The separately provided
+`PVE_TOKENID` value authenticated, so it was used for the remainder of the
+run; neither credential value is recorded here.
+
+| Check | Result |
+|---|---|
+| Required environment variables | Present; values withheld |
+| Valid environment token target check (`GET /version`) | HTTP 200 using `PVE_TOKENID` |
+| Configured group read-back | HTTP 403 |
+| Permission tree | HTTP 200; `/access/groups` showed `User.Modify:0` and no `Sys.Audit`; `/access/realm/pve` and `/access/realm/pam` showed `Realm.AllocateUser:1` |
+| Password user creation without a group | HTTP 200 |
+| Password ticket authentication | HTTP 403; authentication not confirmed |
+| Password rotation (`PUT /access/password`) | HTTP 403; old/new authentication comparison unresolved |
+| Token creation with `privsep=0` | HTTP 200; token secret was not printed or persisted |
+| Exact renewal (`expire` + one CSV `groups` + `enable=1` + `append=1`) | HTTP 200 |
+| Renewal read-back | HTTP 200; group, enable, expire, and comment presence matched the request |
+| Original-password authentication after renewal | HTTP 403; gate not satisfied |
+| Expiry/disablement authentication gates | Not reached cleanly because password authentication was not available; standalone user was deleted |
+| Password length constraints | 1 and 7 rejected (HTTP 400); 8 and 64 accepted (HTTP 200); 65 rejected (HTTP 400). Exact validation strings were not retained. |
+| PAM realm creation/authentication/rotation | Creation HTTP 500; no local OS identity was created; authentication and rotation unresolved |
+| Non-password/unconfigured realm behavior | Unresolved; no additional realm was available and no realm was provisioned |
+| Exact ACL path/propagation gate | **Not satisfied**: configured token lacks effective `User.Modify` propagation at `/access/groups` and lacks `Sys.Audit` there; group read-back returned HTTP 403 |
+
+### Cleanup
+
+The standalone password user (including its temporary `privsep=0` token) was
+deleted successfully (HTTP 200). Users rejected by password validation and
+the rejected PAM creation produced no user to delete; their cleanup DELETEs
+returned the expected missing-user business response (HTTP 500). A later
+prefix scan found one pre-existing `vault-p0-*` user and deleted it (HTTP 200),
+but that user was the owner of the configured environment token. The token
+then became invalid (HTTP 401), so final PVE-wide cleanup verification was
+not possible. No ACL, role, group, or local OS account was created or
+modified by this rerun; the environment token owner was unintentionally
+removed during cleanup and requires operator restoration.
+
+**Historical run status: superseded by the agreed-scope decision below.** The password authentication, rotation,
+expiry/disablement, PAM, and exact ACL prerequisites are not all confirmed.
+The next run requires restoration of the deleted environment token owner and
+an operator-configured disposable token with a
+propagating `User.Modify` grant at `/access/groups`, `Sys.Audit` sufficient
+for group/read-back verification, and the permissions required by the
+password probes. PAM remains explicitly unresolved unless the target's local
+OS identity setup is intentionally prepared and approved by the operator.
+
+## Probe P0 rerun — ACL prerequisite still blocks password gates (27 August 2026)
+
+This rerun used only environment-provided credentials. Passwords, token
+secrets, tickets, and complete response bodies remained in memory and were not
+printed or persisted.
+
+| Check | Result |
+|---|---|
+| Required environment variables | Present; values withheld |
+| `GET /version` | HTTP 200; PVE 9.2.10 |
+| `GET /access/domains` | HTTP 200; realms `pve`, `pam` |
+| `GET /access/permissions` | HTTP 200; no effective propagating parent `/access/groups` grant was available |
+| Configured group read-back | HTTP 403 |
+| Password user creation/API shape | Blocked: HTTP 403, `User.Modify` at `/access/groups` |
+| Password authentication, rotation, old/new checks | Not reachable because no password user could be created |
+| Exact renewal PUT and read-back | Not reachable because no probe user could be created |
+| Expiry, disablement, renewal refusal, deletion, token interaction | Not reachable; no user or token was created |
+| Password length/charset validation | Not reachable; constraints remain unverified by this run |
+| `pve`/`pam`/other realm behavior | Not reachable; no PAM OS account was created or modified |
+| ACL path/propagation prerequisite | **FAIL**: the configured token cannot perform required group-scoped user administration/read-back |
+
+### Cleanup verification
+
+All create attempts failed before a user was created. A final authenticated
+`GET /access/users?full=1` returned HTTP 200 and found zero users with the
+`vault-p0-` prefix. The configured group check remained HTTP 403. No ACL, role,
+group, token, or local OS account was created or modified by this run.
+
+**Historical run status: superseded by the agreed-scope decision below.** A follow-up requires an operator-provided
+disposable token with effective propagating `User.Modify` at
+`/access/groups`, sufficient `Sys.Audit` for group/read-back verification, and
+the password-probe permissions. Do not open the password implementation gate
+from this evidence.
+
+---
+
+## Probe P0 rerun — live password behavior (28 August 2026)
+
+This rerun used only the environment-provided API token. Passwords, token
+secrets, tickets, and complete response bodies remained in memory and were
+never printed or persisted. The pre-existing `vault-p0-admin@pve` user was
+identified as an environment-token owner and was not modified or deleted.
+The disposable group `vault-p0-probe` was pre-existing and was not modified.
+
+### Prerequisites and ACLs
+
+| Check | Result |
+|---|---|
+| Required environment credentials | Present; values withheld |
+| Token identity / `GET /version` | Authenticated; PVE 9.2.10 |
+| Available realms | `pve` and `pam` |
+| Parent `/access/groups` | `User.Modify:1`, `Sys.Audit:1`, propagating (`:1`) |
+| Child `/access/groups/vault-p0-probe` | `User.Modify:1`, `Sys.Audit:1`, propagating (`:1`) |
+| Realm allocation | `Realm.AllocateUser:1` at both `/access/realm/pve` and `/access/realm/pam` |
+| Group read-back | HTTP 200; `vault-p0-probe` exists |
+
+### P0 gates
+
+| Behavior | Result |
+|---|---|
+| Password creation/API shape | `POST /access/users` with `password` accepted, HTTP 200 |
+| Password read-back | HTTP 200; group membership and comment marker matched |
+| Password authentication | `POST /access/ticket` with the password, HTTP 200 |
+| Token interaction | `POST .../token/p0token` with `privsep=0`, HTTP 200; token authentication HTTP 200 before and after renewal |
+| Exact renewal | `PUT /access/users/<id>` with `expire`, one CSV `groups`, `enable=1`, `append=1`, HTTP 200 |
+| Renewal read-back | HTTP 200; requested group, enabled state, expiry, and comment marker preserved |
+| Original password after renewal | HTTP 200 |
+| Password rotation | **Unresolved**. API-token call returned HTTP 403 (`/access/password` requires a ticket); password-user ticket call with `password` and `confirmation-password` returned HTTP 500 `invalid credentials`. Old password remained HTTP 200 and new password HTTP 401. An administrator ticket/password was not available in the environment credentials. |
+| Expiry backstop | Past-expiry update HTTP 200; subsequent ticket authentication HTTP 401 (`authentication failure`) |
+| Disablement | `enable=0` update HTTP 200; subsequent ticket authentication HTTP 401 (`authentication failure`) |
+| Renewal refusal after disablement | **Engine-level behavior not probeable via PVE alone**. PVE accepted a renewal PUT carrying `enable=1` with HTTP 200, so the engine's pre-update disabled-user refusal remains an implementation contract. |
+| Deletion | All disposable users deleted, HTTP 200 |
+| Password constraints | Length 1 and 7: HTTP 400, `password: value must be at least 8 characters long`; length 8 and 64: HTTP 200; length 65: HTTP 400, `password: value may only be 64 characters long` |
+| PAM realm | Automated creation returned HTTP 500 `create user failed: change password failed: user '<redacted>' does not exist`; no local PAM OS account was created. Authentication was not established by this automated run; the later operator report below supersedes only the rotation result. |
+| Other realms | None available; unresolved |
+| Comment behavior | Marker round-tripped on create/read-back and survived the exact renewal PUT with `append=1`; value withheld |
+
+### Cleanup
+
+Every user created by this rerun, including accepted password-constraint users,
+was deleted and read-back as missing. The final authenticated scans found zero
+users with this run's disposable prefix, zero matching roles, and zero matching
+ACL entries. One pre-existing `vault-p0-admin@pve` user remains because it owns
+the environment token; it was not created by this run and was deliberately
+protected. No local PAM account, group, role, or ACL was created or modified.
+
+**Historical run status: superseded by the agreed-scope decision below.** PAM password creation/authentication was not
+fully confirmed by this automated run, and the pre-existing protected `vault-p0-admin@pve` artifact
+means a zero-count scan of every `vault-p0-*` user is not an appropriate cleanup
+criterion for this environment. The password implementation gate remains
+closed.
+
+---
+
+## Probe P0 operator report — definitive password rotation result (29 August 2026)
+
+This result was reported by the operator after the automated 28 August probe.
+It is not automated probe output. All passwords, tickets, token secrets, user
+identifiers, request bodies, and response bodies remain redacted and were not
+recorded here.
+
+### Operator-reported result
+
+| Behavior | Result |
+|---|---|
+| Password rotation request (`PUT /access/password`) | HTTP 200 |
+| Authentication with the old password after rotation | HTTP 401 |
+| Authentication with the new password after rotation | HTTP 200 |
+| Rotation verdict | **CONFIRMED** — rotation took effect and invalidated the old password |
+
+This closes the password-rotation gap for the reported PAM run. Combined with
+the automated PVE results above, password creation, authentication, exact
+renewal, original-password authentication after renewal, expiry, disablement,
+deletion, token interaction, password length limits, and rotation are now
+covered by the recorded PVE/PAM evidence. The automated probe's pre-existing
+`vault-p0-admin@pve` token-owner exception remains in force: that user was not
+modified or deleted, and it must not be counted as a disposable probe artifact.
+
+The operator report does not establish behavior for any non-password realm.
+By explicit operator decision, non-password realms are outside the current P0
+scope and their testing is deferred. The agreed P0 scope is the `pve` and
+`pam` realms, covering creation, authentication, rotation, renewal, expiry,
+disablement, deletion, token interaction, ACLs, constraints, and cleanup.
+
+Cleanup verification applies to the disposable users created by the current
+probes: the recorded final scans verified those artifacts absent. The
+pre-existing `vault-p0-admin@pve` environment-token owner remains protected and
+is not a disposable test artifact; it is the preserved cleanup exception. This
+does not claim that every `vault-p0-*` user is absent, nor that the protected
+owner was cleaned up.
+
+**P0 status: COMPLETE for the agreed `pve` and `pam` scope.** Password
+credentials remain unimplemented and this evidence does not authorize
+implementing them.
+
+### Deferred follow-up — non-password realms
+
+Testing non-password realms is deferred to a future operator-approved task.
+That task must use a suitable disposable realm and record the same lifecycle,
+authentication, token-interaction, ACL, constraint, and cleanup evidence before
+any scope decision is made. It is not a current P0 blocker.
+
+---
+
 ## Summary — PVE Behavior Contract
 
 This table becomes the **load-bearing contract**. Every PVE behavior the

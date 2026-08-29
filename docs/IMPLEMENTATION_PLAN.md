@@ -1629,22 +1629,27 @@ engine therefore continues to send explicit `append=1` with `expire` +
 Password credentials are deliberately not implemented; the engine currently issues
 only PVE API tokens. Do not make token-only production adoption depend on this work,
 add password fields, or alter the token lifecycle as part of the release gates.
-Complete the following tasks in order. **P0 is pending, and all implementation tasks
-are gated until its live PVE 9.2.10 evidence is recorded.**
+Complete the following tasks in order. **P0 is complete for the agreed `pve` and
+`pam` realm scope only.** Password credentials remain unimplemented; this P0
+decision does not authorize adding password credentials or opening the later
+password implementation tasks automatically.
 
-- [ ] **P0 — Live PVE password behavior probe (pre-implementation)**
+- [x] **P0 — Live PVE password behavior probe (pre-implementation; agreed scope complete)**
   - **Files/scope**: `docs/PVE_PROBES.md`, disposable PVE 9.2.10 target, probe
     notes/scripts as appropriate; no application code.
   - **Dependencies**: operator-provided disposable PVE 9.2.10 cluster and
     credentials; none of the implementation tasks may start before this task is
     complete.
+  - **Agreed scope**: `pve` and `pam` realms only. Within those realms, the P0
+    evidence covers password creation, authentication, rotation, renewal,
+    expiry, disablement, deletion, token interaction, ACLs, password
+    constraints, and cleanup. The P0 decision is limited to this scope.
   - **Checklist**: verify password user creation and authentication; determine
     password rotation/update behavior; verify expiry, disablement, deletion, and
     interaction with token credentials and the user-level `expire` backstop. Exercise
     the exact engine renewal shape `expire + groups + enable + append=1`, read the
-    user back, and authenticate with the original password afterward. Probe which
-    realm types accept password credentials (including the configured/default `pve`
-    realm and non-password realms), recording the exact HTTP status and redacted body
+    user back, and authenticate with the original password afterward. Probe the
+     agreed `pve` and `pam` realms, recording the exact HTTP status and redacted body
     for every failure. Probe the privileges required to create/set a password,
     recording the exact ACL path, privilege, and propagation flag; compare them with
     the existing `/access/groups` and `/access/realm/<realm>` checks. Record PVE
@@ -1654,8 +1659,27 @@ are gated until its live PVE 9.2.10 evidence is recorded.**
     ordering and response/error behavior. Capture exact status/body behavior
     throughout and redact all password values from evidence.
   - **Acceptance**: reproducible probe evidence is recorded in `docs/PVE_PROBES.md`
-    with no password values; unresolved behavior is explicitly listed; implementation
-    gate is opened only after review.
+    with no password values; the agreed `pve` and `pam` scope is complete; deferred
+    behavior is explicitly listed; password implementation remains a separate future
+    decision.
+  - **Latest validation (29 August 2026)**: P0 is complete for the agreed `pve`
+    and `pam` scope. The operator-reported rotation result is definitive for the
+    reported PAM run:
+    rotation returned HTTP 200, old-password authentication returned HTTP 401,
+    and new-password authentication returned HTTP 200. Together with the
+    automated PVE/PAM evidence, this closes the rotation gap and confirms the
+    disposable-user cleanup was verified for the current probe artifacts, subject
+    to the documented pre-existing environment-token-owner exception. Non-password
+    realm behavior is intentionally outside current P0 and deferred; it is not an
+    incomplete P0 criterion. See the fully redacted, explicitly attributed evidence
+    in `docs/PVE_PROBES.md`.
+
+  - **Deferred follow-up — non-password realms**: create an operator-approved,
+    disposable test realm and record its password-credential behavior, including
+    creation, authentication, rotation, renewal, expiry, disablement, deletion,
+    token interaction, ACLs, constraints, and cleanup. This follow-up must not add
+    password credentials to the engine unless separately approved and implemented
+    through the later password work items.
 
 - [ ] **P1 — Contract and documentation finalization (pre-implementation)**
   - **Files/scope**: `docs/IMPLEMENTATION_PLAN.md`, `docs/ARCHITECTURE.md`,
