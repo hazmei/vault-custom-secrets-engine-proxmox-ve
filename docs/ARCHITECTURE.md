@@ -196,6 +196,14 @@ An absent or empty stored `mode` normalizes to `token` in `getRole`, so roles
 written before the field existed — and every lease already issued from them —
 behave exactly as before.
 
+**Verification scope**: password mode has been exercised end to end only on
+`pve-manager/9.2.14/a1480fa6b8d899cb`. The declared target elsewhere in this
+document is `9.2.10/43df2e01f27a1a19`, whose probe evidence predates the feature
+and contains no password results, and the password P0 task remains
+partial/open. A `mode=password` role write returns a warning naming the verified
+build so operators do not infer 9.2.10 coverage. Token mode is verified on both
+builds.
+
 `mode=password` is accepted **only for the `pve` realm**. PVE-realm password
 creation, authentication, exact-shape renewal, expiry, disablement, and deletion
 are confirmed live (`docs/PVE_PROBES.md` Probe P0); PAM password creation FAILED

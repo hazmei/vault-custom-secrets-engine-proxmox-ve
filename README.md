@@ -6,7 +6,10 @@ A HashiCorp Vault custom secrets engine plugin that issues **dynamic, per-lease 
 
 This secrets engine implements Vault's dynamic secrets pattern for Proxmox VE. Each credential lease creates a dedicated, throwaway Proxmox user, adds it to an operator-pre-created PVE group (which the operator has already bound to the desired ACL role(s)), and mints an API token bound to that user. On revocation, a single delete operation removes the user, which cascades to clean up the token, group memberships, and all ACL entries. Orphaned credentials created mid-provision (e.g., from Vault process death or failover) are eventually swept via Vault's Write-Ahead Log (WAL) rollback mechanism.
 
-**Target Platform**: Proxmox VE 9.2.10
+**Target Platform**: Proxmox VE 9.2.10. **Password mode is verified only on
+`pve-manager/9.2.14/a1480fa6b8d899cb`** — it has no evidence on the 9.2.10
+target and its P0 probe task remains partial/open. Token mode is verified on
+both builds.
 
 ## Project Status
 
@@ -593,6 +596,13 @@ credential does.
 
 Operator notes:
 
+- **Password mode is verified only on `pve-manager/9.2.14/a1480fa6b8d899cb`.**
+  The project's declared target is 9.2.10, whose probe evidence predates this
+  feature and contains no password results, and the password P0 task is still
+  partial/open. A password role write returns a warning saying so. Verify
+  issuance, authentication, renewal, and revocation on your own cluster before
+  relying on it — `TestAccPasswordLifecycle` (`VAULT_ACC=1` plus
+  `PVE_PASSWORD_ACC=1`) does exactly that.
 - **`mode=password` requires `realm=pve`.** Role writes for any other realm are
   refused. PVE-realm password behavior is confirmed live
   (`docs/PVE_PROBES.md` Probe P0); PAM password creation failed in the automated

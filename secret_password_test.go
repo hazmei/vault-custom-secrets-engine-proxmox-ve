@@ -176,6 +176,41 @@ func TestRoleWrite_ModeValidation(t *testing.T) {
 	}
 }
 
+// TestRoleWrite_PasswordModeWarnsAboutVerifiedBuild verifies that opting into
+// password mode surfaces the narrower verification record at the point of
+// opt-in: it is verified end to end only on passwordVerifiedBuild, while the
+// project's declared target (9.2.10) has no password evidence.
+func TestRoleWrite_PasswordModeWarnsAboutVerifiedBuild(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	b, storage := setupBackendForCreds(t, "seed", credRoleData(), nil)
+
+	resp, err := writeRole(ctx, b, storage, "pwrole", passwordRoleData())
+	if err != nil {
+		t.Fatalf("writeRole: %v", err)
+	}
+	if resp == nil || len(resp.Warnings) == 0 {
+		t.Fatal("password-mode role write must return a verification-scope warning")
+	}
+	joined := strings.Join(resp.Warnings, " ")
+	if !strings.Contains(joined, passwordVerifiedBuild) {
+		t.Errorf("warning must name the verified build %q; got %q", passwordVerifiedBuild, joined)
+	}
+	if !strings.Contains(joined, "9.2.10") {
+		t.Errorf("warning must name the unverified declared target; got %q", joined)
+	}
+
+	// Token mode must stay warning-free.
+	tokResp, err := writeRole(ctx, b, storage, "tokrole", credRoleData())
+	if err != nil {
+		t.Fatalf("writeRole token mode: %v", err)
+	}
+	if tokResp != nil && len(tokResp.Warnings) > 0 {
+		t.Errorf("token-mode role write must not warn; got %v", tokResp.Warnings)
+	}
+}
+
 // TestGetRole_LegacyRoleWithoutModeIsToken verifies backward compatibility:
 // a role persisted before the mode field existed decodes with an empty mode and
 // must normalize to token so its behavior is unchanged.

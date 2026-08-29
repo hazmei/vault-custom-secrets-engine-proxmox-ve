@@ -1653,6 +1653,13 @@ pass through a real `vault server` with `-dev-plugin-dir` also completed. See
 `docs/PVE_PROBES.md` — "Probe P0 verification run ... on PVE 9.2.14". The shipped scope is bounded by the P0 evidence that
 actually exists (`docs/PVE_PROBES.md` Probe P0):
 
+- **Verified build scope**: password mode is verified end to end ONLY on
+  `pve-manager/9.2.14/a1480fa6b8d899cb`. The declared target
+  `9.2.10/43df2e01f27a1a19` has NO password evidence — its probes predate the
+  feature — and P0 is still partial/open. Role writes with `mode=password`
+  return a warning naming the verified build. Recording equivalent 9.2.10
+  evidence, or dropping 9.2.10 as a supported build for password mode, remains
+  an open decision.
 - **In scope and implemented**: `mode=password` roles on the `pve` realm;
   engine-generated password supplied on `POST /access/users` (single call);
   no API token minted; renewal extends the PVE `expire` only; revocation

@@ -120,6 +120,15 @@ const (
 	modePassword = "password"
 )
 
+// passwordVerifiedBuild is the ONLY PVE build on which password mode has been
+// verified end to end (docs/PVE_PROBES.md, "Probe P0 verification run ... on
+// PVE 9.2.14"). The project's declared target elsewhere is
+// pve-manager/9.2.10/43df2e01f27a1a19, and password behavior was NOT verified
+// there — the 9.2.10 probes predate the feature and P0 remains partial/open.
+// Password roles are therefore accepted but warn, so an operator on any other
+// build knows the credential path is unverified for their cluster.
+const passwordVerifiedBuild = "pve-manager/9.2.14/a1480fa6b8d899cb"
+
 // passwordRealm is the only PVE realm with recorded live evidence for
 // password credentials (docs/PVE_PROBES.md Probe P0: `pve` creation,
 // authentication, renewal, expiry, disablement, and deletion are confirmed;
@@ -485,6 +494,22 @@ func (b *backend) roleWrite(ctx context.Context, req *logical.Request, d *framew
 	}
 	if err := req.Storage.Put(ctx, entry); err != nil {
 		return nil, fmt.Errorf("proxmox: store role %q: %w", name, err)
+	}
+
+	// Password mode carries a narrower verification record than token mode:
+	// it has been exercised end to end only on passwordVerifiedBuild, while the
+	// project's declared target and all earlier probe evidence are 9.2.10.
+	// Surface that at the point the operator opts in, not only in the docs.
+	if mode == modePassword {
+		resp := &logical.Response{}
+		resp.AddWarning(fmt.Sprintf(
+			"password mode is verified end to end only on %s; the project's declared target "+
+				"(pve-manager/9.2.10) has no password evidence and P0 remains partial/open. "+
+				"Verify password issuance, authentication, renewal, and revocation on your own "+
+				"cluster before relying on this role (see docs/PVE_PROBES.md)",
+			passwordVerifiedBuild,
+		))
+		return resp, nil
 	}
 
 	return nil, nil
