@@ -57,7 +57,7 @@ func TestCredsRead_PasswordModeRequiresVerifiedBuild(t *testing.T) {
 		{name: "different version", version: pveapi.VersionInfo{Version: "9.2.10", RepoID: "43df2e01f27a1a19"}},
 		{name: "same version different repoid", version: pveapi.VersionInfo{Version: "9.2.14", RepoID: "different-repoid"}},
 		{name: "missing repoid", version: pveapi.VersionInfo{Version: "9.2.14"}},
-		{name: "malformed metadata", versionErr: errors.New("pveapi: GetVersionInfo: parse response")},
+		{name: "malformed metadata", versionErr: errors.New("pveapi: parse GET /version response: unexpected end of JSON input")},
 	}
 
 	for _, tc := range tests {

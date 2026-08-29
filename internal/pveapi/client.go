@@ -315,9 +315,7 @@ func classifyPVEError(status int, body []byte) error {
 func (c *httpClient) GetVersion(ctx context.Context) (string, error) {
 	info, err := c.GetVersionInfo(ctx)
 	if err != nil {
-		// Re-wrap under this entry point's own name: GetVersionInfo's wrap would
-		// otherwise name a method the caller never invoked.
-		return "", fmt.Errorf("pveapi: GetVersion: %w", err)
+		return "", err
 	}
 	return info.Version, nil
 }
@@ -325,15 +323,21 @@ func (c *httpClient) GetVersion(ctx context.Context) (string, error) {
 // GetVersionInfo calls GET /version and returns the exact build identity.
 // Missing or malformed fields are left for callers that require an exact
 // verified-build match to reject.
+//
+// Neither version method wraps its error with its own name: doRequest already
+// reports "pveapi: GET /version returned ...", naming the package and the
+// endpoint, and every call site supplies its own context. A method-name wrap
+// here would either name the wrong method (GetVersion delegates) or stack two
+// of them on one error.
 func (c *httpClient) GetVersionInfo(ctx context.Context) (VersionInfo, error) {
 	body, _, err := c.doRequest(ctx, http.MethodGet, "/version", nil, false)
 	if err != nil {
-		return VersionInfo{}, fmt.Errorf("pveapi: GetVersionInfo: %w", err)
+		return VersionInfo{}, err
 	}
 
 	var resp versionResponse
 	if err := json.Unmarshal(body, &resp); err != nil {
-		return VersionInfo{}, fmt.Errorf("pveapi: GetVersionInfo: parse response: %w", err)
+		return VersionInfo{}, fmt.Errorf("pveapi: parse GET /version response: %w", err)
 	}
 
 	return VersionInfo{Version: resp.Data.Version, RepoID: resp.Data.RepoID}, nil
