@@ -44,18 +44,18 @@ digest and the catalog entry and mount persisted across a Vault restart. That
 run covers one node only; multi-node artifact distribution, standby-to-active
 forwarding, failover, and cross-node restart recovery remain unverified, so do
 not describe the project as production-ready. Optional insufficient-privilege, direct-ACL,
-negative-authorization, and password-lifecycle canaries may be skipped only when their
-documented prerequisites are unset, including `VAULT_ACC=1`, `PVE_PASSWORD_ACC=1`, and the
-exact verified `pve-manager/9.2.14/a1480fa6b8d899cb` build for the password-lifecycle canary;
-such skips are not completed tests.
+and negative-authorization canaries may be skipped only when their documented prerequisites
+are unset. The opt-in `TestAccPasswordLifecycle` additionally skips when the target is not
+the verified `pve-manager/9.2.14/a1480fa6b8d899cb` build — a property of the cluster, not an
+operator choice. Neither kind of skip is a completed test.
 
 Additional recorded validation (2026-08-29) against a disposable
 `pve-manager/9.2.14/a1480fa6b8d899cb` target — a DIFFERENT build from the
 9.2.10 record above: the full required `make testacc` suite passed, and the
 opt-in `TestAccPasswordLifecycle` passed (password issuance, ticket
 authentication, no API token minted, renewal preserving the original password,
-expiry/disablement 401, deletion on revoke). The same three optional canaries
-skipped. Password mode is implemented for the `pve` realm only, with no
+expiry/disablement 401, deletion on revoke). The same three optional authorization
+canaries skipped. Password mode is implemented for the `pve` realm only, with no
 rotation, and is GATED to that verified build: opting a role into password mode
 and every credential issuance both check `GET /version` (`version`+`repoid`) and
 refuse on any other build; editing an existing password role, and renewal and
