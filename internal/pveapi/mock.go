@@ -123,17 +123,17 @@ func (m *MockClient) DeleteUserCalls() []string {
 
 // GetVersion implements Client.
 func (m *MockClient) GetVersion(ctx context.Context) (string, error) {
-	m.log("GetVersion")
 	if m.GetVersionFn != nil {
+		m.log("GetVersion")
 		return m.GetVersionFn(ctx)
 	}
-	// Mirror the real client: GetVersion is GetVersionInfo's version field, so a
-	// test that stubs only GetVersionInfoFn sees it here too.
-	if m.GetVersionInfoFn != nil {
-		info, err := m.GetVersionInfoFn(ctx)
-		return info.Version, err
-	}
-	return "9.2.10", nil
+	// Delegate through the METHOD, exactly as the real client does, so the call
+	// log records the GetVersionInfo the real call graph performs. Reaching for
+	// GetVersionInfoFn directly here would skip that log entry and let the mock
+	// disagree with production about which calls happened.
+	m.log("GetVersion")
+	info, err := m.GetVersionInfo(ctx)
+	return info.Version, err
 }
 
 // GetVersionInfo implements Client.

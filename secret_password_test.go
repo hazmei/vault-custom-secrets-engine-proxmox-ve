@@ -52,11 +52,20 @@ func TestCredsRead_PasswordModeRequiresVerifiedBuild(t *testing.T) {
 		version     pveapi.VersionInfo
 		versionErr  error
 		wantSuccess bool
+		// wantErrResponse demands a 400-class logical.ErrorResponse (nil Go
+		// error): the operator-fixable cases, as opposed to an engine fault.
+		wantErrResponse bool
+		wantMsg         string
 	}{
 		{name: "exact match", version: verifiedPasswordVersion(), wantSuccess: true},
-		{name: "different version", version: pveapi.VersionInfo{Version: "9.2.10", RepoID: "43df2e01f27a1a19"}},
-		{name: "same version different repoid", version: pveapi.VersionInfo{Version: "9.2.14", RepoID: "different-repoid"}},
-		{name: "missing repoid", version: pveapi.VersionInfo{Version: "9.2.14"}},
+		{name: "different version", version: pveapi.VersionInfo{Version: "9.2.10", RepoID: "43df2e01f27a1a19"}, wantErrResponse: true, wantMsg: passwordVerifiedBuild},
+		{name: "same version different repoid", version: pveapi.VersionInfo{Version: "9.2.14", RepoID: "different-repoid"}, wantErrResponse: true, wantMsg: passwordVerifiedBuild},
+		{name: "missing repoid", version: pveapi.VersionInfo{Version: "9.2.14"}, wantErrResponse: true, wantMsg: passwordVerifiedBuild},
+		// 401/403 are operator-fixable access problems: a dead admin token, or a
+		// proxy/WAF in front of a cluster whose /version needs no privilege.
+		{name: "unauthenticated", versionErr: pveapi.ErrUnauthenticated, wantErrResponse: true, wantMsg: "401"},
+		{name: "forbidden", versionErr: pveapi.ErrForbidden, wantErrResponse: true, wantMsg: "403"},
+		// Anything else is an engine/transport fault and stays a returned error.
 		{name: "malformed metadata", versionErr: errors.New("pveapi: parse GET /version response: unexpected end of JSON input")},
 	}
 
@@ -84,6 +93,16 @@ func TestCredsRead_PasswordModeRequiresVerifiedBuild(t *testing.T) {
 			}
 			if err == nil && (resp == nil || !resp.IsError()) {
 				t.Fatal("unverified or malformed build must reject password issuance")
+			}
+			if tc.wantErrResponse {
+				if err != nil {
+					t.Fatalf("operator-fixable condition must be a 400-class ErrorResponse, not a returned error: %v", err)
+				}
+				if !strings.Contains(resp.Error().Error(), tc.wantMsg) {
+					t.Errorf("response %q does not mention %q", resp.Error(), tc.wantMsg)
+				}
+			} else if err == nil {
+				t.Error("a transport/decode fault must surface as a returned error")
 			}
 			if mc.HasCall("CreateUser") {
 				t.Error("password build rejection must occur before CreateUser")
@@ -781,12 +800,18 @@ func TestCredsRead_TokenModeSkipsBuildGate(t *testing.T) {
 		mc = m
 	})
 
+	// Scope the assertion to issuance. Config write legitimately calls
+	// GetVersion for its reachability check, which reaches GetVersionInfo in the
+	// real client and now in the mock too, so a session-wide assertion would
+	// pin the mock's bookkeeping rather than the behavior this test names.
+	before := len(mc.CallsFor("GetVersionInfo"))
+
 	resp, err := readCreds(ctx, b, storage, "tokrole")
 	if err != nil || resp == nil || resp.IsError() {
 		t.Fatalf("token issuance: resp=%#v err=%v", resp, err)
 	}
-	if mc.HasCall("GetVersionInfo") {
-		t.Error("token mode must not call GetVersionInfo")
+	if after := len(mc.CallsFor("GetVersionInfo")); after != before {
+		t.Errorf("token issuance must spend no /version round trip; GetVersionInfo calls %d → %d", before, after)
 	}
 }
 
@@ -839,5 +864,55 @@ func TestRoleWrite_PasswordRoleEditableAfterUpgrade(t *testing.T) {
 	}
 	if mc.HasCall("CreateUser") {
 		t.Error("password build rejection must occur before CreateUser")
+	}
+}
+
+// TestRoleWrite_PasswordModeVersionErrorClassification pins the typed branches
+// on the role-write gate's GET /version call: 401 and 403 are operator-fixable
+// access problems and must surface as 400-class responses with guidance, while
+// anything else is an engine fault and stays a returned error. Without this the
+// branches can be deleted with the suite still green.
+func TestRoleWrite_PasswordModeVersionErrorClassification(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	tests := []struct {
+		name            string
+		versionErr      error
+		wantErrResponse bool
+		wantMsg         string
+	}{
+		{name: "unauthenticated", versionErr: pveapi.ErrUnauthenticated, wantErrResponse: true, wantMsg: "401"},
+		{name: "forbidden", versionErr: pveapi.ErrForbidden, wantErrResponse: true, wantMsg: "403"},
+		{name: "transport fault", versionErr: errors.New("dial tcp: connection refused")},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var mc *pveapi.MockClient
+			b, storage := setupBackendForCreds(t, "seed", credRoleData(), func(m *pveapi.MockClient) {
+				mc = m
+			})
+			mc.GetVersionInfoFn = func(_ context.Context) (pveapi.VersionInfo, error) {
+				return pveapi.VersionInfo{}, tc.versionErr
+			}
+
+			resp, err := writeRole(ctx, b, storage, "pwrole", passwordRoleData())
+			if !tc.wantErrResponse {
+				if err == nil {
+					t.Fatalf("a transport fault must surface as a returned error; got resp=%#v", resp)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("operator-fixable condition must be a 400-class ErrorResponse, not a returned error: %v", err)
+			}
+			if resp == nil || !resp.IsError() {
+				t.Fatalf("expected an error response; got %#v", resp)
+			}
+			if !strings.Contains(resp.Error().Error(), tc.wantMsg) {
+				t.Errorf("response %q does not mention %q", resp.Error(), tc.wantMsg)
+			}
+		})
 	}
 }
