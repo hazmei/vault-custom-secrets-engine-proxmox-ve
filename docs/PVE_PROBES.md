@@ -1374,6 +1374,8 @@ Summary of load-bearing findings that MUST shape the implementation:
 See the per-probe tables above for evidence. These findings supersede the corresponding
 "confirmed on PVE 9.2.10" annotations in ARCHITECTURE.md where they conflict.
 
+### Password-credential P0 status — PARTIAL/OPEN
+
 The distinct password-credential P0 remains PARTIAL/OPEN: PAM creation and
 most PAM lifecycle behavior are unresolved, the operator password-rotation
 report is unreproduced, and the engine's API-token-only authentication cannot
