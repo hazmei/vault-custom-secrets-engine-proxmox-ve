@@ -164,6 +164,15 @@ func (b *backend) handleCredsRead(ctx context.Context, req *logical.Request, d *
 	if passwordMode {
 		version, versionErr := client.GetVersionInfo(ctx)
 		if versionErr != nil {
+			// 401/403 are operator-fixable access problems, not engine faults.
+			// GET /version needs no privilege on PVE itself, but a reverse proxy
+			// or WAF in front of the cluster returns 403 readily.
+			if errors.Is(versionErr, pveapi.ErrUnauthenticated) {
+				return logical.ErrorResponse("PVE returned 401 on GET /version during password-mode issuance — admin token is unauthenticated; check config token_id/token_secret"), nil
+			}
+			if errors.Is(versionErr, pveapi.ErrForbidden) {
+				return logical.ErrorResponse("PVE returned 403 on GET /version during password-mode issuance — /version needs no PVE privilege, so check for a proxy or WAF in front of the cluster"), nil
+			}
 			return nil, fmt.Errorf("proxmox: creds/%s: verify password-mode PVE build: %w", roleName, versionErr)
 		}
 		if version.Version != passwordVerifiedVersion || version.RepoID != passwordVerifiedRepoID {

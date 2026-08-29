@@ -600,13 +600,15 @@ Operator notes:
   verified build.** The project's declared target is 9.2.10, whose probe evidence
   predates this feature and contains no password results, and the password P0
   task is still partial/open. The engine enforces this rather than merely warning:
-  a `mode=password` role write is REFUSED unless `GET /version` reports exactly
+  OPTING IN to `mode=password` is REFUSED unless `GET /version` reports exactly
   `version=9.2.14` and `repoid=a1480fa6b8d899cb`, and `creds/:role` re-checks the
   live build at every issuance and refuses there too (the cluster can be upgraded
   after the role is written). A role write on the verified build still returns a
-  warning describing the narrow verification record. **Renewal and revocation are
-  NOT gated** — upgrading the cluster breaks new password issuance, but leases
-  already issued keep renewing and revoking normally. Verify issuance,
+  warning describing the narrow verification record. **Editing an existing
+  password role, renewal, and revocation are NOT gated** — upgrading the cluster
+  breaks new password issuance and new opt-ins, but leases already issued keep
+  renewing and revoking, and you can still shrink a `ttl`, repoint a `group`, or
+  otherwise wind an existing password role down. Verify issuance,
   authentication, renewal, and revocation on your own cluster before relying on
   it — `TestAccPasswordLifecycle` (`VAULT_ACC=1` plus `PVE_PASSWORD_ACC=1`) does
   exactly that.

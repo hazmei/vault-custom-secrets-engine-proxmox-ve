@@ -315,7 +315,9 @@ func classifyPVEError(status int, body []byte) error {
 func (c *httpClient) GetVersion(ctx context.Context) (string, error) {
 	info, err := c.GetVersionInfo(ctx)
 	if err != nil {
-		return "", err
+		// Re-wrap under this entry point's own name: GetVersionInfo's wrap would
+		// otherwise name a method the caller never invoked.
+		return "", fmt.Errorf("pveapi: GetVersion: %w", err)
 	}
 	return info.Version, nil
 }

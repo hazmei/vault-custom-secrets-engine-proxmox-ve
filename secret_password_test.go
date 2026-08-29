@@ -781,3 +781,55 @@ func TestCredsRead_TokenModeSkipsBuildGate(t *testing.T) {
 		t.Error("token mode must not call GetVersionInfo")
 	}
 }
+
+// TestRoleWrite_PasswordRoleEditableAfterUpgrade covers the scope of the
+// write-time gate: it fires on the opt-in transition only. An operator whose
+// cluster moved off the verified build must still be able to edit an existing
+// password role — shrinking a ttl or repointing a group is how they wind it
+// down once issuance is refused.
+func TestRoleWrite_PasswordRoleEditableAfterUpgrade(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	var mc *pveapi.MockClient
+	b, storage := setupBackendForCreds(t, "pwrole", passwordRoleData(), func(m *pveapi.MockClient) {
+		mc = m
+		m.GetVersionInfoFn = func(_ context.Context) (pveapi.VersionInfo, error) {
+			return verifiedPasswordVersion(), nil
+		}
+	})
+
+	// The cluster is upgraded off the verified build.
+	mc.GetVersionInfoFn = func(_ context.Context) (pveapi.VersionInfo, error) {
+		return pveapi.VersionInfo{Version: "9.2.15", RepoID: "deadbeefdeadbeef"}, nil
+	}
+
+	// A ttl-only edit inherits mode=password from storage and must still apply.
+	resp, err := writeRole(ctx, b, storage, "pwrole", map[string]interface{}{
+		"group": "vault-vm-admins",
+		"ttl":   60,
+	})
+	if err != nil {
+		t.Fatalf("writeRole: %v", err)
+	}
+	if resp != nil && resp.IsError() {
+		t.Fatalf("editing an existing password role must not be gated: %s", resp.Error())
+	}
+
+	role, err := getRole(ctx, storage, "pwrole")
+	if err != nil {
+		t.Fatalf("getRole: %v", err)
+	}
+	if role.Mode != modePassword || role.TTL != 60 {
+		t.Fatalf("edit not applied: mode=%q ttl=%d", role.Mode, role.TTL)
+	}
+
+	// Issuance stays gated — that is the check protecting the credential path.
+	credResp, err := readCreds(ctx, b, storage, "pwrole")
+	if err == nil && (credResp == nil || !credResp.IsError()) {
+		t.Fatal("issuance on an unverified build must still be refused")
+	}
+	if mc.HasCall("CreateUser") {
+		t.Error("password build rejection must occur before CreateUser")
+	}
+}

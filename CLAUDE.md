@@ -54,9 +54,10 @@ opt-in `TestAccPasswordLifecycle` passed (password issuance, ticket
 authentication, no API token minted, renewal preserving the original password,
 expiry/disablement 401, deletion on revoke). The same three optional canaries
 skipped. Password mode is implemented for the `pve` realm only, with no
-rotation, and is GATED to that verified build: role write and every credential
-issuance both check `GET /version` (`version`+`repoid`) and refuse on any other
-build; renewal and revocation of already-issued password leases are not gated.
+rotation, and is GATED to that verified build: opting a role into password mode
+and every credential issuance both check `GET /version` (`version`+`repoid`) and
+refuse on any other build; editing an existing password role, and renewal and
+revocation of already-issued password leases, are not gated.
 See `docs/PVE_PROBES.md`.
 
 The Phase 2 deferred review backlog (DR-1 … DR-6) is fully resolved; no deferred
