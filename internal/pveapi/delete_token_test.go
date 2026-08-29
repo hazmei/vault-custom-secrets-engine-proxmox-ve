@@ -13,7 +13,9 @@ func TestDeleteTokenEndpointAndIdempotency(t *testing.T) {
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotPath = r.URL.Path
 		w.WriteHeader(http.StatusInternalServerError)
-		_, _ = w.Write([]byte(`{"data":null,"message":"no such token"}`))
+		if _, writeErr := w.Write([]byte(`{"data":null,"message":"no such token"}`)); writeErr != nil {
+			t.Errorf("write response: %v", writeErr)
+		}
 	}))
 	defer server.Close()
 	client := makeTestClient(t, server.URL, "admin@pve!old", "secret")

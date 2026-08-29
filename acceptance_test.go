@@ -1093,13 +1093,13 @@ func TestAccRotateRoot(t *testing.T) {
 	// cleanup immediately after creation so every later failure removes it via
 	// the bootstrap client; deleting the user also cascades its tokens.
 	provisionerUser := accUserID(t, "rotate-provisioner")
-	if err := bootstrapClient.CreateUser(ctx, pveapi.CreateUserRequest{
+	if createErr := bootstrapClient.CreateUser(ctx, pveapi.CreateUserRequest{
 		UserID: provisionerUser,
 		Groups: os.Getenv(accRotateProvisionerGroup),
 		Expire: time.Now().Add(accTestTimeout).Unix(),
 		Enable: true,
-	}); err != nil {
-		t.Fatalf("create disposable rotate provisioner user %q: %v", provisionerUser, err)
+	}); createErr != nil {
+		t.Fatalf("create disposable rotate provisioner user %q: %v", provisionerUser, createErr)
 	}
 	registerAccUserCleanup(t, bootstrapClient, provisionerUser)
 	assertAccUserInGroup(t, ctx, bootstrapClient, provisionerUser, os.Getenv(accRotateProvisionerGroup))

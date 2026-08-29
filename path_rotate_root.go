@@ -73,8 +73,8 @@ func (b *backend) rotateRoot(ctx context.Context, req *logical.Request, d *frame
 	if expected != cfg.TokenID {
 		return logical.ErrorResponse("rotate-root rejected: expected_token_id does not match the current token ID"), nil
 	}
-	if entry, err := req.Storage.Get(ctx, rotationStorageKey); err != nil {
-		return nil, fmt.Errorf("proxmox: rotate-root: read rotation state: %w", err)
+	if entry, readErr := req.Storage.Get(ctx, rotationStorageKey); readErr != nil {
+		return nil, fmt.Errorf("proxmox: rotate-root: read rotation state: %w", readErr)
 	} else if entry != nil {
 		return logical.ErrorResponse("rotate-root rejected: another rotation is active or requires recovery"), nil
 	}
@@ -92,8 +92,8 @@ func (b *backend) rotateRoot(ctx context.Context, req *logical.Request, d *frame
 	if err != nil {
 		return nil, fmt.Errorf("proxmox: rotate-root: write recovery WAL: %w", err)
 	}
-	if err := putRotationState(ctx, req.Storage, state); err != nil {
-		return nil, fmt.Errorf("proxmox: rotate-root: write rotation state (WAL %s retained): %w", walID, err)
+	if stateErr := putRotationState(ctx, req.Storage, state); stateErr != nil {
+		return nil, fmt.Errorf("proxmox: rotate-root: write rotation state (WAL %s retained): %w", walID, stateErr)
 	}
 
 	oldClient, err := b.getClient(ctx, req.Storage)
@@ -111,8 +111,8 @@ func (b *backend) rotateRoot(ctx context.Context, req *logical.Request, d *frame
 	if err != nil {
 		return nil, fmt.Errorf("proxmox: rotate-root: build replacement client: %w", err)
 	}
-	if err := validateReplacement(ctx, replacement); err != nil {
-		return nil, fmt.Errorf("proxmox: rotate-root: replacement validation failed: %w", err)
+	if validationErr := validateReplacement(ctx, replacement); validationErr != nil {
+		return nil, fmt.Errorf("proxmox: rotate-root: replacement validation failed: %w", validationErr)
 	}
 	entry, err := logical.StorageEntryJSON("config", &newCfg)
 	if err != nil {

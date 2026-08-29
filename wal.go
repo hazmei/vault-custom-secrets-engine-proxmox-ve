@@ -127,15 +127,16 @@ func (b *backend) walRollbackRotation(ctx context.Context, req *logical.Request,
 	if err != nil {
 		return err
 	}
-	if cfg.TokenID == state.OldTokenID {
+	switch cfg.TokenID {
+	case state.OldTokenID:
 		_, newToken, splitErr := splitTokenID(state.NewTokenID)
 		if splitErr != nil {
 			return splitErr
 		}
 		err = client.DeleteToken(ctx, oldUser, newToken)
-	} else if cfg.TokenID == state.NewTokenID {
+	case state.NewTokenID:
 		err = client.DeleteToken(ctx, oldUser, oldToken)
-	} else {
+	default:
 		return fmt.Errorf("proxmox: rotation recovery found inconsistent token ID")
 	}
 	if err != nil && !errors.Is(err, pveapi.ErrTokenNotFound) {
