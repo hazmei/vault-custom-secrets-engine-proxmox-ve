@@ -259,7 +259,13 @@ func serveFixture(t *testing.T, status int, body, wantMethod, wantPath string) C
 }
 
 // TestProbeVersionFixtureThroughRealClient replays the Probe 0 body and asserts
-// GetVersion extracts the version string that config-write reports.
+// GetVersion extracts the version string that config-write reports, and that
+// GetVersionInfo decodes BOTH build-identity fields.
+//
+// The repoid assertion pins the `json:"repoid"` tag against a recorded body:
+// password mode gates on VersionInfo.RepoID, so a wrong or renamed tag would
+// leave RepoID empty and silently refuse mode=password on every cluster —
+// including the one verified build — with nothing else in the suite noticing.
 func TestProbeVersionFixtureThroughRealClient(t *testing.T) {
 	t.Parallel()
 
@@ -270,6 +276,18 @@ func TestProbeVersionFixtureThroughRealClient(t *testing.T) {
 	}
 	if version != "9.2.10" {
 		t.Errorf("version = %q; want %q", version, "9.2.10")
+	}
+
+	infoClient := serveFixture(t, http.StatusOK, probe0VersionResponse, http.MethodGet, "/api2/json/version")
+	info, err := infoClient.GetVersionInfo(context.Background())
+	if err != nil {
+		t.Fatalf("GetVersionInfo: %v", err)
+	}
+	if info.Version != "9.2.10" {
+		t.Errorf("info.Version = %q; want %q", info.Version, "9.2.10")
+	}
+	if info.RepoID != "43df2e01f27a1a19" {
+		t.Errorf("info.RepoID = %q; want %q — the password-mode build gate reads this field", info.RepoID, "43df2e01f27a1a19")
 	}
 }
 

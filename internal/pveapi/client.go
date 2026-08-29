@@ -48,6 +48,9 @@ type Client interface {
 	// GetVersion performs GET /version — lightweight reachability check.
 	GetVersion(ctx context.Context) (string, error)
 
+	// GetVersionInfo performs GET /version and returns the complete build identity.
+	GetVersionInfo(ctx context.Context) (VersionInfo, error)
+
 	// GetPermissions performs GET /access/permissions and returns the
 	// effective permission tree for the authenticated token.
 	GetPermissions(ctx context.Context) (PermissionTree, error)
@@ -310,17 +313,34 @@ func classifyPVEError(status int, body []byte) error {
 // GetVersion calls GET /version and returns the PVE version string.
 // Used as a lightweight reachability and TLS check on config write.
 func (c *httpClient) GetVersion(ctx context.Context) (string, error) {
+	info, err := c.GetVersionInfo(ctx)
+	if err != nil {
+		return "", err
+	}
+	return info.Version, nil
+}
+
+// GetVersionInfo calls GET /version and returns the exact build identity.
+// Missing or malformed fields are left for callers that require an exact
+// verified-build match to reject.
+//
+// Neither version method wraps its error with its own name: doRequest already
+// reports "pveapi: GET /version returned ...", naming the package and the
+// endpoint, and every call site supplies its own context. A method-name wrap
+// here would either name the wrong method (GetVersion delegates) or stack two
+// of them on one error.
+func (c *httpClient) GetVersionInfo(ctx context.Context) (VersionInfo, error) {
 	body, _, err := c.doRequest(ctx, http.MethodGet, "/version", nil, false)
 	if err != nil {
-		return "", fmt.Errorf("pveapi: GetVersion: %w", err)
+		return VersionInfo{}, err
 	}
 
 	var resp versionResponse
 	if err := json.Unmarshal(body, &resp); err != nil {
-		return "", fmt.Errorf("pveapi: GetVersion: parse response: %w", err)
+		return VersionInfo{}, fmt.Errorf("pveapi: parse GET /version response: %w", err)
 	}
 
-	return resp.Data.Version, nil
+	return VersionInfo{Version: resp.Data.Version, RepoID: resp.Data.RepoID}, nil
 }
 
 // GetPermissions calls GET /access/permissions and returns the effective
@@ -359,7 +379,8 @@ func (c *httpClient) GetGroup(ctx context.Context, group string) error {
 // When req.Password is set the user is created with a live password in this
 // single call; no separate password-setting request is made (the engine's
 // API-token authentication cannot use PUT /access/password, which requires a
-// password-authenticated ticket — PVE_PROBES.md Probe P0).
+// password-authenticated ticket — PVE_PROBES.md Probe P0 on
+// pve-manager/9.2.14/a1480fa6b8d899cb; 9.2.10 has no password evidence).
 //
 // Form-encoding notes (from AGENTS.md — both are silent-failure traps):
 //   - groups: ONE comma-separated field, never array-repeated.
@@ -381,7 +402,7 @@ func (c *httpClient) CreateUser(ctx context.Context, req CreateUserRequest) erro
 		form.Set("comment", req.Comment)
 	}
 	// Password mode: single-call creation. The credential is live as soon as
-	// PVE returns 200 (PVE_PROBES.md Probe P0 rerun, 28 Aug 2026).
+	// PVE returns 200 (PVE_PROBES.md Probe P0 on pve-manager/9.2.14/a1480fa6b8d899cb).
 	if req.Password != "" {
 		form.Set("password", req.Password)
 	}

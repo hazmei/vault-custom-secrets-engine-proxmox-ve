@@ -85,7 +85,7 @@ type CreateUserRequest struct {
 	Comment string
 	// Password, when non-empty, is sent as the `password` form field on
 	// POST /access/users, creating a password-authenticating user in a single
-	// call (confirmed PVE 9.2.10, PVE_PROBES.md Probe P0 rerun 28 Aug 2026:
+	// call (confirmed pve-manager/9.2.14/a1480fa6b8d899cb, PVE_PROBES.md Probe P0:
 	// `POST /access/users` with `password` returns HTTP 200 and the password
 	// authenticates via POST /access/ticket).
 	//
@@ -202,10 +202,17 @@ func splitGroupCSV(groups string) []string {
 	return normalizeGroups(strings.Split(groups, ","))
 }
 
+// VersionInfo contains the build identity returned by GET /version.
+type VersionInfo struct {
+	Version string
+	RepoID  string
+}
+
 // versionResponse is the JSON shape of GET /version.
 type versionResponse struct {
 	Data struct {
 		Version string `json:"version"`
+		RepoID  string `json:"repoid"`
 	} `json:"data"`
 }
 

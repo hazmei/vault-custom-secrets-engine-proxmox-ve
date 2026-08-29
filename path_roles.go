@@ -125,9 +125,24 @@ const (
 // PVE 9.2.14"). The project's declared target elsewhere is
 // pve-manager/9.2.10/43df2e01f27a1a19, and password behavior was NOT verified
 // there — the 9.2.10 probes predate the feature and P0 remains partial/open.
-// Password roles are therefore accepted but warn, so an operator on any other
-// build knows the credential path is unverified for their cluster.
-const passwordVerifiedBuild = "pve-manager/9.2.14/a1480fa6b8d899cb"
+//
+// Password mode is therefore GATED, not merely advisory: role-write refuses to
+// OPT IN to mode=password on any other build, and creds issuance re-checks the
+// live build and refuses there too (the cluster can be upgraded between the
+// two). Editing an existing password role, renewal, and revocation are
+// deliberately NOT gated — an upgraded cluster must still be able to wind a
+// role down and to extend and clean up leases issued before the upgrade.
+//
+// passwordVerifiedVersion and passwordVerifiedRepoID are compared against the
+// `version` and `repoid` fields of GET /version. Those two fields reproduce the
+// pve-manager build string exactly: PVE_PROBES.md Probe 0 records
+// {"version":"9.2.10",...,"repoid":"43df2e01f27a1a19"} against build
+// pve-manager/9.2.10/43df2e01f27a1a19.
+const (
+	passwordVerifiedVersion = "9.2.14"
+	passwordVerifiedRepoID  = "a1480fa6b8d899cb"
+	passwordVerifiedBuild   = "pve-manager/" + passwordVerifiedVersion + "/" + passwordVerifiedRepoID
+)
 
 // passwordRealm is the only PVE realm with recorded live evidence for
 // password credentials (docs/PVE_PROBES.md Probe P0: `pve` creation,
@@ -478,6 +493,38 @@ func (b *backend) roleWrite(ctx context.Context, req *logical.Request, d *framew
 		), nil
 	}
 
+	// Step 7c: Password mode — refuse OPTING IN unless the live cluster is the
+	// one build with recorded P0 evidence, so the operator learns at opt-in time
+	// rather than at first issuance.
+	//
+	// Deliberately scoped to the opt-in transition. mode is inherited from the
+	// stored role on update, so gating every write would also block routine
+	// edits to an existing password role (shrinking a ttl, repointing a group,
+	// winding the role down) on an upgraded cluster — exactly the edits an
+	// operator needs after an upgrade breaks issuance. Editing an existing
+	// password role changes no credential: issuance is gated independently in
+	// path_creds.go, and that is the check that protects the credential path.
+	optingIntoPassword := mode == modePassword && (!isUpdate || existing.Mode != modePassword)
+	if optingIntoPassword {
+		info, versionErr := client.GetVersionInfo(ctx)
+		if versionErr != nil {
+			if errors.Is(versionErr, pveapi.ErrUnauthenticated) {
+				return logical.ErrorResponse("PVE returned 401 on GET /version during role-write — admin token is unauthenticated; check config token_id/token_secret"), nil
+			}
+			if errors.Is(versionErr, pveapi.ErrForbidden) {
+				return logical.ErrorResponse("PVE returned 403 on GET /version during role-write — /version needs no PVE privilege, so check for a proxy or WAF in front of the cluster"), nil
+			}
+			return nil, fmt.Errorf("proxmox: verify password-mode PVE build: %w", versionErr)
+		}
+		if info.Version != passwordVerifiedVersion || info.RepoID != passwordVerifiedRepoID {
+			return logical.ErrorResponse(
+				"mode=%q requires verified PVE build %s; this cluster reports version=%q repoid=%q. "+
+					"Password behavior is recorded only on the verified build (docs/PVE_PROBES.md Probe P0)",
+				modePassword, passwordVerifiedBuild, info.Version, info.RepoID,
+			), nil
+		}
+	}
+
 	// Step 8: Store role.
 	role := &proxmoxRole{
 		Group:      group,
@@ -505,8 +552,11 @@ func (b *backend) roleWrite(ctx context.Context, req *logical.Request, d *framew
 		resp.AddWarning(fmt.Sprintf(
 			"password mode is verified end to end only on %s; the project's declared target "+
 				"(pve-manager/9.2.10) has no password evidence and P0 remains partial/open. "+
-				"Verify password issuance, authentication, renewal, and revocation on your own "+
-				"cluster before relying on this role (see docs/PVE_PROBES.md)",
+				"Credential issuance re-checks the live build and REFUSES on any other one, so "+
+				"upgrading this cluster will break issuance for this role (editing this role, and "+
+				"renewal and revocation of already-issued leases, keep working). Verify password "+
+				"issuance, authentication, renewal, and revocation on your own cluster before "+
+				"relying on this role (see docs/PVE_PROBES.md)",
 			passwordVerifiedBuild,
 		))
 		return resp, nil

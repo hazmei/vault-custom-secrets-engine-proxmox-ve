@@ -45,6 +45,7 @@ type MockClient struct {
 	// Per-method override functions. When non-nil, the Fn is called instead of
 	// the default behavior. This allows injecting errors on specific calls.
 	GetVersionFn     func(ctx context.Context) (string, error)
+	GetVersionInfoFn func(ctx context.Context) (VersionInfo, error)
 	GetPermissionsFn func(ctx context.Context) (PermissionTree, error)
 	GetGroupFn       func(ctx context.Context, group string) error
 	CreateUserFn     func(ctx context.Context, req CreateUserRequest) error
@@ -122,11 +123,26 @@ func (m *MockClient) DeleteUserCalls() []string {
 
 // GetVersion implements Client.
 func (m *MockClient) GetVersion(ctx context.Context) (string, error) {
-	m.log("GetVersion")
 	if m.GetVersionFn != nil {
+		m.log("GetVersion")
 		return m.GetVersionFn(ctx)
 	}
-	return "9.2.10", nil
+	// Delegate through the METHOD, exactly as the real client does, so the call
+	// log records the GetVersionInfo the real call graph performs. Reaching for
+	// GetVersionInfoFn directly here would skip that log entry and let the mock
+	// disagree with production about which calls happened.
+	m.log("GetVersion")
+	info, err := m.GetVersionInfo(ctx)
+	return info.Version, err
+}
+
+// GetVersionInfo implements Client.
+func (m *MockClient) GetVersionInfo(ctx context.Context) (VersionInfo, error) {
+	m.log("GetVersionInfo")
+	if m.GetVersionInfoFn != nil {
+		return m.GetVersionInfoFn(ctx)
+	}
+	return VersionInfo{Version: "9.2.10", RepoID: "43df2e01f27a1a19"}, nil
 }
 
 // GetPermissions implements Client.

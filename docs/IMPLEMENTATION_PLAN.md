@@ -1653,13 +1653,27 @@ pass through a real `vault server` with `-dev-plugin-dir` also completed. See
 `docs/PVE_PROBES.md` — "Probe P0 verification run ... on PVE 9.2.14". The shipped scope is bounded by the P0 evidence that
 actually exists (`docs/PVE_PROBES.md` Probe P0):
 
-- **Verified build scope**: password mode is verified end to end ONLY on
-  `pve-manager/9.2.14/a1480fa6b8d899cb`. The declared target
+- **Verified build scope (ENFORCED)**: password mode is verified end to end ONLY
+  on `pve-manager/9.2.14/a1480fa6b8d899cb`. The declared target
   `9.2.10/43df2e01f27a1a19` has NO password evidence — its probes predate the
-  feature — and P0 is still partial/open. Role writes with `mode=password`
-  return a warning naming the verified build. Recording equivalent 9.2.10
-  evidence, or dropping 9.2.10 as a supported build for password mode, remains
-  an open decision.
+  feature — and P0 is still partial/open. The engine gates on this rather than
+  only warning: role write refuses to OPT IN to `mode=password` unless
+  `GET /version` reports exactly `version=9.2.14` + `repoid=a1480fa6b8d899cb`
+  (`path_roles.go` Step 7c), and `creds/:role` re-checks the live build before
+  generating any password (`path_creds.go` Step 3b) because the cluster may be
+  upgraded between the two. Role writes that pass the gate still return a warning
+  naming the verified build. The write-time gate is scoped to the opt-in
+  transition: `mode` is inherited from the stored role on update, so gating every
+  write would block routine edits to an existing password role on an upgraded
+  cluster. Editing an existing password role, renew, and revoke are deliberately
+  NOT gated, so an upgrade breaks new issuance and new opt-ins while already-issued
+  leases stay renewable and revocable and existing roles stay editable. Recording equivalent
+  9.2.10 evidence, or dropping 9.2.10 as a supported build for password mode,
+  remains an open decision. **Open evidence gap**: no `GET /version` response body
+  from the 9.2.14 target is recorded in `docs/PVE_PROBES.md`; the gate's expected
+  `repoid` is derived from the `pveversion` build string, which matches the
+  recorded 9.2.10 `/version` body (Probe 0). Capture the 9.2.14 `/version` body on
+  the next live run.
 - **In scope and implemented**: `mode=password` roles on the `pve` realm;
   engine-generated password supplied on `POST /access/users` (single call);
   no API token minted; renewal extends the PVE `expire` only; revocation
@@ -1871,7 +1885,7 @@ release gate depends on password support.
     rotation and never returns a password; revocation removes the user and is
     retry-safe; token renew/revoke tests remain green.
 
-- [x] **P6 — WAL and lifecycle test coverage** — DONE (`secret_password_test.go`; opt-in live `TestAccPasswordLifecycle` gated by `VAULT_ACC=1` plus `PVE_PASSWORD_ACC=1`).
+- [x] **P6 — WAL and lifecycle test coverage** — DONE (`secret_password_test.go`; opt-in live `TestAccPasswordLifecycle` requires `VAULT_ACC=1`, `PVE_PASSWORD_ACC=1`, and the exact verified `pve-manager/9.2.14/a1480fa6b8d899cb` build; non-verified builds skip, so skipped coverage is not a completed test).
   - **Files/scope**: `wal_test.go`, `path_creds_test.go`, `secret_password_test.go`,
     `acceptance_test.go` (gated `TestAcc*` additions), and testing documentation.
   - **Dependencies**: P0–P5.

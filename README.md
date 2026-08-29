@@ -40,8 +40,12 @@ above — passed the full required `make testacc` suite plus the opt-in
 authentication, no API token minted on the user, renewal with the original
 password still valid, expiry and disablement rejected with 401, deletion on
 revoke), and an operator manual pass through a real `vault server` with
-`-dev-plugin-dir`. The same three optional canaries skipped with their
-prerequisites unset. Evidence: `docs/PVE_PROBES.md`.
+`-dev-plugin-dir`. The same three optional authorization canaries skipped with their
+prerequisites unset. The standalone `TestAccPasswordLifecycle` has a separate build
+prerequisite and ran because the target was the verified
+`pve-manager/9.2.14/a1480fa6b8d899cb` build — a property of the cluster, not an
+operator choice. Neither kind of skip is completed coverage. Evidence:
+`docs/PVE_PROBES.md`.
 
 Production-style catalog registration with
 `vault plugin register -sha256=<hash>` was verified previously (undated) on a
@@ -49,10 +53,11 @@ single-node non-dev Vault, including a matching catalog digest and catalog/mount
 persistence across a Vault restart. Multi-node artifact distribution,
 standby-to-active forwarding, failover, and cross-node restart recovery remain
 unverified, so this project must not be treated as production-ready based on the
-validation above. Optional
-insufficient-privilege, direct-ACL, and negative-authorization canaries were
-skipped where their separately documented prerequisites were unset; those skips
-are not completed tests.
+validation above. Optional insufficient-privilege, direct-ACL, and
+negative-authorization canaries were skipped where their separately
+documented prerequisites were unset; those skips are not completed coverage. The
+standalone password lifecycle test is governed by the separate verified-build condition
+above.
 
 The Phase 2 deferred review backlog (DR-1 … DR-6) is fully resolved; no deferred
 review items remain. That backlog is independent of the caveats above — it does
@@ -596,13 +601,22 @@ credential does.
 
 Operator notes:
 
-- **Password mode is verified only on `pve-manager/9.2.14/a1480fa6b8d899cb`.**
-  The project's declared target is 9.2.10, whose probe evidence predates this
-  feature and contains no password results, and the password P0 task is still
-  partial/open. A password role write returns a warning saying so. Verify
-  issuance, authentication, renewal, and revocation on your own cluster before
-  relying on it — `TestAccPasswordLifecycle` (`VAULT_ACC=1` plus
-  `PVE_PASSWORD_ACC=1`) does exactly that.
+- **Password mode is gated to `pve-manager/9.2.14/a1480fa6b8d899cb`, the only
+  verified build.** The project's declared target is 9.2.10, whose probe evidence
+  predates this feature and contains no password results, and the password P0
+  task is still partial/open. The engine enforces this rather than merely warning:
+  OPTING IN to `mode=password` is REFUSED unless `GET /version` reports exactly
+  `version=9.2.14` and `repoid=a1480fa6b8d899cb`, and `creds/:role` re-checks the
+  live build at every issuance and refuses there too (the cluster can be upgraded
+  after the role is written). A role write on the verified build still returns a
+  warning describing the narrow verification record. **Editing an existing
+  password role, renewal, and revocation are NOT gated** — upgrading the cluster
+  breaks new password issuance and new opt-ins, but leases already issued keep
+  renewing and revoking, and you can still shrink a `ttl`, repoint a `group`, or
+  otherwise wind an existing password role down. Verify issuance,
+  authentication, renewal, and revocation on your own cluster before relying on
+  it — `TestAccPasswordLifecycle` (`VAULT_ACC=1` plus `PVE_PASSWORD_ACC=1`) does
+  exactly that.
 - **`mode=password` requires `realm=pve`.** Role writes for any other realm are
   refused. PVE-realm password behavior is confirmed live
   (`docs/PVE_PROBES.md` Probe P0); PAM password creation failed in the automated
@@ -682,13 +696,14 @@ Key points:
 - Environment gating: `VAULT_ACC=1` (HashiCorp convention)
 - Full lifecycle: pre-create a safe PVE group bound to a test role → issue credential → run a `/version` authentication smoke check with the issued token → renew lease → revoke and confirm cleanup.
 - Authorization contract canary: requires `PVE_BEHAVIORAL_PATH` and `PVE_BEHAVIORAL_MARKER`; the issued token must receive HTTP 200 from that group-role-gated endpoint and the body must contain the marker. Optional subtests cover direct `PUT /access/acl` anti-privilege-escalation (configured unheld role must return 403) and negative authorization with expected 403. Unconfigured optional subtests skip with explicit prerequisites rather than assuming full-admin or cluster-specific endpoints.
-- Password lifecycle (`TestAccPasswordLifecycle`, opt-in): gated by `VAULT_ACC=1` **plus** `PVE_PASSWORD_ACC=1`, because it creates a password-authenticating PVE user on the target. Covers issuance, `POST /access/ticket` authentication, confirmed absence of any API token on the user, renewal with the ORIGINAL password still valid, the past-`expire` 401 backstop, disablement 401, and deletion on revoke. It reports HTTP status codes only and never prints a password. Skips cleanly when the opt-in variable is unset.
+- Password lifecycle (`TestAccPasswordLifecycle`, opt-in): gated by `VAULT_ACC=1` **plus** `PVE_PASSWORD_ACC=1`, because it creates a password-authenticating PVE user on the target. It additionally skips when the target is not the verified `pve-manager/9.2.14/a1480fa6b8d899cb` build, a cluster property rather than an operator choice. Covers issuance, `POST /access/ticket` authentication, confirmed absence of any API token on the user, renewal with the ORIGINAL password still valid, the past-`expire` 401 backstop, disablement 401, and deletion on revoke. It reports HTTP status codes only and never prints a password. Neither an unset opt-in nor a non-verified build is completed coverage.
 - Failure coverage: idempotent revocation after an issued PVE user is deleted out-of-band, WAL rollback, delete-config guard, configurable concurrent issuance, and optional insufficient-privilege config validation in `TestAccInsufficientPrivileges`.
 - Unit tests cover deterministic mid-provisioning network/error injection and WAL-delete failure paths. The live acceptance suite does not inject network failures, quorum loss, or ACL lock contention.
 - Run against an operator-provided disposable/dev Proxmox VE 9.2.10 cluster with a test admin token. These tests mutate the cluster by creating, renewing, expiring, and deleting temporary `vaultacc-*@pve` users.
 - Live acceptance tests are operator-run only and are never run by CI. Normal PR CI runs build, unit tests, and lint only.
 - Current recorded operator results and the only optional `TestAcc*` gates that
-  may skip are tracked in `docs/IMPLEMENTATION_PLAN.md`.
+  may skip are tracked in `docs/IMPLEMENTATION_PLAN.md`; the authorization canary's
+  optional subtests and the standalone password lifecycle gate are separate.
 
 #### Acceptance Test Prerequisites
 
@@ -833,9 +848,10 @@ export PVE_INSUFFICIENT_TOKEN_ID="limited@pve!tokenid"
 export PVE_INSUFFICIENT_TOKEN_SECRET="..."
 ```
 
-Optional password-mode live coverage. Unset means `TestAccPasswordLifecycle`
-skips; set it only on a target where creating a password-authenticating user is
-acceptable:
+Optional password-mode live coverage. Unset means `TestAccPasswordLifecycle` skips; a
+non-verified target also skips because password behavior is only verified on
+`pve-manager/9.2.14/a1480fa6b8d899cb`. Set it only on a target where creating a
+password-authenticating user is acceptable:
 
 ```bash
 export PVE_PASSWORD_ACC=1

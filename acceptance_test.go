@@ -1,10 +1,11 @@
 // Package proxmox contains the Vault Proxmox VE secrets engine implementation.
 //
 // Acceptance tests in this file are gated by VAULT_ACC=1 and mutate a live
-// operator-provided Proxmox VE 9.2.10 cluster. Required environment variables
-// are PVE_ADDR, PVE_TOKEN_ID, PVE_TOKEN_SECRET, and PVE_TEST_GROUP. The test
-// group must be pre-created and safely bound to a test-only role/path before
-// running the suite. The authorization canary additionally requires
+// operator-provided Proxmox VE 9.2.10 cluster. Password coverage is separately
+// gated to the verified pve-manager/9.2.14 build. Required environment
+// variables are PVE_ADDR, PVE_TOKEN_ID, PVE_TOKEN_SECRET, and PVE_TEST_GROUP.
+// The test group must be pre-created and safely bound to a test-only role/path
+// before running the suite. The authorization canary additionally requires
 // PVE_BEHAVIORAL_PATH and PVE_BEHAVIORAL_MARKER so group-derived privilege is
 // proven by response content, not by a bare 200 from /version. Operators must
 // not edit vaultacc-* user comments while acceptance tests are running because
@@ -915,15 +916,28 @@ const accPasswordEnv = "PVE_PASSWORD_ACC"
 // confirmed absence of any API token, renewal preserving the ORIGINAL password,
 // the expiry backstop, disablement, and deletion on revoke.
 //
-// Gated by VAULT_ACC=1 (like every TestAcc*) plus PVE_PASSWORD_ACC=1. It never
-// prints a password: every assertion reports status codes only.
+// Gated by VAULT_ACC=1 (like every TestAcc*), PVE_PASSWORD_ACC=1, and the exact
+// verified pve-manager/9.2.14/a1480fa6b8d899cb build precondition. Non-verified
+// builds skip this test because password behavior is not verified there. It
+// never prints a password: every assertion reports status codes only.
 func TestAccPasswordLifecycle(t *testing.T) {
 	h := newAccHarness(t)
+	ctx, cancel := context.WithTimeout(context.Background(), accTestTimeout)
+	defer cancel()
+
 	if os.Getenv(accPasswordEnv) != "1" {
 		t.Skipf("password acceptance test skipped: set %s=1 to opt in (creates a password-authenticating PVE user)", accPasswordEnv)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), accTestTimeout)
-	defer cancel()
+	info, err := h.Client.GetVersionInfo(ctx)
+	if err != nil {
+		t.Fatalf("verify password acceptance PVE build: %v", err)
+	}
+	if info.Version != passwordVerifiedVersion || info.RepoID != passwordVerifiedRepoID {
+		t.Skipf(
+			"password mode requires verified PVE build %s; this cluster reports version=%q repoid=%q (docs/PVE_PROBES.md Probe P0 records password behavior only on the verified build)",
+			passwordVerifiedBuild, info.Version, info.RepoID,
+		)
+	}
 
 	writeAccConfig(t, ctx, h)
 	writeAccRoleNamed(t, ctx, h, accPasswordRoleName, modePassword)
