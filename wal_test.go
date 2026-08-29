@@ -62,6 +62,7 @@ func TestWALRollback_UnknownKind(t *testing.T) {
 	err := b.walRollback(ctx, req, "unknown-kind-xyz", map[string]interface{}{})
 	if err == nil {
 		t.Fatal("expected error for unknown WAL kind; got nil")
+		return
 	}
 	if !strings.Contains(err.Error(), "unknown-kind-xyz") {
 		t.Errorf("error should mention the unknown kind; got: %q", err)
@@ -317,6 +318,7 @@ func TestWALRollback_GetUserTransientError_ReturnsError(t *testing.T) {
 	err := b.walRollback(ctx, req, walTypeUser, payload)
 	if err == nil {
 		t.Fatal("expected error for transient GetUser failure; got nil")
+		return
 	}
 	if !errors.Is(err, transientErr) {
 		t.Errorf("expected error to wrap transientErr; got: %v", err)
@@ -352,6 +354,7 @@ func TestWALRollback_TransientError_ReturnsError(t *testing.T) {
 	err := b.walRollback(ctx, req, walTypeUser, payload)
 	if err == nil {
 		t.Fatal("expected error for transient DeleteUser failure; got nil")
+		return
 	}
 	if !errors.Is(err, transientErr) {
 		t.Errorf("expected error to wrap transientErr; got: %v", err)
@@ -383,6 +386,7 @@ func TestWALRollback_ErrForbidden_ReturnsError(t *testing.T) {
 	err := b.walRollback(ctx, req, walTypeUser, payload)
 	if err == nil {
 		t.Fatal("expected error for ErrForbidden from DeleteUser; got nil")
+		return
 	}
 }
 
@@ -413,6 +417,7 @@ func TestWALRollback_EmptyUserID_ReturnsError(t *testing.T) {
 	err := b.walRollback(ctx, req, walTypeUser, payload)
 	if err == nil {
 		t.Fatal("expected error for empty user_id; got nil")
+		return
 	}
 	if getUserCalled {
 		t.Error("GetUser must NOT be called for empty user_id WAL payload")
@@ -440,5 +445,6 @@ func TestWALRollback_MissingUserIDKey_ReturnsError(t *testing.T) {
 	err := b.walRollback(ctx, req, walTypeUser, payload)
 	if err == nil {
 		t.Fatal("expected error for payload missing user_id; got nil")
+		return
 	}
 }

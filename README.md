@@ -31,8 +31,12 @@ The following validation passed on 2026-08-20 against disposable Proxmox VE
   preservation checks.
 
 Production-style catalog registration with
-`vault plugin register -sha256=<hash>` remains unverified, and this project must
-not be treated as production-ready based on the validation above. Optional
+`vault plugin register -sha256=<hash>` was verified previously (undated) on a
+single-node non-dev Vault, including a matching catalog digest and catalog/mount
+persistence across a Vault restart. Multi-node artifact distribution,
+standby-to-active forwarding, failover, and cross-node restart recovery remain
+unverified, so this project must not be treated as production-ready based on the
+validation above. Optional
 insufficient-privilege, direct-ACL, and negative-authorization canaries were
 skipped where their separately documented prerequisites were unset; those skips
 are not completed tests.
@@ -47,8 +51,8 @@ not make the project production-ready.
 
 1. **Create** (on `GET <mount>/creds/:role`):
    - Creates a synthetic Proxmox user: `{prefix}-{role}-{random}@{realm}` with `groups=<role.group>` at creation time
-   - Mints an API token on the user with `privsep=0` (inherits user ACL)
-   - Returns `token_id` and `token_secret` (shown only once, non-reproducible)
+   - **Token mode** (`mode=token`, the default): mints an API token on the user with `privsep=0` (inherits user ACL) and returns `token_id` + `token_secret` (shown only once, non-reproducible)
+   - **Password mode** (`mode=password`): sends an engine-generated password on the same create call and returns `user_id` + `password`. No API token is minted. The password is shown only once and is never rotated (see [Password Mode](#password-mode))
 
 2. **Renew**:
    - Extends Vault lease TTL up to the effective `max_ttl` (measured from the original issue time)
@@ -73,8 +77,8 @@ not make the project production-ready.
 | Path | Operations | Description |
 |------|-----------|-------------|
 | `<mount>/config` | POST, GET, DELETE | Configure Proxmox connection (address, admin token, TLS, default TTLs); GET returns `address`, `tls_skip_verify`, `ca_cert`, `default_ttl`, `default_max_ttl`, `token_id`; `token_secret` never returned; DELETE requires `force=true` as a **data parameter** (not the `vault delete -force` CLI flag — see [Deleting the Configuration](#deleting-the-configuration-forcetrue-is-a-data-parameter-not--force)) — outstanding leases become non-revocable and non-renewable (renewal also loads config to reach PVE, so it fails immediately too; revoke them first) |
-| `<mount>/roles/:name` | POST, GET, LIST, DELETE | Define credential roles with group name, TTLs, and user prefix; DELETE does not revoke outstanding leases |
-| `<mount>/creds/:role` | GET | Issue a new dynamic credential (returns `user_id`, `token_id`, `token_secret`) |
+| `<mount>/roles/:name` | POST, GET, LIST, DELETE | Define credential roles with group name, TTLs, user prefix, and `mode` (`token` default, or `password`); DELETE does not revoke outstanding leases |
+| `<mount>/creds/:role` | GET | Issue a new dynamic credential — token mode returns `user_id`, `token_id`, `token_secret`; password mode returns `user_id`, `password` |
 | `<mount>/rotate-root` | — | **Out of scope for v1** — root token rotation is manual (documented as create new token → update config → delete old token) |
 
 ## Requirements / Prerequisites
@@ -400,8 +404,9 @@ unavailable; releases include darwin binaries, so operators verifying on macOS
 need it.
 
 Releases do not change the project's validation status: production-style
-catalog registration with `vault plugin register -sha256=<hash>` remains
-unverified, and releases are marked as pre-releases by default.
+catalog registration with `vault plugin register -sha256=<hash>` is verified for
+a single-node non-dev Vault only, the multi-node and HA gates remain unverified,
+and releases are marked as pre-releases by default.
 
 For local development, start Vault with the plugin directory. Vault
 auto-registers binaries found there, so no manual registration command is
@@ -484,10 +489,12 @@ fi
 For this production-style path, provide `VAULT_ADDR` and an authenticated
 `VAULT_TOKEN` for the target Vault server before running the CLI commands.
 
-The production catalog registration path has not been live-verified in this
-repository. The commands above are a documented production-style procedure,
-not evidence that catalog registration has been validated in a live production
-Vault deployment.
+The production catalog registration path was live-verified previously (undated)
+on a single-node non-dev Vault: the catalog entry's digest matched the recorded
+artifact digest, and the catalog entry and mount persisted across a Vault
+restart. The commands above are not evidence of multi-node artifact
+distribution, standby-to-active forwarding, failover, or cross-node restart
+recovery, which remain unverified.
 
 ## Configuration Example
 
@@ -551,6 +558,56 @@ vault read proxmox/creds/vm-admin
 # Returns: user_id, token_id, token_secret (lease auto-revokes on expiry)
 ```
 
+### Password Mode
+
+A role with `mode=password` issues a password on the synthetic PVE user instead
+of an API token:
+
+```bash
+vault write proxmox/roles/vm-admin-pw \
+  group="vault-vm-admins" \
+  user_prefix="vault" \
+  realm="pve" \
+  mode="password" \
+  ttl=3600 \
+  max_ttl=86400
+
+vault read proxmox/creds/vm-admin-pw
+# Returns: user_id, password (lease auto-revokes on expiry)
+```
+
+Use `user_id` as the username and `password` as the password against
+`POST /access/ticket`, the PVE web UI, or any client that authenticates with a
+PVE ticket. The credential inherits the group-derived role exactly as a token
+credential does.
+
+Operator notes:
+
+- **`mode=password` requires `realm=pve`.** Role writes for any other realm are
+  refused. PVE-realm password behavior is confirmed live
+  (`docs/PVE_PROBES.md` Probe P0); PAM password creation failed in the automated
+  probe run and its reported behavior is unreproduced.
+- **No API token is minted.** Nothing in the response can be used as
+  `PVEAPIToken=`.
+- **The password is returned once and is never rotated.** The engine cannot
+  rotate it: `PUT /access/password` requires a password-authenticated ticket that
+  API-token authentication cannot obtain. To get a new password, revoke the lease
+  and read `creds/:role` again.
+- **Renewal extends the PVE expiry only** and leaves the original password valid;
+  a renewal response never contains a password.
+- **Revocation deletes the user**, which invalidates the password immediately.
+  Disabling the user out-of-band (`enable=0`) also rejects authentication and
+  makes the engine refuse renewal — the operator kill switch works identically to
+  token mode.
+- **Where the password is stored**: never in this engine's logs, errors, WAL, or
+  storage. It IS in Vault core's encrypted lease entry, because Vault persists
+  the returned response — factor that into lease retention and audit policy.
+- **Do not hand-edit the `comment` field on `vault-*` users.** In password mode a
+  comment that no longer matches the WAL nonce is fatal: the engine deletes the
+  user and fails issuance rather than return a credential whose crash-recovery
+  path is broken. If cleanup itself fails at that point, the user persists until
+  its PVE `expire` backstop or manual removal.
+
 ## TTL and Renewal Behavior
 
 **At credential issuance**, the effective TTL and max_ttl are computed using
@@ -605,6 +662,7 @@ Key points:
 - Environment gating: `VAULT_ACC=1` (HashiCorp convention)
 - Full lifecycle: pre-create a safe PVE group bound to a test role → issue credential → run a `/version` authentication smoke check with the issued token → renew lease → revoke and confirm cleanup.
 - Authorization contract canary: requires `PVE_BEHAVIORAL_PATH` and `PVE_BEHAVIORAL_MARKER`; the issued token must receive HTTP 200 from that group-role-gated endpoint and the body must contain the marker. Optional subtests cover direct `PUT /access/acl` anti-privilege-escalation (configured unheld role must return 403) and negative authorization with expected 403. Unconfigured optional subtests skip with explicit prerequisites rather than assuming full-admin or cluster-specific endpoints.
+- Password lifecycle (`TestAccPasswordLifecycle`, opt-in): gated by `VAULT_ACC=1` **plus** `PVE_PASSWORD_ACC=1`, because it creates a password-authenticating PVE user on the target. Covers issuance, `POST /access/ticket` authentication, confirmed absence of any API token on the user, renewal with the ORIGINAL password still valid, the past-`expire` 401 backstop, disablement 401, and deletion on revoke. It reports HTTP status codes only and never prints a password. Skips cleanly when the opt-in variable is unset.
 - Failure coverage: idempotent revocation after an issued PVE user is deleted out-of-band, WAL rollback, delete-config guard, configurable concurrent issuance, and optional insufficient-privilege config validation in `TestAccInsufficientPrivileges`.
 - Unit tests cover deterministic mid-provisioning network/error injection and WAL-delete failure paths. The live acceptance suite does not inject network failures, quorum loss, or ACL lock contention.
 - Run against an operator-provided disposable/dev Proxmox VE 9.2.10 cluster with a test admin token. These tests mutate the cluster by creating, renewing, expiring, and deleting temporary `vaultacc-*@pve` users.
@@ -753,6 +811,14 @@ clearly:
 ```bash
 export PVE_INSUFFICIENT_TOKEN_ID="limited@pve!tokenid"
 export PVE_INSUFFICIENT_TOKEN_SECRET="..."
+```
+
+Optional password-mode live coverage. Unset means `TestAccPasswordLifecycle`
+skips; set it only on a target where creating a password-authenticating user is
+acceptable:
+
+```bash
+export PVE_PASSWORD_ACC=1
 ```
 
 Run with:

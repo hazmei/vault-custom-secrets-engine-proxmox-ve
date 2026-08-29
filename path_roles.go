@@ -56,6 +56,15 @@ type proxmoxRole struct {
 
 	// MaxTTL is the maximum lease TTL in seconds (0 = unset; falls back to config or system max).
 	MaxTTL int `json:"max_ttl"`
+
+	// Mode selects the credential type issued by creds/:role:
+	//   modeToken    — a privsep=0 PVE API token on the synthetic user (default).
+	//   modePassword — a password on the synthetic user; no API token is minted.
+	//
+	// An absent or empty stored value means "token": roles written before this
+	// field existed decode to "" and are normalized by getRole, so legacy roles
+	// and their outstanding leases are unaffected.
+	Mode string `json:"mode"`
 }
 
 // ttls returns the effective (ttl, maxTTL) time.Duration pair for this role,
@@ -101,8 +110,30 @@ func cappedMaxTTL(roleMax, sysMax time.Duration) time.Duration {
 	}
 }
 
+// Credential modes for proxmoxRole.Mode.
+const (
+	// modeToken issues a privsep=0 PVE API token (the original behavior and the
+	// default for any role with an absent or empty mode).
+	modeToken = "token"
+	// modePassword issues a generated password on the synthetic PVE user and
+	// never mints an API token.
+	modePassword = "password"
+)
+
+// passwordRealm is the only PVE realm with recorded live evidence for
+// password credentials (docs/PVE_PROBES.md Probe P0: `pve` creation,
+// authentication, renewal, expiry, disablement, and deletion are confirmed;
+// `pam` creation FAILED in the automated run and its authentication/rotation
+// results are operator-reported and unreproduced). Password roles are
+// restricted to this realm until P0 records evidence for another one.
+// Token-mode roles are unaffected and may use any valid realm.
+const passwordRealm = "pve"
+
 // getRole loads and decodes the role entry from storage.
 // Returns (nil, nil) when no role has been written for this name.
+//
+// A decoded empty Mode is normalized to modeToken so that roles written before
+// the mode field existed behave exactly as they did before.
 func getRole(ctx context.Context, storage logical.Storage, name string) (*proxmoxRole, error) {
 	entry, err := storage.Get(ctx, "roles/"+name)
 	if err != nil {
@@ -115,6 +146,9 @@ func getRole(ctx context.Context, storage logical.Storage, name string) (*proxmo
 	var role proxmoxRole
 	if err := entry.DecodeJSON(&role); err != nil {
 		return nil, fmt.Errorf("proxmox: decode role %q: %w", name, err)
+	}
+	if role.Mode == "" {
+		role.Mode = modeToken
 	}
 	return &role, nil
 }
@@ -157,6 +191,11 @@ func pathRoles(b *backend) []*framework.Path {
 				"max_ttl": {
 					Type:        framework.TypeDurationSecond,
 					Description: "Maximum lease TTL in seconds (0 = unset; falls back to config.default_max_ttl, then Vault system max).",
+				},
+				"mode": {
+					Type:        framework.TypeString,
+					Description: "Credential type to issue: 'token' (default) mints a privsep=0 PVE API token; 'password' sets a generated password on the synthetic user and mints no token. Password mode requires realm 'pve'.",
+					Default:     modeToken,
 				},
 			},
 			Operations: map[logical.Operation]framework.OperationHandler{
@@ -289,6 +328,15 @@ func (b *backend) roleWrite(ctx context.Context, req *logical.Request, d *framew
 		maxTTL = d.Get("max_ttl").(int)
 	}
 
+	var mode string
+	if rawMode, ok := d.GetOk("mode"); ok {
+		mode = rawMode.(string)
+	} else if isUpdate {
+		mode = existing.Mode
+	} else {
+		mode = d.Get("mode").(string)
+	}
+
 	// Validate required fields.
 	if group == "" {
 		return logical.ErrorResponse("group is required"), nil
@@ -305,12 +353,34 @@ func (b *backend) roleWrite(ctx context.Context, req *logical.Request, d *framew
 		return logical.ErrorResponse("ttl (%d) must not exceed max_ttl (%d)", ttl, maxTTL), nil
 	}
 
+	// Step 1b: Default and validate mode. An empty value (including a legacy
+	// stored role with no mode) means token mode.
+	if mode == "" {
+		mode = modeToken
+	}
+	if mode != modeToken && mode != modePassword {
+		return logical.ErrorResponse("invalid mode %q: must be %q or %q", mode, modeToken, modePassword), nil
+	}
+
 	// Step 2: Default and validate realm.
 	if realm == "" {
 		realm = "pve"
 	}
 	if realmErr := validateRealmComponent(realm); realmErr != nil {
 		return logical.ErrorResponse("invalid realm: %s", realmErr), nil
+	}
+
+	// Step 2b: Password-mode realm applicability. Only the `pve` realm has
+	// recorded live evidence that a password supplied on POST /access/users is
+	// accepted and authenticates (docs/PVE_PROBES.md Probe P0). `pam` creation
+	// failed in the automated probe run, and its reported authentication and
+	// rotation behavior is unreproduced, so password roles are refused there.
+	if mode == modePassword && realm != passwordRealm {
+		return logical.ErrorResponse(
+			"mode=%q requires realm %q: password behavior is only recorded for the %q realm "+
+				"(docs/PVE_PROBES.md Probe P0); realm %q has no confirmed password evidence",
+			modePassword, passwordRealm, passwordRealm, realm,
+		), nil
 	}
 
 	// Default user_prefix if not provided.
@@ -406,6 +476,7 @@ func (b *backend) roleWrite(ctx context.Context, req *logical.Request, d *framew
 		Realm:      realm,
 		TTL:        ttl,
 		MaxTTL:     maxTTL,
+		Mode:       mode,
 	}
 
 	entry, err := logical.StorageEntryJSON("roles/"+name, role)
@@ -438,6 +509,7 @@ func (b *backend) roleRead(ctx context.Context, req *logical.Request, d *framewo
 			"realm":       role.Realm,
 			"ttl":         role.TTL,
 			"max_ttl":     role.MaxTTL,
+			"mode":        role.Mode,
 		},
 	}, nil
 }

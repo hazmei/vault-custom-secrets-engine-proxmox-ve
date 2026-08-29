@@ -21,9 +21,13 @@ and removes its token(s), group memberships, and ACL entries in one call.
 The authoritative phase and deferred-review status is maintained in
 `docs/IMPLEMENTATION_PLAN.md`: Phases 0–5 are complete, while Phase 6 is
 **partially complete**. Development-mode registration via
-`-dev-plugin-dir` and the real Vault lifecycle smoke test are verified;
+`-dev-plugin-dir` and the real Vault lifecycle smoke test are verified, and
 production-style catalog registration with
-`vault plugin register -sha256=<hash>` remains unverified. DR-1 through DR-6
+`vault plugin register -sha256=<hash>` was verified previously (undated) on a
+single-node non-dev Vault, including digest match and catalog/mount persistence
+across a Vault restart. Phase 6 remains partially complete because multi-node
+artifact distribution, standby-to-active forwarding, failover, and cross-node
+restart recovery are still unverified. DR-1 through DR-6
 are complete, and no deferred review items remain. The required positive
 authorization canary passed, while the optional insufficient-privilege,
 direct-ACL, and negative-authorization canaries were explicitly skipped on
@@ -37,9 +41,10 @@ Prerequisites and Runbook](../README.md#production-proxmox-prerequisites-and-run
 remains the setup reference for the dedicated provisioner identity, exact ACL
 paths, mandatory propagation, one-time token secret handling, manual token
 rotation, and stranded-lease warnings. Both are distinct from the disposable
-acceptance setup. Production catalog registration remains unverified; the
-documented production-style Vault installation commands must not be treated as
-live validation. This document remains authoritative for design and security
+acceptance setup. Production catalog registration is verified for a single-node
+non-dev Vault only; the documented production-style Vault installation commands
+must not be treated as evidence of multi-node distribution, HA forwarding, or
+failover behavior. This document remains authoritative for design and security
 behavior; the implementation plan remains authoritative for current status.
 
 ## Configuration
@@ -175,9 +180,27 @@ POST <mount>/roles/:name
   "max_ttl": 86400,
   "group": "vault-vm-admins",           # Pre-existing PVE group name
   "user_prefix": "vault",                # synthetic userid prefix
-  "realm": "pve"                         # target realm (default: pve)
+  "realm": "pve",                        # target realm (default: pve)
+  "mode": "token"                        # "token" (default) or "password"
 }
 ```
+
+**`mode`** selects the credential type issued by `creds/:role`:
+
+| mode | credential | PVE calls | rotation |
+|---|---|---|---|
+| `token` (default) | privsep=0 API token on the synthetic user | `CreateUser` then `CreateToken` | n/a (one-time secret) |
+| `password` | generated password on the synthetic user | `CreateUser` only, with `password` on the same call | never — see below |
+
+An absent or empty stored `mode` normalizes to `token` in `getRole`, so roles
+written before the field existed — and every lease already issued from them —
+behave exactly as before.
+
+`mode=password` is accepted **only for the `pve` realm**. PVE-realm password
+creation, authentication, exact-shape renewal, expiry, disablement, and deletion
+are confirmed live (`docs/PVE_PROBES.md` Probe P0); PAM password creation FAILED
+in the automated probe run and its reported authentication/rotation behavior is
+unreproduced, so the role write refuses it rather than assuming.
 
 **Validation**: The write operation rejects the request with a clear error if
 `ttl` > `max_ttl` (when both are set). This is an input-sanity guard so
@@ -311,6 +334,63 @@ Response:
 The response `user_id` field and `token_id` use the realm configured in the role
 (default `@pve`). The lease's private `InternalData` stores the same userid under
 `pve_userid` for renew/revoke callbacks; that internal key is not a response field.
+
+### Password mode
+
+A `mode=password` role returns a different secret type (`password`) whose data
+is exactly two fields:
+
+```json
+{
+  "data": {
+    "user_id": "vault-myrole-a1b2c3@pve",
+    "password": "<32 random alphanumeric characters>"
+  }
+}
+```
+
+**Generator contract** (`password.go`): the ENGINE generates the password —
+32 characters drawn with `crypto/rand` (`rand.Int`, so no modulo bias) from a
+62-symbol ASCII alphanumeric alphabet (~190 bits), inside PVE's confirmed 8..64
+length bound. Punctuation is excluded so the value survives shells, URLs, and
+config files without quoting.
+
+**Issuance ordering** is the same-call form:
+`PutWAL` → `CreateUser` (with `password`; the credential is LIVE on HTTP 200) →
+`GetUser` read-back → `DeleteWAL` → return the Secret. Because the credential is
+already live at the read-back, every failure after `CreateUser` compensates
+through the shared `cleanupUser` helper (`DeleteUser`, then `DeleteWAL` only when
+that returned nil or `ErrUserNotFound`).
+
+**Comment/nonce policy differs from token mode**: a read-back `comment != nonce`
+is **FATAL** here. Token mode warns and still issues, because a lost ownership
+marker only degrades crash recovery for a credential the operator can still
+revoke. In password mode the credential authenticates already, so the engine
+deletes the user and fails issuance instead of handing out a credential whose
+WAL-based recovery is known to be broken.
+
+**No rotation.** The engine never changes a password. `PUT /access/password`
+requires a password-authenticated ticket, which the engine's API-token
+authentication cannot obtain (Probe P0). Renewal extends the PVE `expire` with
+the same `expire`+`groups`+`enable`+`append=1` PUT as token mode and leaves the
+original password valid (confirmed, Probe P0). A caller who needs a new password
+revokes the lease and reads `creds/:role` again.
+
+**Where the password lives.** It is never written to a log line, an error
+string, the WAL, `Secret.InternalData`, or any backend-controlled storage under
+`req.Storage`. It IS present in Vault core's encrypted lease entry, because core
+persists the returned secret response — that is outside the backend's control
+and is the operator's retention consideration, not a leak the engine can close.
+
+**Orphan windows** (live credential with no lease):
+- *Nonce-matched orphan* (crash between `CreateUser` and `DeleteWAL`): cleaned by
+  `walRollback` after `WALRollbackMinAge` (5 min) plus retry time.
+- *Nonce-mismatched or empty-nonce orphan*: `walRollback` intentionally DROPS the
+  WAL entry without deleting the user, so cleanup falls to the PVE `expire`
+  backstop or manual operator action. The fatal comment-mismatch policy above
+  exists to keep this window from being entered on the normal path.
+- In all cases the user-level `expire` set at issuance (lease end + 60s grace) is
+  the backstop: past it, PVE rejects authentication with 401.
 
 ## Implementation Notes
 

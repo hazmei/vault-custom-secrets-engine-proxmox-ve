@@ -152,6 +152,7 @@ func TestSecretTokenRenew_HappyPath(t *testing.T) {
 	}
 	if resp == nil {
 		t.Fatal("expected non-nil response")
+		return
 	}
 	if resp.Secret == nil {
 		t.Fatal("expected non-nil Secret in renewal response")
@@ -245,6 +246,7 @@ func TestSecretTokenRenew_DisabledUser_RefusesRenewal(t *testing.T) {
 	// Must fail.
 	if err == nil {
 		t.Fatal("expected error when user is disabled; got nil")
+		return
 	}
 	if resp != nil && resp.Secret != nil {
 		t.Error("resp.Secret must be nil when renewal is refused")
@@ -300,6 +302,7 @@ func TestSecretTokenRenew_GroupReadbackFails(t *testing.T) {
 	_, err := b.secretTokenRenew(ctx, req, nil)
 	if err == nil {
 		t.Fatal("expected error when group read-back fails; got nil")
+		return
 	}
 	errMsg := strings.ToLower(err.Error())
 	if !strings.Contains(errMsg, "group") {
@@ -380,6 +383,7 @@ func TestSecretTokenRenew_TTLPastMax(t *testing.T) {
 	_, err := b.secretTokenRenew(ctx, req, nil)
 	if err == nil {
 		t.Fatal("expected error when TTL is past max; got nil")
+		return
 	}
 	errMsg := strings.ToLower(err.Error())
 	if !strings.Contains(errMsg, "ttl") && !strings.Contains(errMsg, "zero") && !strings.Contains(errMsg, "max") {
@@ -418,6 +422,7 @@ func TestSecretTokenRenew_MissingPveUserid(t *testing.T) {
 	_, err := b.secretTokenRenew(ctx, req, nil)
 	if err == nil {
 		t.Fatal("expected error for missing pve_userid; got nil")
+		return
 	}
 	if !strings.Contains(strings.ToLower(err.Error()), "pve_userid") {
 		t.Errorf("error should mention pve_userid; got: %q", err.Error())
@@ -445,6 +450,7 @@ func TestSecretTokenRenew_MissingGroup(t *testing.T) {
 	_, err := b.secretTokenRenew(ctx, req, nil)
 	if err == nil {
 		t.Fatal("expected error for missing group; got nil")
+		return
 	}
 	if !strings.Contains(strings.ToLower(err.Error()), "group") {
 		t.Errorf("error should mention group; got: %q", err.Error())
@@ -472,6 +478,7 @@ func TestSecretTokenRenew_MissingEffectiveMaxTTL(t *testing.T) {
 	_, err := b.secretTokenRenew(ctx, req, nil)
 	if err == nil {
 		t.Fatal("expected error for missing effective_max_ttl; got nil")
+		return
 	}
 	if !strings.Contains(strings.ToLower(err.Error()), "effective_max_ttl") {
 		t.Errorf("error should mention effective_max_ttl; got: %q", err.Error())
@@ -499,6 +506,7 @@ func TestSecretTokenRenew_WrongTypeEffectiveMaxTTL(t *testing.T) {
 	_, err := b.secretTokenRenew(ctx, req, nil)
 	if err == nil {
 		t.Fatal("expected error for wrong type effective_max_ttl; got nil")
+		return
 	}
 }
 
@@ -829,6 +837,7 @@ func TestSecretTokenRevoke_TransientError(t *testing.T) {
 	resp, err := b.secretTokenRevoke(ctx, req, nil)
 	if err == nil {
 		t.Fatal("expected error for transient DeleteUser failure; got nil")
+		return
 	}
 	if resp != nil {
 		t.Errorf("expected nil response on error; got: %v", resp)
@@ -866,6 +875,7 @@ func TestSecretTokenRenew_UnauthenticatedUpdateDiagnostic(t *testing.T) {
 	resp, err := b.secretTokenRenew(ctx, req, nil)
 	if err == nil {
 		t.Fatal("expected unauthenticated renewal error, got nil")
+		return
 	}
 	if resp != nil && resp.Secret != nil {
 		t.Error("resp.Secret must be nil on renewal failure")
@@ -908,6 +918,7 @@ func TestSecretTokenRevoke_UnauthenticatedDiagnostic(t *testing.T) {
 	resp, err := b.secretTokenRevoke(ctx, req, nil)
 	if err == nil {
 		t.Fatal("expected unauthenticated revoke error, got nil")
+		return
 	}
 	if resp != nil {
 		t.Errorf("expected nil response on revoke error; got: %v", resp)

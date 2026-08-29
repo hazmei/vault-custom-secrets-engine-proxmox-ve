@@ -1514,8 +1514,13 @@ not run by CI.
 and `make lint` passed, and the full real Vault-server lifecycle smoke test
 passed against the disposable `pve-manager/9.2.10/43df2e01f27a1a19` target.
 Development-mode registration through `-dev-plugin-dir=./vault/plugins` and
-enablement were verified. Production-style plugin catalog registration remains
-unverified; see the trackable deferred gate below.
+enablement were verified. Production-style plugin catalog registration with
+`vault plugin register -sha256=<hash>` was separately verified (previously,
+undated) on a single-node non-dev Vault: the catalog entry's digest matched the
+recorded artifact digest, and the catalog entry and mount persisted across a
+Vault restart. That run covered a single node only; multi-node artifact
+distribution, standby-to-active forwarding, failover, and cross-node restart
+recovery remain unverified. See the trackable deferred gates below.
 Therefore Phase 6 is not complete.
 
 The operator-facing production verification procedure is maintained in
@@ -1575,8 +1580,10 @@ changes were made outside the disposable target.
 **Acceptance Criteria**:
 - Clean build (`make build` succeeds)
 - Plugin auto-registers and enables through `-dev-plugin-dir` (verified)
-- Production catalog registration is tracked by the unchecked production
-  adoption gate below and is not claimed as complete
+- Production catalog registration with a verified `-sha256` digest, and
+  catalog/mount persistence across restart, are verified on a single-node
+  non-dev Vault (previously, undated); the remaining multi-node, HA-forwarding,
+  failover, and cross-node restart-recovery gates below stay unchecked
 - Full issue→use→renew→revoke smoke test passes through a real `vault server`
   plus registered plugin binary with required live PVE configuration
 - Stored config can be force-deleted and the cached PVE client is invalidated
@@ -1613,8 +1620,12 @@ engine therefore continues to send explicit `append=1` with `expire` +
 
 - [ ] Build one approved artifact, distribute it to every Vault node, and
   verify identical digest, executable permissions, ownership, and path.
-- [ ] Register the plugin in the production catalog with the verified digest;
-  verify catalog and mount persistence across restart.
+- [x] Register the plugin in the production catalog with the verified digest;
+  verify catalog and mount persistence across restart. — Verified previously
+  (undated) on a single-node non-dev Vault: catalog digest matched the recorded
+  artifact digest, and the catalog entry and mount survived a Vault restart.
+  Multi-node catalog/mount persistence is NOT covered by that run and remains
+  part of the gates above and below.
 - [ ] Verify standby-to-active forwarding before any PVE mutation, controlled
   failover, and issue/renew/revoke through the cluster address after failover.
 - [ ] Verify restart recovery for leases, WAL cleanup, PVE users/tokens,
@@ -1624,17 +1635,36 @@ engine therefore continues to send explicit `append=1` with `expire` +
   orphan `vault-*` PVE user was deleted. Do not make production adoption
   depend on this destructive failure-injection test.
 
-### Password Credential Support (gated future feature)
+### Password Credential Support (IMPLEMENTED under a reduced scope)
 
-Password credentials are deliberately not implemented; the engine currently issues
-only PVE API tokens. Do not make token-only production adoption depend on this work,
-add password fields, or alter the token lifecycle as part of the release gates.
-Complete the following tasks in order. **P0 remains partial/open for the
-agreed password-realm scope.** Password credentials remain unimplemented; this
-P0 decision does not authorize adding password credentials or opening the later
-password implementation tasks automatically.
+**Status (2026-08-29): IMPLEMENTED for the `pve` realm, by explicit operator
+decision to proceed ahead of the remaining production adoption gates and with
+P0 still partial/open.** The shipped scope is bounded by the P0 evidence that
+actually exists (`docs/PVE_PROBES.md` Probe P0):
 
-- [ ] **P0 — Live PVE password behavior probe (pre-implementation; partial/open)**
+- **In scope and implemented**: `mode=password` roles on the `pve` realm;
+  engine-generated password supplied on `POST /access/users` (single call);
+  no API token minted; renewal extends the PVE `expire` only; revocation
+  deletes the user.
+- **Refused at role-write time**: any realm other than `pve`. PAM password
+  creation FAILED in the automated probe run, and the PAM authentication and
+  rotation results are operator-reported and unreproduced.
+- **Not implemented, and not implementable with this engine's auth**: password
+  rotation. `PUT /access/password` requires a password-authenticated ticket,
+  which API-token authentication cannot obtain (Probe P0). Callers who need a
+  new password revoke the lease and issue a new credential.
+
+This does NOT change the token-only production adoption gates above, and no
+release gate depends on password support.
+
+- [ ] **P0 — Live PVE password behavior probe (STILL PARTIAL/OPEN)**
+  - **Note (2026-08-29)**: password support was implemented ahead of this task
+    closing, by explicit operator decision. The implementation is restricted to
+    exactly what P0 confirmed — `pve`-realm same-call password creation,
+    authentication, exact-shape renewal, expiry, disablement, and deletion — and
+    the unresolved areas are handled by refusing them in code rather than
+    assuming behavior: non-`pve` realms are rejected at role-write time, and
+    rotation is not implemented at all. The remaining checklist below stays open.
   - **Files/scope**: `docs/PVE_PROBES.md`, disposable PVE 9.2.10 target, probe
     notes/scripts as appropriate; no application code.
   - **Dependencies**: operator-provided disposable PVE 9.2.10 cluster and
@@ -1683,7 +1713,18 @@ password implementation tasks automatically.
     password credentials to the engine unless separately approved and implemented
     through the later password work items.
 
-- [ ] **P1 — Contract and documentation finalization (pre-implementation)**
+- [x] **P1 — Contract and documentation finalization** — DONE. Locked contract:
+  engine-owned generator (`password.go`), `crypto/rand` via `rand.Int` rejection
+  sampling, 32 characters from a 62-symbol ASCII alphanumeric charset (~190 bits),
+  inside PVE's confirmed 8..64 bound; password supplied on `POST /access/users`
+  (same-call, credential live on HTTP 200); response contract is exactly
+  `user_id` + `password`; **comment/nonce read-back mismatch is FATAL in password
+  mode** (delete the user, fail issuance) rather than the token-mode soft warning;
+  no rotation, ever. Redaction: the password never enters logs, error strings, the
+  WAL, `Secret.InternalData`, or `req.Storage` — only Vault core's encrypted lease
+  entry, which is outside the backend's control.
+
+- [ ] **P1 — original checklist (retained for reference)**
   - **Files/scope**: `docs/IMPLEMENTATION_PLAN.md`, `docs/ARCHITECTURE.md`,
     `README.md`, and any password-specific operator documentation.
   - **Dependencies**: P0 evidence and review.
@@ -1711,7 +1752,7 @@ password implementation tasks automatically.
   - **Acceptance**: the plan, architecture, README, and operator guidance agree;
     no document claims unsupported PVE behavior or exposes a secret.
 
-- [ ] **P2 — Role schema and validation**
+- [x] **P2 — Role schema and validation** — DONE (`path_roles.go`: `mode` field, `token`/`password` validation, `getRole` normalizes empty mode to `token`, password-mode realm gate).
   - **Files/scope**: `path_config.go`, `path_roles.go`, privilege documentation and
     tests if P0 identifies new requirements, role storage/schema documentation, and
     relevant compatibility tests.
@@ -1729,7 +1770,7 @@ password implementation tasks automatically.
   - **Acceptance**: old roles round-trip as token roles; invalid modes fail; new
     password roles round-trip; token role tests remain green.
 
-- [ ] **P3 — Separate password secret type**
+- [x] **P3 — Separate password secret type** — DONE (`secret_password.go`, registered in `backend.go` alongside the token secret; renew/revoke callbacks shared because both act only on the synthetic user in lease InternalData).
   - **Files/scope**: new password secret implementation (likely
     `secret_password.go`), `backend.go`, and secret unit tests.
   - **Dependencies**: P1 and P2; use only the confirmed PVE behavior.
@@ -1743,7 +1784,7 @@ password implementation tasks automatically.
   - **Acceptance**: schema has no extra response fields; secret redaction tests pass;
     token secret registration and existing leases remain unchanged.
 
-- [ ] **P4 — Password issuance and compensation**
+- [x] **P4 — Password issuance and compensation** — DONE (`path_creds.go` same-call ordering `PutWAL -> CreateUser(password live) -> GetUser read-back -> DeleteWAL -> return`; reuses `cleanupUser`; `CreateToken` never called in password mode).
   - **Files/scope**: `path_creds.go` or password issuance helper, `wal.go`,
     `internal/pveapi/*`, and issuance/compensation tests.
   - **Dependencies**: P0–P3; blocked until P0 evidence and the P1/P3 password
@@ -1798,7 +1839,7 @@ password implementation tasks automatically.
     persists the returned secret response; token issuance is behaviorally
     unchanged.
 
-- [ ] **P5 — Password renewal and revocation**
+- [x] **P5 — Password renewal and revocation** — DONE (shared `secretTokenRenew`/`secretTokenRevoke`; renewal extends `expire` only and never returns or rotates a password).
   - **Files/scope**: password secret callbacks, `secret_password.go`, and lifecycle
     tests; update architecture references if probe results require it.
   - **Dependencies**: P0–P4.
@@ -1812,7 +1853,7 @@ password implementation tasks automatically.
     rotation and never returns a password; revocation removes the user and is
     retry-safe; token renew/revoke tests remain green.
 
-- [ ] **P6 — WAL and lifecycle test coverage**
+- [x] **P6 — WAL and lifecycle test coverage** — DONE (`secret_password_test.go`; opt-in live `TestAccPasswordLifecycle` gated by `VAULT_ACC=1` plus `PVE_PASSWORD_ACC=1`).
   - **Files/scope**: `wal_test.go`, `path_creds_test.go`, `secret_password_test.go`,
     `acceptance_test.go` (gated `TestAcc*` additions), and testing documentation.
   - **Dependencies**: P0–P5.
@@ -1842,7 +1883,7 @@ password implementation tasks automatically.
     `VAULT_ACC=1` gated, require explicit P0 evidence/prerequisites, and never print
     secrets; existing acceptance tests remain unchanged and green.
 
-- [ ] **P7 — Operator documentation and security review**
+- [x] **P7 — Operator documentation and security review** — DONE (README.md, docs/ARCHITECTURE.md, AGENTS.md updated with the password contract, orphan windows, and the lease-storage caveat).
   - **Files/scope**: `README.md`, `docs/ARCHITECTURE.md`, `AGENTS.md`,
     `docs/PRODUCTION_VERIFICATION.md`, `docs/IMPLEMENTATION_PLAN.md`, and audit/
     security review notes. Include `docs/ARCHITECTURE.md` and `AGENTS.md` in the

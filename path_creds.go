@@ -9,7 +9,9 @@
 //     generate nonce → PutWAL{UserID,Nonce} → CreateUser{Comment=nonce} →
 //     on ErrConflict → DeleteWAL(walID) + retry.
 //   - Read-back GetUser: assert group membership; soft-check comment==nonce.
-//   - CreateToken with privsep=0 (MANDATORY).
+//   - Token mode: CreateToken with privsep=0 (MANDATORY).
+//     Password mode: no token is minted; the password is supplied on the
+//     CreateUser call itself and is live as soon as that call returns.
 //   - On success: DeleteWAL(walID) before returning Secret.
 //   - On DeleteWAL failure: best-effort DeleteUser then return error.
 //
@@ -153,6 +155,20 @@ func (b *backend) handleCredsRead(ctx context.Context, req *logical.Request, d *
 		return nil, fmt.Errorf("proxmox: creds/%s: get PVE client: %w", roleName, err)
 	}
 
+	// Step 3b: password mode — generate the credential BEFORE the retry loop.
+	// One password serves every suffix attempt: a collided attempt creates
+	// nothing in PVE, so no attempt can leak or strand it. The value is live
+	// only once CreateUser succeeds.
+	passwordMode := role.Mode == modePassword
+	var password string
+	if passwordMode {
+		password, err = generatePassword()
+		if err != nil {
+			// generatePassword never puts generated material in its error.
+			return nil, fmt.Errorf("proxmox: creds/%s: %w", roleName, err)
+		}
+	}
+
 	// Step 4: bounded retry loop over random suffixes.
 	var (
 		userid string
@@ -194,12 +210,16 @@ func (b *backend) handleCredsRead(ctx context.Context, req *logical.Request, d *
 		// Step 4b: CreateUser with groups=<role.group>, expire, and Comment=nonce.
 		// The nonce in Comment enables walRollbackUser to verify ownership before
 		// deleting, closing the stale-WAL foreign-user-deletion class.
+		// In password mode the credential is LIVE the moment this call returns
+		// 200 — before the group read-back and before DeleteWAL. Every failure
+		// after this point must delete the user (cleanupUser), not just log.
 		createErr := client.CreateUser(ctx, pveapi.CreateUserRequest{
-			UserID:  userid,
-			Groups:  role.Group, // single CSV field (only one group per role)
-			Expire:  expireUnix,
-			Enable:  true,
-			Comment: nonce, // ownership marker for walRollbackUser
+			UserID:   userid,
+			Groups:   role.Group, // single CSV field (only one group per role)
+			Expire:   expireUnix,
+			Enable:   true,
+			Comment:  nonce,    // ownership marker for walRollbackUser
+			Password: password, // empty in token mode
 		})
 
 		if createErr == nil {
@@ -269,6 +289,31 @@ func (b *backend) handleCredsRead(ctx context.Context, req *logical.Request, d *
 		)
 	}
 
+	// Password mode: a nonce mismatch is FATAL (docs/IMPLEMENTATION_PLAN.md P1
+	// comment read-back policy). The credential already authenticates, and a
+	// lost marker means walRollbackUser can no longer prove ownership, so a
+	// crash here would strand a LIVE credential until the PVE expire backstop.
+	// Delete the user now and fail issuance rather than hand out a credential
+	// whose crash-recovery path is already broken.
+	//
+	// If that DeleteUser fails transiently the WAL entry is retained, but
+	// walRollback will DROP it without deleting the user (the nonce does not
+	// match). Cleanup is then bounded by the PVE expire backstop or manual
+	// operator action — documented in README.md and docs/ARCHITECTURE.md.
+	if passwordMode && info.Comment != nonce {
+		b.Logger().Error("creds: user comment does not match WAL nonce in password mode; deleting the live credential and failing issuance",
+			"userid", userid, "expected", nonce, "actual", info.Comment)
+		if cleanErr := b.cleanupUser(ctx, req.Storage, userid, walID); cleanErr != nil {
+			b.Logger().Error("creds: compensation failed after password-mode comment mismatch; the live credential may persist until the PVE expire backstop",
+				"userid", userid, "walID", walID, "cleanup_error", cleanErr)
+		}
+		return nil, fmt.Errorf(
+			"proxmox: creds/%s: comment read-back mismatch for %q in password mode; "+
+				"the user was deleted and no credential was issued — do not hand-edit the comment field on vault-* users",
+			roleName, userid,
+		)
+	}
+
 	// M2: Soft-check that the comment survived the CreateUser round-trip.
 	// PVE could truncate or drop the comment field (as it can silently drop
 	// groups); if it does, walRollbackUser will mis-identify the user as
@@ -277,7 +322,7 @@ func (b *backend) handleCredsRead(ctx context.Context, req *logical.Request, d *
 	// is otherwise valid), but we emit a Warn so operators are alerted.
 	// Only crash-recovery (walRollback) is degraded; the normal revocation
 	// path is unaffected.
-	if info.Comment != nonce {
+	if !passwordMode && info.Comment != nonce {
 		b.Logger().Warn("creds: user comment does not match WAL nonce after create; walRollback cleanup will not be able to verify ownership",
 			"userid", userid,
 			"expected", nonce,
@@ -286,14 +331,20 @@ func (b *backend) handleCredsRead(ctx context.Context, req *logical.Request, d *
 	}
 
 	// Step 6: CreateToken with privsep=0 (MANDATORY — sent by the client, not this caller).
-	tokenSecret, err := client.CreateToken(ctx, userid, leaseTokenID)
-	if err != nil {
-		b.Logger().Warn("creds: CreateToken failed; cleaning up", "userid", userid, "error", err)
-		if cleanErr := b.cleanupUser(ctx, req.Storage, userid, walID); cleanErr != nil {
-			b.Logger().Error("creds: compensation failed after CreateToken failure; WAL left for walRollback",
-				"userid", userid, "walID", walID, "cleanup_error", cleanErr)
+	// Password mode mints NO token: the password on the synthetic user is the
+	// credential, and it inherits the group-derived role directly.
+	var tokenSecret string
+	if !passwordMode {
+		secret, tokenErr := client.CreateToken(ctx, userid, leaseTokenID)
+		if tokenErr != nil {
+			b.Logger().Warn("creds: CreateToken failed; cleaning up", "userid", userid, "error", tokenErr)
+			if cleanErr := b.cleanupUser(ctx, req.Storage, userid, walID); cleanErr != nil {
+				b.Logger().Error("creds: compensation failed after CreateToken failure; WAL left for walRollback",
+					"userid", userid, "walID", walID, "cleanup_error", cleanErr)
+			}
+			return nil, wrapAdminUnauthenticated(fmt.Errorf("proxmox: creds/%s: CreateToken for %q: %w", roleName, userid, tokenErr))
 		}
-		return nil, wrapAdminUnauthenticated(fmt.Errorf("proxmox: creds/%s: CreateToken for %q: %w", roleName, userid, err))
+		tokenSecret = secret
 	}
 
 	// Step 7: SUCCESS — DeleteWAL before returning the Secret.
@@ -311,42 +362,57 @@ func (b *backend) handleCredsRead(ctx context.Context, req *logical.Request, d *
 	}
 
 	// Step 8: Build and return the Secret.
-	// resp.Data: token_id (full PVEAPIToken identifier), token_secret (one-time), user_id.
-	// InternalData: pve_userid, group, effective_max_ttl (nanoseconds as int64),
-	//               role_name (for TTL fallback on renewal), expire (Unix epoch, for tracking).
 	//
-	// The full PVEAPIToken identifier format is: <userid>!<tokenid>
-	// Used in the Authorization header as: PVEAPIToken=<token_id>=<token_secret>
-	tokenID := userid + "!" + leaseTokenID
+	// InternalData is IDENTICAL in both modes — pve_userid, group,
+	// effective_max_ttl (nanoseconds as int64), role_name (TTL fallback on
+	// renewal), expire (Unix epoch) — so renew and revoke are mode-independent.
+	// The password is NEVER placed in InternalData, the WAL, or a log line.
+	internalData := map[string]interface{}{
+		"pve_userid":        userid,
+		"group":             role.Group,
+		"effective_max_ttl": int64(effectiveMaxTTL), // nanoseconds
+		"role_name":         roleName,               // for TTL fallback on renewal
+		"expire":            expireUnix,             // Unix epoch; rewritten on each renewal
+	}
 
-	st := secretToken(b)
-	resp := st.Response(
-		// resp.Data — returned to the caller.
-		map[string]interface{}{
-			"token_id":     tokenID,
-			"token_secret": tokenSecret, // one-time; never readable again
-			"user_id":      userid,
-		},
-		// InternalData — stored with the lease, used by Renew/Revoke.
-		map[string]interface{}{
-			"pve_userid":        userid,
-			"group":             role.Group,
-			"effective_max_ttl": int64(effectiveMaxTTL), // nanoseconds
-			"role_name":         roleName,               // for TTL fallback on renewal
-			"expire":            expireUnix,             // Unix epoch; rewritten on each renewal
-		},
-	)
+	var resp *logical.Response
+	if passwordMode {
+		// Password mode contract: exactly user_id and password. No token fields.
+		resp = secretPassword(b).Response(
+			map[string]interface{}{
+				"user_id":  userid,
+				"password": password, // returned once; never readable again
+			},
+			internalData,
+		)
+		b.Logger().Info("creds: issued PVE dynamic password",
+			"role", roleName,
+			"userid", userid,
+			"ttl", ttl,
+		)
+	} else {
+		// The full PVEAPIToken identifier format is: <userid>!<tokenid>
+		// Used in the Authorization header as: PVEAPIToken=<token_id>=<token_secret>
+		tokenID := userid + "!" + leaseTokenID
+		resp = secretToken(b).Response(
+			map[string]interface{}{
+				"token_id":     tokenID,
+				"token_secret": tokenSecret, // one-time; never readable again
+				"user_id":      userid,
+			},
+			internalData,
+		)
+		b.Logger().Info("creds: issued PVE dynamic token",
+			"role", roleName,
+			"userid", userid,
+			"token_id", tokenID,
+			"ttl", ttl,
+		)
+	}
 
 	// Set the lease TTL and MaxTTL on the Secret.
 	resp.Secret.TTL = ttl
 	resp.Secret.MaxTTL = effectiveMaxTTL
-
-	b.Logger().Info("creds: issued PVE dynamic token",
-		"role", roleName,
-		"userid", userid,
-		"token_id", tokenID,
-		"ttl", ttl,
-	)
 
 	return resp, nil
 }

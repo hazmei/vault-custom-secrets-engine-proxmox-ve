@@ -288,6 +288,7 @@ func TestAccWALRollback(t *testing.T) {
 	}
 	if entry == nil {
 		t.Fatalf("GetWAL(%q) returned nil", walID)
+		return
 	}
 	req := &logical.Request{Storage: h.Storage}
 	if err := h.Backend.walRollback(ctx, req, entry.Kind, entry.Data); err != nil {
@@ -454,6 +455,7 @@ func TestValidateAccBehaviorEnvRequiresMarkerForCustomPath(t *testing.T) {
 	err := validateAccBehavioralCanaryEnv(accEnv{BehaviorPath: "/nodes"})
 	if err == nil {
 		t.Fatal("expected PVE_BEHAVIORAL_PATH without marker to fail")
+		return
 	}
 	if !strings.Contains(err.Error(), accBehaviorMarkerEnv) || !strings.Contains(err.Error(), "TestAccAuthorizationContractCanary") {
 		t.Fatalf("validation error = %q; want marker and canary context", err.Error())
@@ -464,6 +466,7 @@ func TestValidateAccBehaviorEnvRequiresPathForMarker(t *testing.T) {
 	err := validateAccBehavioralCanaryEnv(accEnv{BehaviorMarker: "marker"})
 	if err == nil {
 		t.Fatal("expected PVE_BEHAVIORAL_MARKER without path to fail")
+		return
 	}
 	if !strings.Contains(err.Error(), accBehaviorPathEnv) {
 		t.Fatalf("validation error = %q; want behavioral path", err.Error())
@@ -474,6 +477,7 @@ func TestValidateAccBehaviorEnvRejectsVersionSentinelWithSpecificMessage(t *test
 	err := validateAccBehavioralCanaryEnv(accEnv{BehaviorPath: accDefaultBehavior})
 	if err == nil {
 		t.Fatal("expected /version behavioral path sentinel to fail")
+		return
 	}
 	want := "TestAccAuthorizationContractCanary requires PVE_BEHAVIORAL_PATH to be a group-role-gated endpoint, not /version and PVE_BEHAVIORAL_MARKER so group-derived privilege is proven by a behavioral endpoint response marker"
 	if err.Error() != want {
@@ -577,9 +581,14 @@ func writeAccConfigWithEnv(ctx context.Context, b *backend, storage logical.Stor
 
 func writeAccRole(t *testing.T, ctx context.Context, h accHarness) {
 	t.Helper()
+	writeAccRoleNamed(t, ctx, h, accRoleName, modeToken)
+}
+
+func writeAccRoleNamed(t *testing.T, ctx context.Context, h accHarness, roleName, mode string) {
+	t.Helper()
 	resp, err := h.Backend.HandleRequest(ctx, &logical.Request{
 		Operation: logical.CreateOperation,
-		Path:      "roles/" + accRoleName,
+		Path:      "roles/" + roleName,
 		Storage:   h.Storage,
 		Data: map[string]interface{}{
 			"group":       h.Env.Group,
@@ -587,6 +596,7 @@ func writeAccRole(t *testing.T, ctx context.Context, h accHarness) {
 			"realm":       "pve",
 			"ttl":         accDefaultTTL,
 			"max_ttl":     accDefaultMaxTTL,
+			"mode":        mode,
 		},
 	})
 	if err != nil {
@@ -887,4 +897,152 @@ func redactBody(body []byte) string {
 		return text[:256] + "..."
 	}
 	return text
+}
+
+// accPasswordRoleName is the role used by the opt-in password acceptance test.
+// It is separate from accRoleName so a password run cannot disturb the
+// token-mode role the required acceptance tests depend on.
+const accPasswordRoleName = "acc-password-role"
+
+// accPasswordEnv gates the password acceptance test. Password credentials are
+// only exercised against a realm with recorded P0 evidence (docs/PVE_PROBES.md:
+// the `pve` realm), and only when the operator explicitly opts in — the test
+// creates a password-authenticating PVE user on the target.
+const accPasswordEnv = "PVE_PASSWORD_ACC"
+
+// TestAccPasswordLifecycle is the opt-in live coverage required by
+// docs/IMPLEMENTATION_PLAN.md P6 for password mode: issuance, authentication,
+// confirmed absence of any API token, renewal preserving the ORIGINAL password,
+// the expiry backstop, disablement, and deletion on revoke.
+//
+// Gated by VAULT_ACC=1 (like every TestAcc*) plus PVE_PASSWORD_ACC=1. It never
+// prints a password: every assertion reports status codes only.
+func TestAccPasswordLifecycle(t *testing.T) {
+	h := newAccHarness(t)
+	if os.Getenv(accPasswordEnv) != "1" {
+		t.Skipf("password acceptance test skipped: set %s=1 to opt in (creates a password-authenticating PVE user)", accPasswordEnv)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), accTestTimeout)
+	defer cancel()
+
+	writeAccConfig(t, ctx, h)
+	writeAccRoleNamed(t, ctx, h, accPasswordRoleName, modePassword)
+
+	resp, err := h.Backend.HandleRequest(ctx, &logical.Request{
+		Operation: logical.ReadOperation,
+		Path:      "creds/" + accPasswordRoleName,
+		Storage:   h.Storage,
+	})
+	if err != nil {
+		t.Fatalf("issue password creds: %v", err)
+	}
+	if resp == nil || resp.IsError() || resp.Secret == nil {
+		t.Fatalf("password credential response failed: %v", responseErr(resp))
+	}
+	userID, _ := resp.Data["user_id"].(string)
+	password, _ := resp.Data["password"].(string)
+	if userID == "" || password == "" {
+		t.Fatal("password credential response missing user_id or password")
+	}
+	if _, present := resp.Data["token_id"]; present {
+		t.Error("password credential response must not contain token_id")
+	}
+	registerAccUserCleanup(t, h.Client, userID)
+	resp.Secret.IssueTime = time.Now()
+
+	assertAccUserInGroup(t, ctx, h.Client, userID, h.Env.Group)
+
+	// The password authenticates.
+	assertAccTicketStatus(t, ctx, h.Env, userID, password, http.StatusOK)
+
+	// No API token was minted on this user.
+	raw := newAccHTTPClient(t, h.Env)
+	status, body, err := raw.do(ctx, http.MethodGet, "/access/users/"+url.PathEscape(userID)+"/token", h.Env.TokenID, h.Env.TokenSecret, nil)
+	if err != nil {
+		t.Fatalf("list tokens for password user: %v", err)
+	}
+	if status != http.StatusOK {
+		t.Fatalf("list tokens status=%d body=%s", status, redactBody(body))
+	}
+	if strings.Contains(string(body), `"tokenid"`) {
+		t.Errorf("password mode must mint no API token; token list body=%s", redactBody(body))
+	}
+
+	// Renewal extends expiry and the ORIGINAL password still authenticates
+	// (PVE_PROBES.md Probe P0, 28 Aug 2026).
+	renewAccSecret(t, ctx, h, resp.Secret, 120*time.Second)
+	assertAccUserInGroup(t, ctx, h.Client, userID, h.Env.Group)
+	assertAccTicketStatus(t, ctx, h.Env, userID, password, http.StatusOK)
+
+	// Expiry backstop: an expire in the past rejects authentication.
+	pastExpire := time.Now().Unix() - accPastExpireBuffer
+	if expireErr := h.Client.UpdateUser(ctx, pveapi.UpdateUserRequest{UserID: userID, Expire: pastExpire, Groups: h.Env.Group, Enable: true, Append: true}); expireErr != nil {
+		t.Fatalf("expire password user in the past: %v", expireErr)
+	}
+	assertAccTicketStatus(t, ctx, h.Env, userID, password, http.StatusUnauthorized)
+
+	futureExpire := time.Now().Add(10 * time.Minute).Unix()
+	if restoreErr := h.Client.UpdateUser(ctx, pveapi.UpdateUserRequest{UserID: userID, Expire: futureExpire, Groups: h.Env.Group, Enable: true, Append: true}); restoreErr != nil {
+		t.Fatalf("restore password user expiry: %v", restoreErr)
+	}
+	assertAccTicketStatus(t, ctx, h.Env, userID, password, http.StatusOK)
+
+	// Disablement: enable=0 rejects authentication. Sent as a raw PUT because
+	// UpdateUserRequest.Validate deliberately refuses to build a disabling
+	// renewal request.
+	disable := url.Values{}
+	disable.Set("expire", fmt.Sprintf("%d", futureExpire))
+	disable.Set("groups", h.Env.Group)
+	disable.Set("enable", "0")
+	disable.Set("append", "1")
+	status, body, err = raw.do(ctx, http.MethodPut, "/access/users/"+url.PathEscape(userID), h.Env.TokenID, h.Env.TokenSecret, disable)
+	if err != nil {
+		t.Fatalf("disable password user: %v", err)
+	}
+	if status < 200 || status >= 300 {
+		t.Fatalf("disable password user status=%d body=%s", status, redactBody(body))
+	}
+	assertAccTicketStatus(t, ctx, h.Env, userID, password, http.StatusUnauthorized)
+
+	// Revocation deletes the user; authentication stays rejected.
+	revokeReq := logical.RevokeRequest("creds/"+accPasswordRoleName, resp.Secret, nil)
+	revokeReq.Storage = h.Storage
+	if _, revokeErr := h.Backend.Secret(secretTypePassword).Revoke(ctx, revokeReq, nil); revokeErr != nil {
+		t.Fatalf("revoke password secret: %v", revokeErr)
+	}
+	assertAccUserMissing(t, ctx, h.Client, userID)
+	assertAccTicketStatus(t, ctx, h.Env, userID, password, http.StatusUnauthorized)
+}
+
+// assertAccTicketStatus posts credentials to /access/ticket and asserts the
+// HTTP status. The password is sent in the form body and never logged; only the
+// status and a redacted body appear in failures.
+func assertAccTicketStatus(t *testing.T, ctx context.Context, env accEnv, userID, password string, want int) {
+	t.Helper()
+	client := newAccHTTPClient(t, env)
+
+	form := url.Values{}
+	form.Set("username", userID)
+	form.Set("password", password)
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, client.baseURL+"/access/ticket", strings.NewReader(form.Encode()))
+	if err != nil {
+		t.Fatalf("build ticket request: %v", err)
+	}
+	// Deliberately unauthenticated: /access/ticket authenticates the supplied
+	// credentials, so no admin Authorization header is sent.
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+	resp, err := client.http.Do(req)
+	if err != nil {
+		t.Fatalf("ticket request: %v", err)
+	}
+	defer resp.Body.Close() //nolint:errcheck // test helper; close errors are not actionable.
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read ticket response: %v", err)
+	}
+	if resp.StatusCode != want {
+		t.Fatalf("ticket status=%d; want %d body=%s", resp.StatusCode, want, redactBody(body))
+	}
 }

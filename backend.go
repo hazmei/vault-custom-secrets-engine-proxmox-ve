@@ -83,7 +83,7 @@ func newBackend(ctx context.Context, conf *logical.BackendConfig) (*backend, err
 			[]*framework.Path{pathCreds(b)},
 		),
 
-		Secrets:           []*framework.Secret{secretToken(b)},
+		Secrets:           []*framework.Secret{secretToken(b), secretPassword(b)},
 		WALRollback:       b.walRollback,
 		WALRollbackMinAge: 5 * time.Minute,
 
