@@ -178,6 +178,7 @@ func TestCredsRead_HappyPath(t *testing.T) {
 	}
 	if resp == nil {
 		t.Fatal("expected non-nil response")
+		return
 	}
 	if resp.IsError() {
 		t.Fatalf("unexpected error response: %s", resp.Error())
@@ -243,6 +244,7 @@ func TestCredsRead_HappyPath(t *testing.T) {
 	b.clientMu.RUnlock()
 	if mc == nil {
 		t.Fatal("could not retrieve MockClient from backend")
+		return
 	}
 
 	// Assert CreateToken was called (privsep=0 is enforced by the Client interface:
@@ -561,6 +563,7 @@ func TestCredsRead_ErrConflict_DeleteWALFailure(t *testing.T) {
 	}
 	if entry == nil {
 		t.Fatalf("GetWAL(%q) returned nil", walIDs[0])
+		return
 	}
 	deleteCalled := false
 	mc.GetUserFn = func(_ context.Context, _ string) (pveapi.UserInfo, error) {
@@ -673,6 +676,7 @@ func TestCredsRead_GetUserReadbackFailure_CleansUser(t *testing.T) {
 	b.clientMu.RUnlock()
 	if mc == nil {
 		t.Fatal("mock client was not cached")
+		return
 	}
 	if !mc.HasCall("CreateUser") {
 		t.Fatal("CreateUser must be called before read-back failure")
@@ -920,6 +924,7 @@ func TestCredsRead_CompensationDeleteWALFailure_RetainsWAL(t *testing.T) {
 	}
 	if entry == nil {
 		t.Fatalf("GetWAL(%q) returned nil", walIDs[0])
+		return
 	}
 	if rollbackErr := b.walRollback(ctx, &logical.Request{Storage: storage}, entry.Kind, entry.Data); rollbackErr != nil {
 		t.Fatalf("walRollback should treat already-deleted compensation user as success: %v", rollbackErr)
@@ -1454,6 +1459,7 @@ func TestCredsRead_WALNonce_EqualsCreateUserComment(t *testing.T) {
 	}
 	if walEntry == nil {
 		t.Fatalf("framework.GetWAL returned nil for id %q", walIDs[0])
+		return
 	}
 
 	dataMap, ok := walEntry.Data.(map[string]interface{})

@@ -1374,11 +1374,57 @@ Summary of load-bearing findings that MUST shape the implementation:
 See the per-probe tables above for evidence. These findings supersede the corresponding
 "confirmed on PVE 9.2.10" annotations in ARCHITECTURE.md where they conflict.
 
-## Password-credential P0 status — PARTIAL/OPEN
+## Probe P0 verification run — implemented password mode on PVE 9.2.14 (29 August 2026)
 
-The distinct password-credential P0 remains PARTIAL/OPEN: PAM creation and
-most PAM lifecycle behavior are unresolved, the operator password-rotation
-report is unreproduced, and the engine's API-token-only authentication cannot
-exercise `PUT /access/password`, which requires a password-authenticated
-ticket. Password-specific ACL/privilege requirements also remain unresolved.
-Password credentials must not be implemented from this evidence.
+**Target build: `pve-manager/9.2.14/a1480fa6b8d899cb` (running kernel
+6.17.13-3-pve).** This is a DIFFERENT build from the `9.2.10/43df2e01f27a1a19`
+target used by every probe above; the results below are attributed to 9.2.14 and
+do not restate 9.2.10 evidence.
+
+Provenance: automated, reproducible run of the engine's own acceptance suite
+against a disposable target, plus an operator manual pass through a real
+`vault server` (`-dev-plugin-dir`). No password, token secret, or ticket value
+was printed — the password test asserts HTTP status codes only.
+
+Commands:
+
+```text
+make testacc
+go test -count=1 -v -timeout=30m ./... -run '^TestAccPasswordLifecycle$'
+```
+
+| Behavior (realm `pve`) | Result on 9.2.14 |
+|---|---|
+| Password supplied on `POST /access/users` (single call) | Accepted; user read-back HTTP 200 with expected group and comment marker |
+| Password authentication via `POST /access/ticket` | HTTP 200 |
+| API token minted in password mode | None — the user's token list is empty (`CreateToken` is never called) |
+| Exact engine renewal (`expire`+`groups`+`enable`+`append=1`) | HTTP 200; group membership read back intact |
+| ORIGINAL password after that renewal | HTTP 200 — renewal does not invalidate the password |
+| Expiry backstop (`expire` in the past) | Password authentication HTTP 401 |
+| Restored future `expire` | Password authentication HTTP 200 again |
+| Disablement (`enable=0`) | Password authentication HTTP 401 |
+| Revocation (`DELETE /access/users/{userid}`) | User absent afterwards; password authentication HTTP 401 |
+| Password rotation | NOT exercised — not implemented, and unreachable with API-token authentication |
+| PAM realm | NOT exercised — refused at role-write time by design |
+
+The same run also re-confirmed token-mode behavior on 9.2.14: `TestAccLifecycle`,
+the required positive authorization canary, revocation idempotency after an
+out-of-band delete, WAL rollback, concurrent issuance, and the delete-config
+guard all passed. The three optional canaries (direct ACL
+anti-privilege-escalation, negative authorization, insufficient privileges)
+SKIPPED because their documented prerequisites were unset; skips are not
+completed tests.
+
+## Password-credential P0 status — STILL PARTIAL/OPEN
+
+The distinct password-credential P0 remains PARTIAL/OPEN even after the 9.2.14
+verification run above. What that run closes is the `pve`-realm behavior the
+engine actually depends on, reproducibly and on a second build. What remains
+open is unchanged: PAM creation and most PAM lifecycle behavior, the
+unreproduced operator password-rotation report, `PUT /access/password` being
+unreachable with API-token-only authentication, and the password-specific
+ACL/privilege requirements.
+
+Password mode is implemented (by explicit operator decision) restricted to
+exactly the confirmed surface: `pve` realm only, no rotation. The open items
+above are handled by refusing them in code rather than assuming behavior.

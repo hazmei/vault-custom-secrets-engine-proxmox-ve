@@ -37,7 +37,10 @@ full command output containing them.
 This is a verification procedure, not a production-readiness claim. The
 repository's prior local `vault server -dev` test does **not** prove production
 catalog registration, persistence, HA forwarding, failover recovery, or
-filesystem behavior. PVE lifecycle checks still require a safe disposable or
+filesystem behavior. A separate prior single-node non-dev run covered catalog
+registration with a matching digest and catalog/mount persistence across a
+restart, and nothing beyond that: HA forwarding, failover recovery, and
+multi-node filesystem distribution remain unproven. PVE lifecycle checks still require a safe disposable or
 explicitly approved target.
 
 ## Prerequisites
@@ -586,9 +589,10 @@ the plugin is missing on a node, the digest differs, or cleanup is incomplete.
 ## Limitations and non-goals
 
 - This document does not certify production readiness, a particular Vault
-  version, a PVE cluster configuration, or successful production catalog
-  registration. The repository's recorded production-style registration status
-  remains unverified until an operator completes this procedure.
+  version, or a PVE cluster configuration. The repository's recorded
+  production-style registration status covers a single-node non-dev Vault only;
+  multi-node distribution, HA forwarding, failover, and cross-node restart
+  recovery remain unverified until an operator completes this procedure.
 - A local `vault server -dev` run with `-dev-plugin-dir` auto-registers plugins
   and does not prove production catalog registration, persistent storage,
   multi-node HA forwarding, failover, or filesystem distribution/permissions.

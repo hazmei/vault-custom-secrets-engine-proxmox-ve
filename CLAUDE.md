@@ -29,7 +29,7 @@ to anything other than the `false`/`0` opt-out, it refuses to skip and exits 1
 so the CI gate cannot silently self-disable.
 
 Current phase validation status, including the recorded PVE build, optional
-acceptance-test skip gates, and unverified production catalog registration, is
+acceptance-test skip gates, and production catalog registration status, is
 tracked in `docs/IMPLEMENTATION_PLAN.md`.
 
 Recorded validation (2026-08-20) against disposable PVE
@@ -38,15 +38,28 @@ Recorded validation (2026-08-20) against disposable PVE
 `-dev-plugin-dir=./vault/plugins`, engine enablement, and the full real-Vault
 issue/use/renew/revoke lifecycle. The required positive authorization canary
 also passed. Production-style catalog registration with
-`vault plugin register -sha256=<hash>` remains unverified. Do not describe the
-project as production-ready. Optional insufficient-privilege, direct-ACL, and
+`vault plugin register -sha256=<hash>` was verified previously (undated) on a
+single-node non-dev Vault — the catalog digest matched the recorded artifact
+digest and the catalog entry and mount persisted across a Vault restart. That
+run covers one node only; multi-node artifact distribution, standby-to-active
+forwarding, failover, and cross-node restart recovery remain unverified, so do
+not describe the project as production-ready. Optional insufficient-privilege, direct-ACL, and
 negative-authorization canaries may be skipped only when their documented
 prerequisites are unset, and such skips are not completed tests.
 
+Additional recorded validation (2026-08-29) against a disposable
+`pve-manager/9.2.14/a1480fa6b8d899cb` target — a DIFFERENT build from the
+9.2.10 record above: the full required `make testacc` suite passed, and the
+opt-in `TestAccPasswordLifecycle` passed (password issuance, ticket
+authentication, no API token minted, renewal preserving the original password,
+expiry/disablement 401, deletion on revoke). The same three optional canaries
+skipped. Password mode is implemented for the `pve` realm only, with no
+rotation; see `docs/PVE_PROBES.md`.
+
 The Phase 2 deferred review backlog (DR-1 … DR-6) is fully resolved; no deferred
 review items remain. This does NOT change the production-readiness position
-above — unverified production catalog registration and the optional canary skip
-gates are independent of that backlog.
+above — the remaining multi-node/HA production adoption gates and the optional
+canary skip gates are independent of that backlog.
 
 ## Constraints beyond AGENTS.md
 

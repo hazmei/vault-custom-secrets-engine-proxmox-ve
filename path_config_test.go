@@ -398,6 +398,7 @@ func TestConfigRead_ExcludesTokenSecret(t *testing.T) {
 	}
 	if resp == nil {
 		t.Fatal("expected non-nil response")
+		return
 	}
 
 	if _, present := resp.Data["token_secret"]; present {
@@ -527,6 +528,7 @@ func TestConfigForceFieldDocumentsCLIFlagCollision(t *testing.T) {
 	}
 	if forceField == nil {
 		t.Fatal("the `config` path does not declare a `force` field")
+		return
 	}
 
 	for _, want := range []string{
@@ -618,6 +620,7 @@ func TestConfigWriteReadDeleteRoundTrip(t *testing.T) {
 	}
 	if resp == nil {
 		t.Fatal("nil read response after write")
+		return
 	}
 	if _, present := resp.Data["token_secret"]; present {
 		t.Error("token_secret must not be in read response")

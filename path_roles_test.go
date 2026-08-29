@@ -180,6 +180,7 @@ func TestRoleRead_AfterWrite(t *testing.T) {
 	}
 	if resp == nil {
 		t.Fatal("expected non-nil response on read")
+		return
 	}
 
 	for _, field := range []string{"group", "user_prefix", "realm", "ttl", "max_ttl"} {
@@ -230,6 +231,7 @@ func TestRoleList_AfterMultipleWrites(t *testing.T) {
 	}
 	if resp == nil {
 		t.Fatal("expected non-nil list response")
+		return
 	}
 
 	keys, ok := resp.Data["keys"].([]string)
@@ -1022,6 +1024,7 @@ func TestRoleWriteReadDeleteRoundTrip(t *testing.T) {
 	}
 	if resp == nil {
 		t.Fatal("nil read response after write")
+		return
 	}
 	if resp.Data["user_prefix"] != "myprefix" {
 		t.Errorf("user_prefix = %v; want myprefix", resp.Data["user_prefix"])
@@ -1110,6 +1113,7 @@ func TestRoleWrite_PartialUpdate(t *testing.T) {
 	}
 	if readResp == nil {
 		t.Fatal("expected non-nil read response after update")
+		return
 	}
 
 	// ttl SHOULD have been updated.

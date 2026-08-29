@@ -83,6 +83,20 @@ type CreateUserRequest struct {
 	// walRollbackUser can verify ownership before deleting (prevents deleting a
 	// foreign user that coincidentally holds the same userid).
 	Comment string
+	// Password, when non-empty, is sent as the `password` form field on
+	// POST /access/users, creating a password-authenticating user in a single
+	// call (confirmed PVE 9.2.10, PVE_PROBES.md Probe P0 rerun 28 Aug 2026:
+	// `POST /access/users` with `password` returns HTTP 200 and the password
+	// authenticates via POST /access/ticket).
+	//
+	// SECURITY: the value is a live credential the moment PVE returns 200. It
+	// must never be logged, stored, or echoed in an error string. CreateUser
+	// redacts the response body on failure whenever this field is set.
+	//
+	// PVE enforces 8..64 characters (Probe P0: length 7 -> HTTP 400
+	// "value must be at least 8 characters long"; 65 -> HTTP 400
+	// "value may only be 64 characters long").
+	Password string
 }
 
 // UpdateUserRequest carries the parameters for PUT /access/users/{userid}.

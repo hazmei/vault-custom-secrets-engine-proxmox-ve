@@ -356,6 +356,11 @@ func (c *httpClient) GetGroup(ctx context.Context, group string) error {
 
 // CreateUser calls POST /access/users to create a synthetic lease user.
 //
+// When req.Password is set the user is created with a live password in this
+// single call; no separate password-setting request is made (the engine's
+// API-token authentication cannot use PUT /access/password, which requires a
+// password-authenticated ticket — PVE_PROBES.md Probe P0).
+//
 // Form-encoding notes (from AGENTS.md — both are silent-failure traps):
 //   - groups: ONE comma-separated field, never array-repeated.
 //   - enable: serialized as literal "1", never bool/omitempty.
@@ -375,8 +380,16 @@ func (c *httpClient) CreateUser(ctx context.Context, req CreateUserRequest) erro
 	if req.Comment != "" {
 		form.Set("comment", req.Comment)
 	}
+	// Password mode: single-call creation. The credential is live as soon as
+	// PVE returns 200 (PVE_PROBES.md Probe P0 rerun, 28 Aug 2026).
+	if req.Password != "" {
+		form.Set("password", req.Password)
+	}
 
-	_, _, err := c.doRequest(ctx, http.MethodPost, "/access/users", form, false)
+	// redactBody when a password is present: PVE's validation errors name the
+	// field rather than echoing the value, but redaction removes the whole
+	// class of accidental credential echo from error strings.
+	_, _, err := c.doRequest(ctx, http.MethodPost, "/access/users", form, req.Password != "")
 	if err != nil {
 		return fmt.Errorf("pveapi: CreateUser %q: %w", req.UserID, err)
 	}

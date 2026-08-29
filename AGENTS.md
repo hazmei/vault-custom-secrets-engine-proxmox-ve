@@ -6,7 +6,7 @@ Instructions for AI coding agents working on this Vault secrets engine plugin.
 
 - **Active implementation** through Phase 6 partial validation. Current phase
   validation status, including the recorded PVE build, optional acceptance-test
-  skip gates, and unverified production catalog registration status, is tracked in
+  skip gates, and production catalog registration status, is tracked in
   `docs/IMPLEMENTATION_PLAN.md`. `docs/ARCHITECTURE.md` and
   `docs/IMPLEMENTATION_PLAN.md` are the authoritative design/status — READ THEM
   before extending.
@@ -37,12 +37,16 @@ Instructions for AI coding agents working on this Vault secrets engine plugin.
 
 - **Renewal must re-`PUT /access/users/{userid}` re-sending `expire`+`groups`+`enable`+`append=1` together.** Historical PVE 9.2.10 Probe 7 showed replacement-style updates can wipe the `groups` array and strip the credential's privileges; a later live acceptance run on PVE manager 9.2.10 build `43df2e01f27a1a19` preserved groups when `append` was omitted, so omitted-`append` semantics are unresolved and must not be relied upon. Read the target group from lease InternalData (not the role), send explicit `append=1`, and read the user back to assert membership survived. The preserve path (re-sending `expire`+`groups`+`enable`+`append=1` retains membership, with `groups` and `expire` read back correctly) is confirmed by Probe RENEWAL-PRESERVE (17 Aug 2026 — groups `["vault-test-grp"]` read back, expire advanced 1786986804→1786990429). The runtime read-back assertion remains as defense-in-depth. Proxmox tokens have no native TTL; the user-level `expire` backstop cuts off the credential when past — confirmed on PVE 9.2.10: a token whose owning USER has an `expire` in the past is rejected at authentication (401).
 
+- **Password mode is verified ONLY on `pve-manager/9.2.14/a1480fa6b8d899cb`.** Every other probe in `docs/PVE_PROBES.md`, and the project's declared target, is 9.2.10 — which has NO password evidence. Password P0 is still partial/open. Role writes with `mode=password` return a warning naming the verified build. Do not describe password mode as verified on 9.2.10.
+
+- **Password mode (`mode=password` on a role) mints NO API token.** The password is supplied on the SAME `POST /access/users` call that creates the user (confirmed PVE 9.2.10, PVE_PROBES.md Probe P0), so the credential is LIVE the instant that call returns 200 — before the group read-back and before `DeleteWAL`. Consequences that differ from token mode: (1) every post-create failure must DELETE the user, not just log; (2) a `comment != nonce` read-back mismatch is **FATAL** in password mode (delete the user, fail issuance) whereas token mode only warns — a live credential whose WAL ownership marker is already broken must never be handed out; (3) `CreateToken` must never be called. The engine NEVER rotates a password: `PUT /access/password` requires a password-authenticated ticket that API-token auth cannot obtain (Probe P0). Password roles are restricted to the `pve` realm — PAM password creation FAILED in the automated probe run and its reported auth/rotation behavior is unreproduced. Renewal is the same `expire`+`groups`+`enable`+`append=1` PUT as token mode and preserves the ORIGINAL password (Probe P0).
+
 - **`token_secret` is one-time and non-reproducible.** Never read it back from config or log it. Config GET returns `address`, `tls_skip_verify`, `ca_cert`, `default_ttl`, `default_max_ttl`, and `token_id` — only `token_secret` is withheld.
 
 ## API / Path Surface
 
 - `<mount>/config` (POST, GET, DELETE — DELETE requires `force=true`)
-- `<mount>/roles/:name` (POST, GET, LIST, DELETE)
+- `<mount>/roles/:name` (POST, GET, LIST, DELETE) — `mode` selects the credential type: `token` (default; absent/empty on legacy roles normalizes to `token` in `getRole`) or `password`
 - `<mount>/creds/:role` (GET, mutating) — sets `ForwardPerformanceStandby: true` and `ForwardPerformanceSecondary: true` on the `PathOperation`. **This is mandatory, not optional.** Issuance makes external mutating PVE calls (CreateUser, CreateToken) BEFORE writing any Vault storage. If a standby node executed this path locally it would call PVE and then forward the storage write to the active — producing a duplicate PVE user with no WAL entry and no lease. Forwarding the entire request to the active node before any PVE call is the only correct fix; Vault's implicit write-forwarding does not help here.
 - `<mount>/rotate-root` is OUT OF SCOPE for v1 (manual only)
 
