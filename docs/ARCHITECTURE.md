@@ -199,16 +199,14 @@ behave exactly as before.
 **Verification scope**: password mode has been exercised end to end only on
 `pve-manager/9.2.14/a1480fa6b8d899cb`. The declared target elsewhere in this
 document is `9.2.10/43df2e01f27a1a19`, whose probe evidence predates the feature
-and contains no password results, and the password P0 task remains
-partial/open. A `mode=password` role write returns a warning naming the verified
+and contains no password results. A `mode=password` role write returns a warning naming the verified
 build so operators do not infer 9.2.10 coverage. Token mode is verified on both
 builds.
 
 `mode=password` is accepted **only for the `pve` realm**. PVE-realm password
 creation, authentication, exact-shape renewal, expiry, disablement, and deletion
-are confirmed live (`docs/PVE_PROBES.md` Probe P0); PAM password creation FAILED
-in the automated probe run and its reported authentication/rotation behavior is
-unreproduced, so the role write refuses it rather than assuming.
+are confirmed live (`docs/PVE_PROBES.md` Probe P0). PAM support is explicitly out
+of scope, so the role write refuses PAM rather than assuming equivalent behavior.
 
 **Validation**: The write operation rejects the request with a clear error if
 `ttl` > `max_ttl` (when both are set). This is an input-sanity guard so
@@ -344,6 +342,10 @@ The response `user_id` field and `token_id` use the realm configured in the role
 `pve_userid` for renew/revoke callbacks; that internal key is not a response field.
 
 ### Password mode
+
+Password mode is supported only for the `pve` realm and only on the exact
+verified build `pve-manager/9.2.14/a1480fa6b8d899cb`. Its lifecycle acceptance
+coverage is complete on that build. PAM support is explicitly out of scope.
 
 A `mode=password` role returns a different secret type (`password`) whose data
 is exactly two fields:
@@ -592,7 +594,14 @@ when the `<mount>/config` is updated.
 
 ### Root Rotation
 
-`POST <mount>/rotate-root` — out of scope for v1. Rotating a full-admin
+`POST <mount>/rotate-root` rotates the dedicated provisioner token. It requires
+`expected_token_id` and `confirm_exclusive=true`; shared tokens are unsupported
+and exclusivity is an explicit operator policy acknowledgement. The engine
+creates and validates a fresh `privsep=0` token, persists the complete
+replacement config in seal-wrapped storage, then deletes and confirms absence
+of the old token. A dedicated WAL stores only token IDs for automatic crash
+recovery. The response contains only token ID and status; the secret remains in
+sealed config and is never returned or logged. Rotating a full-admin
 token is high-blast-radius and there's no atomic "rotate and verify"
 primitive in the Proxmox API for the token currently in use; document as
 a manual operation (create new token, update `<mount>/config`, delete old

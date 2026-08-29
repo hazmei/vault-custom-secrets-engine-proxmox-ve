@@ -36,7 +36,8 @@ type backend struct {
 	// merge fields → store). Without this, concurrent updates to the same role
 	// can interleave and the last writer silently drops fields from earlier
 	// concurrent writers. sync.Mutex zero value is ready to use.
-	roleLock sync.Mutex
+	roleLock     sync.Mutex
+	rotationLock sync.Mutex
 
 	// newClient is the factory used by the config-write handler to build a
 	// PVE client from incoming credentials BEFORE storing config.
@@ -81,6 +82,7 @@ func newBackend(ctx context.Context, conf *logical.BackendConfig) (*backend, err
 			[]*framework.Path{pathConfig(b)},
 			pathRoles(b),
 			[]*framework.Path{pathCreds(b)},
+			[]*framework.Path{pathRotateRoot(b)},
 		),
 
 		Secrets:           []*framework.Secret{secretToken(b), secretPassword(b)},

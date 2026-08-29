@@ -88,6 +88,7 @@ type Client interface {
 	// Returns ErrUserNotFound (mapped from HTTP 500 + body "no such user") — treat
 	// as success for idempotent revocation.
 	DeleteUser(ctx context.Context, userid string) error
+	DeleteToken(ctx context.Context, userid, tokenid string) error
 }
 
 // httpClient is the real PVE API client backed by net/http.
@@ -299,6 +300,8 @@ func classifyPVEError(status int, body []byte) error {
 	case strings.Contains(haystack, "no such user"):
 		// DR-2: user-specific sentinel; revocation treats this as idempotent success.
 		return ErrUserNotFound
+	case strings.Contains(haystack, "no such token"):
+		return ErrTokenNotFound
 	case strings.Contains(haystack, "no such group"):
 		// DR-2: group-specific sentinel; role-write surfaces as "group does not exist".
 		return ErrGroupNotFound
@@ -526,6 +529,18 @@ func (c *httpClient) DeleteUser(ctx context.Context, userid string) error {
 	_, _, err := c.doRequest(ctx, http.MethodDelete, path, nil, false)
 	if err != nil {
 		return fmt.Errorf("pveapi: DeleteUser %q: %w", userid, err)
+	}
+	return nil
+}
+
+// DeleteToken deletes one API token. PVE reports an already absent token as
+// HTTP 500 with body "no such token"; callers may use ErrTokenNotFound for
+// idempotent deletion confirmation.
+func (c *httpClient) DeleteToken(ctx context.Context, userid, tokenid string) error {
+	path := "/access/users/" + url.PathEscape(userid) + "/token/" + url.PathEscape(tokenid)
+	_, _, err := c.doRequest(ctx, http.MethodDelete, path, nil, true)
+	if err != nil {
+		return fmt.Errorf("pveapi: DeleteToken userid=%q tokenid=%q: %w", userid, tokenid, err)
 	}
 	return nil
 }

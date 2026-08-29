@@ -30,6 +30,11 @@ testacc:
 	[ -n "$$PVE_TEST_GROUP" ] || missing="$$missing PVE_TEST_GROUP"; \
 	[ -n "$$PVE_BEHAVIORAL_PATH" ] && [ "$$PVE_BEHAVIORAL_PATH" != "/version" ] || missing="$$missing PVE_BEHAVIORAL_PATH"; \
 	[ -n "$$PVE_BEHAVIORAL_MARKER" ] || missing="$$missing PVE_BEHAVIORAL_MARKER"; \
+	if [ "$$PVE_ROTATE_ROOT_ACC" = "1" ]; then \
+		[ -n "$$PVE_ROTATE_BOOTSTRAP_TOKEN_ID" ] || missing="$$missing PVE_ROTATE_BOOTSTRAP_TOKEN_ID"; \
+		[ -n "$$PVE_ROTATE_BOOTSTRAP_TOKEN_SECRET" ] || missing="$$missing PVE_ROTATE_BOOTSTRAP_TOKEN_SECRET"; \
+		[ -n "$$PVE_ROTATE_PROVISIONER_GROUP" ] || missing="$$missing PVE_ROTATE_PROVISIONER_GROUP"; \
+	fi; \
 	if [ -n "$$missing" ]; then \
 		echo "missing or invalid required acceptance environment variables:$$missing" >&2; \
 		echo "set these before running make testacc; optional variables are not required" >&2; \

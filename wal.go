@@ -40,7 +40,8 @@ const (
 	// walTypeUser is the WAL kind written when a synthetic PVE user has been
 	// created but the overall credential issuance has not yet completed.
 	// walRollback uses this kind to identify user-cleanup entries.
-	walTypeUser = "user"
+	walTypeUser     = "user"
+	walTypeRotation = "root-rotation"
 
 	// walCommentPrefix is prepended to the random nonce written into both the
 	// WAL entry (walUser.Nonce) and the PVE user's comment field at creation
@@ -102,9 +103,48 @@ func (b *backend) walRollback(ctx context.Context, req *logical.Request, kind st
 	switch kind {
 	case walTypeUser:
 		return b.walRollbackUser(ctx, req, data)
+	case walTypeRotation:
+		return b.walRollbackRotation(ctx, req, data)
 	default:
 		return fmt.Errorf("proxmox: walRollback: unknown WAL kind %q", kind)
 	}
+}
+
+func (b *backend) walRollbackRotation(ctx context.Context, req *logical.Request, data interface{}) error {
+	var state rotationState
+	if err := mapstructure.Decode(data, &state); err != nil {
+		return fmt.Errorf("proxmox: rotation WAL decode: %w", err)
+	}
+	oldUser, oldToken, err := splitTokenID(state.OldTokenID)
+	if err != nil || state.NewTokenID == "" {
+		return fmt.Errorf("proxmox: malformed rotation WAL")
+	}
+	cfg, err := getConfig(ctx, req.Storage)
+	if err != nil || cfg == nil {
+		return fmt.Errorf("proxmox: rotation recovery config: %w", err)
+	}
+	client, err := b.getClient(ctx, req.Storage)
+	if err != nil {
+		return err
+	}
+	if cfg.TokenID == state.OldTokenID {
+		_, newToken, splitErr := splitTokenID(state.NewTokenID)
+		if splitErr != nil {
+			return splitErr
+		}
+		err = client.DeleteToken(ctx, oldUser, newToken)
+	} else if cfg.TokenID == state.NewTokenID {
+		err = client.DeleteToken(ctx, oldUser, oldToken)
+	} else {
+		return fmt.Errorf("proxmox: rotation recovery found inconsistent token ID")
+	}
+	if err != nil && !errors.Is(err, pveapi.ErrTokenNotFound) {
+		return err
+	}
+	if err := req.Storage.Delete(ctx, rotationStorageKey); err != nil {
+		return err
+	}
+	return nil
 }
 
 // walRollbackUser handles rollback for walTypeUser entries.

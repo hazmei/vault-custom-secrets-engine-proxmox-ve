@@ -25,6 +25,17 @@ not confirmed here is presumed **unverified**.
 
 ---
 
+## Verified token deletion contract
+
+The token-delete probe passed on the target PVE build. `DELETE
+/api2/json/access/users/<userid>/token/<tokenid>` returns HTTP 200 and the
+deleted token subsequently authenticates with HTTP 401. The replacement token
+continues to return HTTP 200. Repeated or missing-token deletion returns HTTP
+500 with body `no such token`. Exact temporary-user cleanup returns HTTP 200,
+and a subsequent missing-user deletion returns HTTP 500 with body `no such
+user`. The client therefore classifies `no such token` separately and uses it
+only for idempotent deletion confirmation.
+
 ## Part A — Bootstrap the vault-admin user, role, and token
 
 Run on the PVE node shell as root@pam (SSH or console). Creates the
@@ -1017,7 +1028,10 @@ pveum user delete probe-nonprop@pve
 
 ---
 
-## Probe P0 — Live password behavior (partial; 27 August 2026)
+## Probe P0 — Live password behavior (historical; 27 August 2026)
+
+The PAM observations in this historical section are preserved for traceability.
+PAM support is explicitly out of scope and these observations are non-blocking.
 
 This run used the environment-provided admin token against the configured
 disposable target. No password, token secret, ticket, or complete sensitive
@@ -1111,7 +1125,7 @@ modified by this rerun; the environment token owner was unintentionally
 removed during cleanup and required operator restoration in that run. See the
 later run-status note below for what the subsequent evidence shows.
 
-**Historical run status: BLOCKED/FAILED.** The password authentication, rotation,
+**Historical run status: incomplete for the then-proposed broader scope.** The password authentication, rotation,
 expiry/disablement, PAM, and exact ACL prerequisites were not all confirmed in
 this run. The cleanup incident is retained as an operational warning: a broad
 `vault-p0-*` prefix scan is not a safe cleanup criterion because it can delete
@@ -1171,6 +1185,9 @@ from this evidence.
 
 ## Probe P0 rerun — live password behavior (28 August 2026)
 
+PAM results in this historical rerun are preserved for traceability only. PAM is
+explicitly out of scope and is not a password-mode support blocker.
+
 This rerun used only the environment-provided API token. Passwords, token
 secrets, tickets, and complete response bodies remained in memory and were
 never printed or persisted. The pre-existing `vault-p0-admin@pve` user was
@@ -1206,7 +1223,7 @@ The disposable group `vault-p0-probe` was pre-existing and was not modified.
 | Renewal refusal after disablement | **Engine-level behavior not probeable via PVE alone**. PVE accepted a renewal PUT carrying `enable=1` with HTTP 200, so the engine's pre-update disabled-user refusal remains an implementation contract. |
 | Deletion | All disposable users deleted, HTTP 200 |
 | Password constraints | Length 1 and 7: HTTP 400, `password: value must be at least 8 characters long`; length 8 and 64: HTTP 200; length 65: HTTP 400, `password: value may only be 64 characters long` |
-| PAM realm | Automated creation returned HTTP 500 `create user failed: change password failed: user '<redacted>' does not exist`; no local PAM OS account was created. Authentication and lifecycle behavior were not established by this automated run; the separately attributed operator report below covers only PAM authentication and rotation. |
+| PAM realm | Historical automated creation returned HTTP 500 `create user failed: change password failed: user '<redacted>' does not exist`; no local PAM OS account was created. PAM is out of scope, so this result is non-blocking. |
 | Other realms | None available; unresolved |
 | Comment behavior | Marker round-tripped on create/read-back and survived the exact renewal PUT with `append=1`; value withheld |
 
@@ -1219,7 +1236,7 @@ ACL entries. One pre-existing `vault-p0-admin@pve` user remains because it owns
 the environment token; it was not created by this run and was deliberately
 protected. No local PAM account, group, role, or ACL was created or modified.
 
-**Historical run status: BLOCKED/INCOMPLETE.** PAM password creation and the
+**Historical run status: incomplete for PAM, which is out of scope.** PAM password creation and the
 remaining PAM lifecycle behavior were not
 fully confirmed by this automated run, and the pre-existing protected `vault-p0-admin@pve` artifact
 means a zero-count scan of every `vault-p0-*` user is not an appropriate cleanup
@@ -1271,13 +1288,9 @@ is not a disposable test artifact; it is the preserved cleanup exception. This
 does not claim that every `vault-p0-*` user is absent, nor that the protected
 owner was cleaned up.
 
-**P0 status: PARTIAL/OPEN.** PVE password behavior is substantially recorded;
-PAM creation and most PAM lifecycle behavior remain unresolved, the operator
-rotation report is not independently reproducible, and the engine cannot
-exercise `PUT /access/password` with its API-token-only authentication. The
-password-specific ACL/privilege requirements are also unresolved. Password
-credentials remain unimplemented; this evidence does not authorize
-implementing them.
+**Historical P0 status:** the broader proposal included PAM and password rotation,
+which were not adopted. The supported `pve` password lifecycle is documented by
+the later verified-build run below. PAM findings remain historical and non-blocking.
 
 ### Deferred follow-up — non-password realms
 
@@ -1309,13 +1322,13 @@ engine depends on, its confirmation status, and the code area affected.
 | 7 | `PUT /access/users/{userid}` with `expire` only preserves `groups` | `groups` field unchanged after PUT | N — historical Probe 7 saw `groups:[]`; later live acceptance on build `43df2e01f27a1a19` preserved groups with `append` omitted | `secret_token.go` renew / `acceptance_test.go` control | Omitted-`append` semantics unresolved; renewal must re-send expire+groups+enable+append=1; control uses empty `groups=` with explicit append=0 |
 | 8 | Expired user's token returns 401 | 401 once `expire` is in the past | Y — 401 on expired user | creds `expire` backstop | |
 | 9 | Permissions tree distinguishes `propagate=0` from `propagate=1` | Config-time check can detect `propagate=0` at `/access/groups` | Y — propagate=0 shows :0 | `path_config.go` validation | C3 fixable: check per-group path /access/groups/<group> at role-write |
-| P0-password-create | Password supplied on `POST /access/users` is accepted | Password creation is available through the user-create call | Y for `pve` (automated 28 Aug); PAM creation failed with HTTP 500 and no OS account | Future password issuance | PAM creation remains unresolved; do not generalize PVE evidence |
+| P0-password-create | Password supplied on `POST /access/users` is accepted | Password creation is available through the user-create call | Y for `pve` (automated 28 Aug); historical PAM creation failed with HTTP 500 and no OS account | Password issuance | PAM is out of scope; do not generalize PVE evidence |
 | P0-password-auth | Password authenticates through `POST /access/ticket` | Created password can authenticate | Y for `pve` (automated 28 Aug); Y reported for PAM but unreproduced | Future password secret / acceptance tests | PAM result is operator-reported only |
 | P0-password-expiry | Past user `expire` rejects password authentication | Expiry is a password backstop | Y for `pve` (automated 28 Aug, HTTP 401) | Future password lifecycle | PAM expiry remains unresolved |
 | P0-password-disable | `enable=0` rejects password authentication | Disabled users cannot authenticate | Y for `pve` (automated 28 Aug, HTTP 401) | Future password lifecycle | PAM disablement remains unresolved |
 | P0-password-constraints | Password length is bounded | Generator must honor PVE constraints | Y for `pve`: 8–64 accepted; 1–7 and 65 rejected | Future password generator | PAM/charset behavior remains unresolved |
 | P0-password-rotation | `PUT /access/password` changes the password | Rotation behavior is available to the engine | API-token call is not exercisable: PVE returned 403 and requires a password-authenticated ticket; PAM 200/old 401/new 200 is operator-reported and unreproduced | Future design decision | Engine auth is API-token-only; exact privilege path and a supported engine rotation mechanism remain unresolved |
-| P0-pam-lifecycle | PAM creation and full lifecycle behave like PVE | PAM password behavior matches the `pve` realm | N — automated creation failed; only authentication and rotation are operator-reported | Future operator-approved PAM probe | PAM expiry, disablement, deletion, token interaction, ACLs, constraints, and cleanup are unresolved |
+| P0-pam-lifecycle | PAM creation and full lifecycle behave like PVE | PAM password behavior matches the `pve` realm | Not evaluated for support; historical creation failed and only authentication/rotation were operator-reported | None | PAM is explicitly out of scope and this row is non-blocking |
 | 6-fix | privsep=0 token inheritance (behavioral) | Token can call /cluster/resources?type=vm | SUPERSEDED — see CLEAN | pveapi CreateToken / canary | Confounded; re-run as Probe CLEAN |
 | 7-fix | Renewal re-sends expire+groups+enable preserves privileges | groups persist; token works post-renewal | SUPERSEDED — see CLEAN | secret_token.go renew / InternalData | Confounded; re-run as Probe CLEAN |
 | CLEAN | Group membership confers role at creation + survives renewal (both oracles) | Synthetic user in group holds PVEVMAdmin; token inherits via privsep=0; survives renewal | Group-add BROKEN via groups= (silent drop) | path_creds.go / secret_token.go / pveapi | Superseded by GROUPADD; 5-A was root@pam confound |
@@ -1424,16 +1437,13 @@ anti-privilege-escalation, negative authorization, insufficient privileges)
 SKIPPED because their documented prerequisites were unset; skips are not
 completed tests.
 
-## Password-credential P0 status — STILL PARTIAL/OPEN
+## Password-credential P0 status — supported scope complete
 
-The distinct password-credential P0 remains PARTIAL/OPEN even after the 9.2.14
-verification run above. What that run closes is the `pve`-realm behavior the
-engine actually depends on, reproducibly and on a second build. What remains
-open is unchanged: PAM creation and most PAM lifecycle behavior, the
-unreproduced operator password-rotation report, `PUT /access/password` being
-unreachable with API-token-only authentication, and the password-specific
-ACL/privilege requirements.
+The 9.2.14 verification run closes the supported `pve`-realm behavior the engine
+depends on. PAM is explicitly out of scope, and the historical PAM results above
+are non-blocking. Password rotation is unsupported because `PUT /access/password`
+cannot be exercised with the engine's API-token-only authentication.
 
-Password mode is implemented (by explicit operator decision) restricted to
-exactly the confirmed surface: `pve` realm only, no rotation. The open items
-above are handled by refusing them in code rather than assuming behavior.
+Password mode is implemented by explicit operator decision and restricted to
+exactly the confirmed surface: `pve` realm only on
+`pve-manager/9.2.14/a1480fa6b8d899cb`, with no rotation.

@@ -25,7 +25,8 @@ var (
 	//
 	// Revocation keyed on errors.Is(err, ErrUserNotFound) → treat as success
 	// (idempotent). Renewal keyed on same → hard failure.
-	ErrUserNotFound = errors.New("pveapi: user not found")
+	ErrUserNotFound  = errors.New("pveapi: user not found")
+	ErrTokenNotFound = errors.New("pveapi: token not found")
 
 	// ErrGroupNotFound is returned when the PVE response body contains
 	// "does not exist" (HTTP 500, e.g. GET /access/groups/{group}) or
