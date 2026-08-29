@@ -1114,10 +1114,13 @@ removed during cleanup and requires operator restoration.
 expiry/disablement, PAM, and exact ACL prerequisites were not all confirmed in
 this run. The cleanup incident is retained as an operational warning: a broad
 `vault-p0-*` prefix scan is not a safe cleanup criterion because it can delete
-pre-existing token owners. Restoration of the deleted environment-token owner
-is **not verified in the recorded evidence**; an operator must confirm
-restoration before another run. The next run requires restoration of the
-deleted environment token owner and an operator-configured disposable token
+pre-existing token owners. The recorded evidence does not identify whether the
+deleted owner was restored or recreated, nor does it record the restoration
+itself. However, the later 28 August run authenticated successfully with the
+environment-provided token and identified `vault-p0-admin@pve` as its
+pre-existing owner; that establishes that the owner was available again by that
+run, whether restored or recreated. The next run requires an operator-confirmed
+environment-token owner and an operator-configured disposable token
 with a
 propagating `User.Modify` grant at `/access/groups`, `Sys.Audit` sufficient
 for group/read-back verification, and the permissions required by the
@@ -1308,7 +1311,7 @@ engine depends on, its confirmation status, and the code area affected.
 | P0-password-disable | `enable=0` rejects password authentication | Disabled users cannot authenticate | Y for `pve` (automated 28 Aug, HTTP 401) | Future password lifecycle | PAM disablement remains unresolved |
 | P0-password-constraints | Password length is bounded | Generator must honor PVE constraints | Y for `pve`: 8–64 accepted; 1–7 and 65 rejected | Future password generator | PAM/charset behavior remains unresolved |
 | P0-password-rotation | `PUT /access/password` changes the password | Rotation behavior is available to the engine | API-token call is not exercisable: PVE returned 403 and requires a password-authenticated ticket; PAM 200/old 401/new 200 is operator-reported and unreproduced | Future design decision | Engine auth is API-token-only; exact privilege path and a supported engine rotation mechanism remain unresolved |
-| P0-pam-lifecycle | PAM creation and full lifecycle behave like PVE | PAM can be treated as equivalent to PVE | N — automated creation failed; only authentication and rotation are operator-reported | Future operator-approved PAM probe | PAM expiry, disablement, deletion, token interaction, ACLs, constraints, and cleanup are unresolved |
+| P0-pam-lifecycle | PAM creation and full lifecycle behave like PVE | PAM password behavior matches the `pve` realm | N — automated creation failed; only authentication and rotation are operator-reported | Future operator-approved PAM probe | PAM expiry, disablement, deletion, token interaction, ACLs, constraints, and cleanup are unresolved |
 | 6-fix | privsep=0 token inheritance (behavioral) | Token can call /cluster/resources?type=vm | SUPERSEDED — see CLEAN | pveapi CreateToken / canary | Confounded; re-run as Probe CLEAN |
 | 7-fix | Renewal re-sends expire+groups+enable preserves privileges | groups persist; token works post-renewal | SUPERSEDED — see CLEAN | secret_token.go renew / InternalData | Confounded; re-run as Probe CLEAN |
 | CLEAN | Group membership confers role at creation + survives renewal (both oracles) | Synthetic user in group holds PVEVMAdmin; token inherits via privsep=0; survives renewal | Group-add BROKEN via groups= (silent drop) | path_creds.go / secret_token.go / pveapi | Superseded by GROUPADD; 5-A was root@pam confound |
@@ -1318,8 +1321,10 @@ engine depends on, its confirmation status, and the code area affected.
 
 ## Spike Conclusion
 
-The token-focused portions of the Phase 0 spike are confirmed viable on PVE
-9.2.10. The password behavior probe remains PARTIAL/OPEN: PAM creation and
+The Phase 0 spike is COMPLETE. The core credential mechanism is CONFIRMED viable
+on PVE 9.2.10.
+
+The distinct password-credential P0 remains PARTIAL/OPEN: PAM creation and
 most PAM lifecycle behavior are unresolved, the operator password-rotation
 report is unreproduced, and the engine's API-token-only authentication cannot
 exercise `PUT /access/password`, which requires a password-authenticated

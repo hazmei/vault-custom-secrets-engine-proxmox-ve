@@ -1649,7 +1649,7 @@ password implementation tasks automatically.
     interaction with token credentials and the user-level `expire` backstop. Exercise
     the exact engine renewal shape `expire + groups + enable + append=1`, read the
     user back, and authenticate with the original password afterward. Probe the
-    the agreed `pve` and `pam` realms, recording the exact HTTP status and redacted body
+    agreed `pve` and `pam` realms, recording the exact HTTP status and redacted body
     for every failure. Probe the privileges required to create/set a password,
     recording the exact ACL path, privilege, and propagation flag; compare them with
     the existing `/access/groups` and `/access/realm/<realm>` checks. Record PVE
