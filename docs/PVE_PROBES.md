@@ -1108,7 +1108,8 @@ but that user was the owner of the configured environment token. The token
 then became invalid (HTTP 401), so final PVE-wide cleanup verification was
 not possible. No ACL, role, group, or local OS account was created or
 modified by this rerun; the environment token owner was unintentionally
-removed during cleanup and requires operator restoration.
+removed during cleanup and required operator restoration in that run. See the
+later run-status note below for what the subsequent evidence shows.
 
 **Historical run status: BLOCKED/FAILED.** The password authentication, rotation,
 expiry/disablement, PAM, and exact ACL prerequisites were not all confirmed in
@@ -1119,11 +1120,12 @@ deleted owner was restored or recreated, nor does it record the restoration
 itself. However, the later 28 August run authenticated successfully with the
 environment-provided token and identified `vault-p0-admin@pve` as its
 pre-existing owner; that establishes that the owner was available again by that
-run, whether restored or recreated. The next run requires an operator-confirmed
-environment-token owner and an operator-configured disposable token
-with a
-propagating `User.Modify` grant at `/access/groups`, `Sys.Audit` sufficient
-for group/read-back verification, and the permissions required by the
+run. By 28 August, the environment had been restored or re-provisioned with
+propagating `User.Modify` and `Sys.Audit` at `/access/groups`, plus
+`Realm.AllocateUser` at `/access/realm/<realm>`; the evidence does not establish
+which restoration action was taken. The next run requires an
+operator-confirmed environment-token owner and an operator-configured
+disposable token with those grants and the permissions required by the
 password probes. PAM remains explicitly unresolved unless the target's local
 OS identity setup is intentionally prepared and approved by the operator.
 
@@ -1324,12 +1326,6 @@ engine depends on, its confirmation status, and the code area affected.
 The Phase 0 spike is COMPLETE. The core credential mechanism is CONFIRMED viable
 on PVE 9.2.10.
 
-The distinct password-credential P0 remains PARTIAL/OPEN: PAM creation and
-most PAM lifecycle behavior are unresolved, the operator password-rotation
-report is unreproduced, and the engine's API-token-only authentication cannot
-exercise `PUT /access/password`, which requires a password-authenticated
-ticket. Password-specific ACL/privilege requirements also remain unresolved.
-Password credentials must not be implemented from this evidence.
 Summary of load-bearing findings that MUST shape the implementation:
 
 1. **Error contract:** PVE returns HTTP 500 with a message body for conditions REST APIs would
@@ -1348,6 +1344,13 @@ Summary of load-bearing findings that MUST shape the implementation:
    causes PVE to REJECT with HTTP 500 "no such group" rather than silently drop. The
    silent-drop-with-200 behavior appears specific to the modify/append path. The read-back
    assertion is correct defensive practice regardless.
+
+The distinct password-credential P0 remains PARTIAL/OPEN: PAM creation and
+most PAM lifecycle behavior are unresolved, the operator password-rotation
+report is unreproduced, and the engine's API-token-only authentication cannot
+exercise `PUT /access/password`, which requires a password-authenticated
+ticket. Password-specific ACL/privilege requirements also remain unresolved.
+Password credentials must not be implemented from this evidence.
 
 4. **Renewal:** Historical Probe 7 showed replacement-style `PUT /access/users/{id}` can wipe
    groups, while later live acceptance on build `43df2e01f27a1a19` preserved groups when
