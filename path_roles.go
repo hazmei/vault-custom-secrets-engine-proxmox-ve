@@ -553,10 +553,10 @@ func (b *backend) roleWrite(ctx context.Context, req *logical.Request, d *framew
 			"password mode is verified end to end only on %s; the project's declared target "+
 				"(pve-manager/9.2.10) has no password evidence and P0 remains partial/open. "+
 				"Credential issuance re-checks the live build and REFUSES on any other one, so "+
-				"upgrading this cluster will break issuance for this role (renewal and revocation "+
-				"of already-issued leases keep working). Verify password issuance, authentication, "+
-				"renewal, and revocation on your own cluster before relying on this role "+
-				"(see docs/PVE_PROBES.md)",
+				"upgrading this cluster will break issuance for this role (editing this role, and "+
+				"renewal and revocation of already-issued leases, keep working). Verify password "+
+				"issuance, authentication, renewal, and revocation on your own cluster before "+
+				"relying on this role (see docs/PVE_PROBES.md)",
 			passwordVerifiedBuild,
 		))
 		return resp, nil

@@ -266,6 +266,14 @@ func TestRoleWrite_PasswordModeWarnsAboutVerifiedBuild(t *testing.T) {
 	if !strings.Contains(joined, "9.2.10") {
 		t.Errorf("warning must name the unverified declared target; got %q", joined)
 	}
+	// The warning is the only surface an operator reads at opt-in time, so it
+	// must list the same three ungated categories as the docs — editing the role
+	// included, or an upgrade looks like it strands the role uneditable.
+	for _, want := range []string{"editing this role", "renewal and revocation"} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("warning must mention %q as still working after an upgrade; got %q", want, joined)
+		}
+	}
 
 	// Token mode must stay warning-free.
 	tokResp, err := writeRole(ctx, b, storage, "tokrole", credRoleData())
