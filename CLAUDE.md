@@ -43,9 +43,11 @@ single-node non-dev Vault — the catalog digest matched the recorded artifact
 digest and the catalog entry and mount persisted across a Vault restart. That
 run covers one node only; multi-node artifact distribution, standby-to-active
 forwarding, failover, and cross-node restart recovery remain unverified, so do
-not describe the project as production-ready. Optional insufficient-privilege, direct-ACL, and
-negative-authorization canaries may be skipped only when their documented
-prerequisites are unset, and such skips are not completed tests.
+not describe the project as production-ready. Optional insufficient-privilege, direct-ACL,
+negative-authorization, and password-lifecycle canaries may be skipped only when their
+documented prerequisites are unset, including `VAULT_ACC=1`, `PVE_PASSWORD_ACC=1`, and the
+exact verified `pve-manager/9.2.14/a1480fa6b8d899cb` build for the password-lifecycle canary;
+such skips are not completed tests.
 
 Additional recorded validation (2026-08-29) against a disposable
 `pve-manager/9.2.14/a1480fa6b8d899cb` target — a DIFFERENT build from the

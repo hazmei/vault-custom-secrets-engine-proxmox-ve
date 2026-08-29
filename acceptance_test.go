@@ -916,8 +916,10 @@ const accPasswordEnv = "PVE_PASSWORD_ACC"
 // confirmed absence of any API token, renewal preserving the ORIGINAL password,
 // the expiry backstop, disablement, and deletion on revoke.
 //
-// Gated by VAULT_ACC=1 (like every TestAcc*) plus PVE_PASSWORD_ACC=1. It never
-// prints a password: every assertion reports status codes only.
+// Gated by VAULT_ACC=1 (like every TestAcc*), PVE_PASSWORD_ACC=1, and the exact
+// verified pve-manager/9.2.14/a1480fa6b8d899cb build precondition. Non-verified
+// builds skip this test because password behavior is not verified there. It
+// never prints a password: every assertion reports status codes only.
 func TestAccPasswordLifecycle(t *testing.T) {
 	h := newAccHarness(t)
 	ctx, cancel := context.WithTimeout(context.Background(), accTestTimeout)

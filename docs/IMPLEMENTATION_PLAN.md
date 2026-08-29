@@ -1885,7 +1885,7 @@ release gate depends on password support.
     rotation and never returns a password; revocation removes the user and is
     retry-safe; token renew/revoke tests remain green.
 
-- [x] **P6 — WAL and lifecycle test coverage** — DONE (`secret_password_test.go`; opt-in live `TestAccPasswordLifecycle` gated by `VAULT_ACC=1` plus `PVE_PASSWORD_ACC=1`).
+- [x] **P6 — WAL and lifecycle test coverage** — DONE (`secret_password_test.go`; opt-in live `TestAccPasswordLifecycle` requires `VAULT_ACC=1`, `PVE_PASSWORD_ACC=1`, and the exact verified `pve-manager/9.2.14/a1480fa6b8d899cb` build; non-verified builds skip, so skipped coverage is not a completed test).
   - **Files/scope**: `wal_test.go`, `path_creds_test.go`, `secret_password_test.go`,
     `acceptance_test.go` (gated `TestAcc*` additions), and testing documentation.
   - **Dependencies**: P0–P5.
