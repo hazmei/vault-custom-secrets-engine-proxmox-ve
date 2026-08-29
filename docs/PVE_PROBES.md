@@ -1120,10 +1120,12 @@ deleted owner was restored or recreated, nor does it record the restoration
 itself. However, the later 28 August run authenticated successfully with the
 environment-provided token and identified `vault-p0-admin@pve` as its
 pre-existing owner; that establishes that the owner was available again by that
-run. By 28 August, the environment had been restored or re-provisioned with
-propagating `User.Modify` and `Sys.Audit` at `/access/groups`, plus
-`Realm.AllocateUser` at `/access/realm/<realm>`; the evidence does not establish
-which restoration action was taken. The next run requires an
+run. By 28 August, the environment had been restored or re-provisioned with the
+`/access/groups` ACL delta: `User.Modify:0` with no `Sys.Audit` became
+propagating `User.Modify:1` and `Sys.Audit:1`; the evidence does not establish
+which restoration action was taken. `Realm.AllocateUser:1` at both
+`/access/realm/pve` and `/access/realm/pam` was already present in both runs and
+was not part of that restoration change. The next run requires an
 operator-confirmed environment-token owner and an operator-configured
 disposable token with those grants and the permissions required by the
 password probes. PAM remains explicitly unresolved unless the target's local
@@ -1345,13 +1347,6 @@ Summary of load-bearing findings that MUST shape the implementation:
    silent-drop-with-200 behavior appears specific to the modify/append path. The read-back
    assertion is correct defensive practice regardless.
 
-The distinct password-credential P0 remains PARTIAL/OPEN: PAM creation and
-most PAM lifecycle behavior are unresolved, the operator password-rotation
-report is unreproduced, and the engine's API-token-only authentication cannot
-exercise `PUT /access/password`, which requires a password-authenticated
-ticket. Password-specific ACL/privilege requirements also remain unresolved.
-Password credentials must not be implemented from this evidence.
-
 4. **Renewal:** Historical Probe 7 showed replacement-style `PUT /access/users/{id}` can wipe
    groups, while later live acceptance on build `43df2e01f27a1a19` preserved groups when
    `append` was omitted; omitted-`append` semantics are unresolved and must not be relied upon.
@@ -1378,3 +1373,10 @@ Password credentials must not be implemented from this evidence.
 
 See the per-probe tables above for evidence. These findings supersede the corresponding
 "confirmed on PVE 9.2.10" annotations in ARCHITECTURE.md where they conflict.
+
+The distinct password-credential P0 remains PARTIAL/OPEN: PAM creation and
+most PAM lifecycle behavior are unresolved, the operator password-rotation
+report is unreproduced, and the engine's API-token-only authentication cannot
+exercise `PUT /access/password`, which requires a password-authenticated
+ticket. Password-specific ACL/privilege requirements also remain unresolved.
+Password credentials must not be implemented from this evidence.
