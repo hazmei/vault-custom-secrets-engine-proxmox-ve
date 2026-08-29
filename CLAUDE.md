@@ -47,6 +47,15 @@ not describe the project as production-ready. Optional insufficient-privilege, d
 negative-authorization canaries may be skipped only when their documented
 prerequisites are unset, and such skips are not completed tests.
 
+Additional recorded validation (2026-08-29) against a disposable
+`pve-manager/9.2.14/a1480fa6b8d899cb` target — a DIFFERENT build from the
+9.2.10 record above: the full required `make testacc` suite passed, and the
+opt-in `TestAccPasswordLifecycle` passed (password issuance, ticket
+authentication, no API token minted, renewal preserving the original password,
+expiry/disablement 401, deletion on revoke). The same three optional canaries
+skipped. Password mode is implemented for the `pve` realm only, with no
+rotation; see `docs/PVE_PROBES.md`.
+
 The Phase 2 deferred review backlog (DR-1 … DR-6) is fully resolved; no deferred
 review items remain. This does NOT change the production-readiness position
 above — the remaining multi-node/HA production adoption gates and the optional

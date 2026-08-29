@@ -30,6 +30,16 @@ The following validation passed on 2026-08-20 against disposable Proxmox VE
   group-role-gated endpoint, expired-user rejection, and renewal group
   preservation checks.
 
+A later run on 2026-08-29 against a disposable
+`pve-manager/9.2.14/a1480fa6b8d899cb` target — a different build from the one
+above — passed the full required `make testacc` suite plus the opt-in
+`TestAccPasswordLifecycle` (password issuance, `POST /access/ticket`
+authentication, no API token minted on the user, renewal with the original
+password still valid, expiry and disablement rejected with 401, deletion on
+revoke), and an operator manual pass through a real `vault server` with
+`-dev-plugin-dir`. The same three optional canaries skipped with their
+prerequisites unset. Evidence: `docs/PVE_PROBES.md`.
+
 Production-style catalog registration with
 `vault plugin register -sha256=<hash>` was verified previously (undated) on a
 single-node non-dev Vault, including a matching catalog digest and catalog/mount

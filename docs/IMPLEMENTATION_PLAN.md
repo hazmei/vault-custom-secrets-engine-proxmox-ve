@@ -1639,7 +1639,18 @@ engine therefore continues to send explicit `append=1` with `expire` +
 
 **Status (2026-08-29): IMPLEMENTED for the `pve` realm, by explicit operator
 decision to proceed ahead of the remaining production adoption gates and with
-P0 still partial/open.** The shipped scope is bounded by the P0 evidence that
+P0 still partial/open.**
+
+**Live verification (2026-08-29)** against a disposable
+`pve-manager/9.2.14/a1480fa6b8d899cb` target — note this is a DIFFERENT build
+from the `9.2.10/43df2e01f27a1a19` target of the earlier recorded validation.
+`make testacc` passed (all required tests; the three optional canaries skipped
+with prerequisites unset), and the opt-in `TestAccPasswordLifecycle` passed:
+issuance, `POST /access/ticket` authentication, confirmed absence of any API
+token on the user, exact-shape renewal with the ORIGINAL password still valid,
+past-`expire` 401, `enable=0` 401, and deletion on revoke. An operator manual
+pass through a real `vault server` with `-dev-plugin-dir` also completed. See
+`docs/PVE_PROBES.md` — "Probe P0 verification run ... on PVE 9.2.14". The shipped scope is bounded by the P0 evidence that
 actually exists (`docs/PVE_PROBES.md` Probe P0):
 
 - **In scope and implemented**: `mode=password` roles on the `pve` realm;
