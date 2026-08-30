@@ -1,8 +1,9 @@
 # Proxmox VE Secrets Engine
 
 Vault secrets engine that issues **dynamic Proxmox VE credentials**: API tokens
-by default on the PVE 9.2.10 token-mode target, or passwords only on the single
-verified `pve-manager/9.2.14/a1480fa6b8d899cb` build. Each lease creates a
+by default on the PVE 9.2.10 token-mode target. Password mode is refused unless
+the cluster reports the exact verified `pve-manager/9.2.14/a1480fa6b8d899cb`
+build. Each lease creates a
 dedicated, throwaway PVE user and adds it to a pre-configured PVE group (which
 the operator has already bound to the desired ACL roles). Token mode mints an
 API token on the user; password mode supplies an engine-generated password
