@@ -599,9 +599,12 @@ the plugin is missing on a node, the digest differs, or cleanup is incomplete.
 - PVE lifecycle operations are destructive external mutations. Unit tests and
   local Vault tests do not prove production PVE behavior; use a safe disposable
   or explicitly approved target for issue/use/renew/revoke checks.
-- The engine does not create PVE groups or ACL role bindings, rotate the root
-  provisioner token automatically, or provide a standalone PVE user-update
-  endpoint. Root-token rotation remains manual.
+- The engine does not create PVE groups or ACL role bindings, or provide a
+  standalone PVE user-update endpoint. Provisioner rotation is automated via
+  `rotate-root`; use a dedicated token with `expected_token_id` and
+  `confirm_exclusive=true`. Shared tokens are unsupported. The replacement
+  secret remains in seal-wrapped config and is never returned; the durable
+  root-rotation WAL stores only token IDs and retries cleanup automatically.
 - `force=true` config deletion can strand outstanding PVE users. PVE expiry
   neutralizes an expired credential but does not remove the PVE user record;
   out-of-band cleanup remains the operator's responsibility.

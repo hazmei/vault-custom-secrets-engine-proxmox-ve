@@ -199,16 +199,14 @@ behave exactly as before.
 **Verification scope**: password mode has been exercised end to end only on
 `pve-manager/9.2.14/a1480fa6b8d899cb`. The declared target elsewhere in this
 document is `9.2.10/43df2e01f27a1a19`, whose probe evidence predates the feature
-and contains no password results, and the password P0 task remains
-partial/open. A `mode=password` role write returns a warning naming the verified
+and contains no password results. A `mode=password` role write returns a warning naming the verified
 build so operators do not infer 9.2.10 coverage. Token mode is verified on both
 builds.
 
 `mode=password` is accepted **only for the `pve` realm**. PVE-realm password
 creation, authentication, exact-shape renewal, expiry, disablement, and deletion
-are confirmed live (`docs/PVE_PROBES.md` Probe P0); PAM password creation FAILED
-in the automated probe run and its reported authentication/rotation behavior is
-unreproduced, so the role write refuses it rather than assuming.
+are confirmed live (`docs/PVE_PROBES.md` Probe P0). PAM support is explicitly out
+of scope, so the role write refuses PAM rather than assuming equivalent behavior.
 
 **Validation**: The write operation rejects the request with a clear error if
 `ttl` > `max_ttl` (when both are set). This is an input-sanity guard so
@@ -345,6 +343,10 @@ The response `user_id` field and `token_id` use the realm configured in the role
 
 ### Password mode
 
+Password mode is supported only for the `pve` realm and only on the exact
+verified build `pve-manager/9.2.14/a1480fa6b8d899cb`. Its lifecycle acceptance
+coverage is complete on that build. PAM support is explicitly out of scope.
+
 A `mode=password` role returns a different secret type (`password`) whose data
 is exactly two fields:
 
@@ -392,7 +394,9 @@ and is the operator's retention consideration, not a leak the engine can close.
 
 **Orphan windows** (live credential with no lease):
 - *Nonce-matched orphan* (crash between `CreateUser` and `DeleteWAL`): cleaned by
-  `walRollback` after `WALRollbackMinAge` (5 min) plus retry time.
+  `walRollback` after `WALRollbackMinAge` (5 min, explicitly configured by this
+  plugin); total cleanup
+  timing is governed by that minimum age plus any rollback retries.
 - *Nonce-mismatched or empty-nonce orphan*: `walRollback` intentionally DROPS the
   WAL entry without deleting the user, so cleanup falls to the PVE `expire`
   backstop or manual operator action. The fatal comment-mismatch policy above
@@ -592,19 +596,72 @@ when the `<mount>/config` is updated.
 
 ### Root Rotation
 
-`POST <mount>/rotate-root` — out of scope for v1. Rotating a full-admin
-token is high-blast-radius and there's no atomic "rotate and verify"
-primitive in the Proxmox API for the token currently in use; document as
-a manual operation (create new token, update `<mount>/config`, delete old
-token) rather than an automated endpoint. Operators can read the current
-`token_id` via `GET <mount>/config` to identify the token being replaced
-and confirm the swap. Create the replacement with `privsep=0`, verify it before
-removing the old token, and revoke outstanding leases before rotation where
-possible. If the configured provisioner token is removed or loses its required
-privileges, outstanding PVE users and lease tokens can remain on the cluster
-while becoming non-renewable and non-revocable by the engine. The README
-[production runbook](../README.md#5-rotate-the-provisioner-token-safely)
-contains the operator sequence and recovery warning.
+`POST <mount>/rotate-root` rotates the dedicated provisioner token. It requires
+`expected_token_id` and `confirm_exclusive=true`; shared tokens are unsupported
+and exclusivity is an explicit operator policy acknowledgement. The engine
+creates and validates a fresh `privsep=0` token, persists the complete
+replacement config in seal-wrapped storage, then deletes and confirms absence
+of the old token. A dedicated WAL stores only token IDs for automatic crash
+recovery. Durable rotation state stores the exact WAL ID and a factual internal
+phase plus its start time, so status can distinguish recent work from stale
+crash state and guarded recovery deletes only its own WAL. The response contains only token ID and status; the secret remains in
+sealed config and is never returned or logged. There is no atomic
+"rotate-and-verify" primitive for the token currently in use; the WAL,
+durable rotation state, replacement validation, and post-delete read
+confirmation are the compensating controls for that one-way operation.
+`privsep=0` is explicit because the replacement must inherit the provisioner
+user's ACL.
+
+The initial provisioner token must also be created with `privsep=0` (for
+example, `pveum user token add ... --privsep 0`). Proxmox's default `privsep=1`
+gives the token a separate ACL that is empty unless separately managed, so the
+engine cannot operate. A replacement created with `privsep=0` inherits the
+provisioner user's ACL; requiring the initial token to use the same mode makes
+that inheritance continuous across rotations.
+
+`GET <mount>/rotate-root` reports token-ID-only state. `in-progress` means the
+durable state is recent and the rotation may still be active;
+`recovery-required` means the config changed, cleanup/confirmation needs
+recovery, or the state is stale. State older than five minutes (the
+plugin-configured `WALRollbackMinAge`), and legacy state without a timestamp,
+is treated conservatively as recovery-required. It
+is diagnostic and never a force-clear operation. If automatic recovery cannot progress, the
+operator may submit `expected_token_id`, `confirm_exclusive=true`, and
+`recovery_token_id` on the same endpoint. The latter must exactly equal one of
+the two recorded IDs, must not be the active configured token, and is checked
+with `TokenExists` before deletion and after deletion. Listing a user's tokens is
+a separate PVE permission and is validated before configuration persistence;
+the provisioner must be able to list tokens as well as create/delete them. Any ambiguity or
+unconfirmed absence preserves state. If config names neither recorded token,
+automatic WAL rollback intentionally cannot choose safely and preserves both
+records. Use guarded recovery only with the exact IDs shown by status: submit
+the configured ID as `expected_token_id`, one recorded ID as
+`recovery_token_id`, and `confirm_exclusive=true`. The engine verifies
+existence, deletes only that exact token, confirms absence, deletes the matching
+WAL by its recorded ID, and clears state. It never accepts a hand-made ID,
+deletes the active configured token, returns or logs a secret, or force-clears
+state. If both recorded tokens may be orphaned, repeat only after a fresh
+status read confirms that the pending state remains.
+
+| Failure point | Durable state | Compensation/recovery |
+|---|---|---|
+| Replacement creation/validation or config persistence fails | Old config remains | WAL rollback deletes the replacement only when unambiguous |
+| Config persists, old-token delete or absence read fails | New config remains | WAL rollback deletes the old token and confirms absence |
+| Cleanup after confirmed deletion fails | New config remains | Retry cleanup; token state is already safe |
+| Missing config or undecodable WAL | No safe token selection | Preserve state and WAL; retry or repair through the documented operator process without deleting a token |
+| Decodable malformed WAL | Potentially stale metadata | Compare both token IDs with durable state; mismatches preserve both, matching terminal metadata may be dropped without token deletion |
+| Config names neither recorded token | Ambiguous | Automatic rollback preserves both; use guarded recovery with exact status IDs and no secrets |
+| Configured current token is already absent | Unsafe replacement basis | Fail closed, retain rotation state/WAL, and report an actionable recovery-required status; restore the token or use guarded recovery |
+
+The provisioner must retain `User.Modify` at `/access/groups` (propagating),
+`Sys.Audit` at `/access/groups`, and `Realm.AllocateUser` at every realm used
+by a stored role. Rotation also creates a token on the provisioner user and
+lists that user's tokens for pre- and post-delete confirmation. Token listing
+is a separate PVE permission and is validated before config persistence; the
+successful create call alone does not prove that dependency. If the token is
+removed or loses these privileges, outstanding PVE users can become
+non-renewable and non-revocable. See the README [production
+runbook](../README.md#5-rotate-the-provisioner-token-safely).
 
 ### Error Handling
 

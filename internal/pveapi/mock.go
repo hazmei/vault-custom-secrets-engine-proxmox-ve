@@ -53,6 +53,8 @@ type MockClient struct {
 	CreateTokenFn    func(ctx context.Context, userid, tokenid string) (string, error)
 	UpdateUserFn     func(ctx context.Context, req UpdateUserRequest) error
 	DeleteUserFn     func(ctx context.Context, userid string) error
+	DeleteTokenFn    func(ctx context.Context, userid, tokenid string) error
+	TokenExistsFn    func(ctx context.Context, userid, tokenid string) (bool, error)
 
 	// CreateUserError, if non-nil, is returned by the default CreateUser
 	// implementation (the Fn override takes precedence if set).
@@ -65,7 +67,12 @@ type MockClient struct {
 	CreateTokenError error
 
 	// DeleteUserError, if non-nil, is returned by the default DeleteUser impl.
-	DeleteUserError error
+	DeleteUserError  error
+	DeleteTokenError error
+	// TokenExistsResult controls the default TokenExists result. A nil value
+	// preserves the mock's happy-path default (the token exists); a pointer
+	// makes an explicit false distinguishable from the unset default.
+	TokenExistsResult *bool
 
 	// GetPermissionsResult, if non-nil, is returned by the default GetPermissions impl.
 	GetPermissionsResult PermissionTree
@@ -312,6 +319,27 @@ func (m *MockClient) DeleteUser(ctx context.Context, userid string) error {
 		delete(m.Users, userid)
 	}
 	return nil
+}
+
+// DeleteToken implements Client.
+func (m *MockClient) DeleteToken(ctx context.Context, userid, tokenid string) error {
+	m.log("DeleteToken", userid, tokenid)
+	if m.DeleteTokenFn != nil {
+		return m.DeleteTokenFn(ctx, userid, tokenid)
+	}
+	return m.DeleteTokenError
+}
+
+// TokenExists implements Client.
+func (m *MockClient) TokenExists(ctx context.Context, userid, tokenid string) (bool, error) {
+	m.log("TokenExists", userid, tokenid)
+	if m.TokenExistsFn != nil {
+		return m.TokenExistsFn(ctx, userid, tokenid)
+	}
+	if m.TokenExistsResult == nil {
+		return true, nil
+	}
+	return *m.TokenExistsResult, nil
 }
 
 // ensure MockClient implements Client at compile time.

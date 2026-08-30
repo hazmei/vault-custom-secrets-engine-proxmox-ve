@@ -55,8 +55,9 @@ Additional recorded validation (2026-08-29) against a disposable
 opt-in `TestAccPasswordLifecycle` passed (password issuance, ticket
 authentication, no API token minted, renewal preserving the original password,
 expiry/disablement 401, deletion on revoke). The same three optional authorization
-canaries skipped. Password mode is implemented for the `pve` realm only, with no
-rotation, and is GATED to that verified build: opting a role into password mode
+canaries skipped. Password mode is implemented for the `pve` realm only, with
+lifecycle acceptance complete, no rotation, and PAM explicitly out of scope. It
+is GATED to that verified build: opting a role into password mode
 and every credential issuance both check `GET /version` (`version`+`repoid`) and
 refuse on any other build; editing an existing password role, and renewal and
 revocation of already-issued password leases, are not gated.

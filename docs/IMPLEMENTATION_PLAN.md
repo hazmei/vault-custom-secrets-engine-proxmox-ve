@@ -19,13 +19,33 @@ These design choices are baked into the implementation and are **not open for re
 - **No active_lease_count counter**: The engine does NOT track a counter of active leases anywhere in storage (neither in config nor separate keys). Lease tracking is left to Vault core.
 - **TTL computation uses `framework.CalculateTTL`** (`vault/sdk/framework/lease.go`), not a hand-rolled `min()` helper. It already implements role-value → config-default → `sysView.DefaultLeaseTTL()` fallback, caps at `min(backendMaxTTL, sysView.MaxLeaseTTL())`, and caps renewals from `startTime` (the lease `IssueTime`). There is no `ttl.go`.
 - **No issuance-time requested TTL**: `<mount>/creds/:role` declares NO `ttl` field, matching the database and terraform secrets engines. The effective TTL comes from role values with config defaults as fallback; `increment` is passed to `CalculateTTL` only on renewal (from `req.Secret.Increment`).
+
+- **Provisioner rotation**: `rotate-root` requires `expected_token_id` and
+  `confirm_exclusive=true`. Its dedicated `root-rotation` WAL and durable
+  `rotation` state contains old/new token IDs, the exact rotation WAL ID, and a
+  factual internal phase; the replacement
+  secret is persisted only in seal-wrapped `config`. Token-list capability is
+  validated before config persistence, and deletion is followed by a
+  `TokenExists` absence confirmation (token-list permission is validated before
+  config persistence). Shared tokens are unsupported and
+  exclusivity is an operator acknowledgement, not technically discoverable
+  across mounts. A `recovery_token_id` operation is available only for an exact
+  ID recorded in durable state, after matching `expected_token_id`; it verifies
+  existence before deletion and absence afterward, and never deletes the active
+  configured token. Ambiguity preserves state; there is no force-clear.
+  Automatic rollback intentionally cannot choose when config names neither
+  recorded token; guarded recovery must use the exact token IDs from status.
+  The initial provisioner token must be created with `privsep=0` so rotated
+  replacements inherit the provisioner user's ACL.
 - **`expire=0` (unlimited TTL) policy**: The engine REFUSES issuance when the effective TTL resolves to 0 (unlimited). Sending PVE `expire=0` creates a never-expiring user, disabling the `expire` backstop — the sole defense-in-depth if Vault revocation is delayed or fails. `creds/:role` returns a clear error: `"role %q resolves to an unlimited TTL; set a non-zero ttl/max_ttl on the role or config default_ttl/default_max_ttl (the PVE expire backstop requires a finite lease)"`. (Alternative considered and rejected as more complex: floor the PVE `expire` at `now + effMaxTTL + grace` when a finite max exists but ttl is 0.) This makes the backstop non-optional.
 
 ## Confirmed Password Credential Decisions
 
-The following contract is confirmed for the future password credential feature. It is
-tracking-only until the live PVE probe in P0 passes; these decisions do not authorize
-password implementation in the current token-only release.
+The password credential feature is implemented under a deliberately narrow scope.
+Password credentials are supported only for the `pve` realm and only on the exact
+verified build `pve-manager/9.2.14/a1480fa6b8d899cb`. PAM support is explicitly out
+of scope. The PVE 9.2.14 lifecycle acceptance run is complete. Password rotation is
+unsupported.
 
 - The role field is `mode` with values `token` and `password`.
 - An omitted `mode` defaults to `token`, preserving existing role and lease behavior.
@@ -39,12 +59,12 @@ password implementation in the current token-only release.
   cover Vault's encrypted lease storage, which persists the returned secret response.
 - Existing token roles and leases remain compatible and are not migrated.
 
-### Probe-dependent password design intent
+### Password lifecycle contract
 
-Password renewal is intended to extend the PVE user expiry only, without rotating or
-returning the password. This is not a confirmed PVE behavior yet. It remains
-conditional on P0 evidence for the exact engine renewal shape and a successful
-authentication attempt with the original password after renewal.
+Password renewal extends the PVE user expiry only, without rotating or returning the
+password. The original password remains valid after renewal. Password rotation is
+unsupported because the engine's API-token authentication cannot obtain the
+password-authenticated ticket required by `PUT /access/password`.
 
 ## Repository Layout
 
@@ -595,7 +615,7 @@ Unit test files (one per source file: `path_config_test.go`, `path_roles_test.go
 
 ### `acceptance_test.go`
 
-Acceptance tests gated by `VAULT_ACC=1` and run only by an operator via `make testacc`. Required environment variables: `PVE_ADDR`, `PVE_TOKEN_ID`, `PVE_TOKEN_SECRET`, `PVE_TEST_GROUP` (operator must pre-create this group on the test PVE cluster), `PVE_BEHAVIORAL_PATH`, and `PVE_BEHAVIORAL_MARKER`.
+Acceptance tests gated by `VAULT_ACC=1` and run only by an operator via `make testacc`. Required environment variables for the normal suite: `PVE_ADDR`, `PVE_TOKEN_ID`, `PVE_TOKEN_SECRET`, `PVE_TEST_GROUP` (operator must pre-create this group on the test PVE cluster), `PVE_BEHAVIORAL_PATH`, and `PVE_BEHAVIORAL_MARKER`. When `PVE_ROTATE_ROOT_ACC=1`, `TestAccRotateRoot` instead uses the separate rotation-only bootstrap variables `PVE_ROTATE_BOOTSTRAP_TOKEN_ID`, `PVE_ROTATE_BOOTSTRAP_TOKEN_SECRET`, and `PVE_ROTATE_PROVISIONER_GROUP`; it never rotates or deletes `PVE_TOKEN_ID`.
 
 **Key tests** (see Testing Plan below).
 
@@ -990,6 +1010,9 @@ recorded a `DeleteUser` for the just-created userid. No live PVE needed.
 - `PVE_TEST_GROUP` — operator-pre-created PVE group bound to a test role (operator must create this out-of-band before running tests)
 - `PVE_BEHAVIORAL_PATH` — group-role-gated endpoint for the authorization canary
 - `PVE_BEHAVIORAL_MARKER` — response marker required from the behavioral endpoint
+- `PVE_ROTATE_BOOTSTRAP_TOKEN_ID` — rotation-only bootstrap token ID (required only when `PVE_ROTATE_ROOT_ACC=1`)
+- `PVE_ROTATE_BOOTSTRAP_TOKEN_SECRET` — rotation-only bootstrap token secret (required only when `PVE_ROTATE_ROOT_ACC=1`)
+- `PVE_ROTATE_PROVISIONER_GROUP` — pre-created group for the disposable rotation provisioner user (required only when `PVE_ROTATE_ROOT_ACC=1`)
 
 **Gating**: Tests prefixed `TestAcc*` run ONLY when `VAULT_ACC=1` (HashiCorp convention). The canonical operator command is `make testacc`, which preflights only the required variables above (`PVE_BEHAVIORAL_PATH` must be a group-role-gated endpoint, not `/version`) and then runs `VAULT_ACC=1 go test -count=1 -v -timeout=30m ./... -run TestAcc`.
 
@@ -1007,20 +1030,21 @@ recorded a `DeleteUser` for the just-created userid. No live PVE needed.
 | `TestAccWALRollback` | Write config+role → create `nonce := walCommentPrefix + <8-char-random>` → manually `framework.PutWAL(ctx, storage, walTypeUser, walUser{UserID: userid, Nonce: nonce})` → manually `client.CreateUser(userid)` with `comment=nonce` → **invoke `b.walRollback(ctx, req, walTypeUser, walEntryData)` DIRECTLY** (there is NO `PeriodicFunc` on this backend — rollback is registered via `backend.WALRollback`, and in a live Vault it fires on the rollback manager's schedule; the test calls the func directly rather than waiting) → verify `DeleteUser` ran and the user is gone on PVE (assert `GET` returns body "no such user"). Because `walRollback` receives `data interface{}` holding a `map[string]interface{}`, construct the call arg the same JSON-round-tripped way core would (see wal.go decode note). |
 | `TestAccConcurrentIssuance` | Spawn 10 goroutines by default (configurable 1–10 with `PVE_CONCURRENT_WORKERS`), each calls `creds/:role` concurrently → verify all succeed (no collision errors, ErrConflict retry works). Every issued credential is revoked and absence-verified, and WAL rollback cleanup is attempted on all paths. If a disposable/dev cluster cannot safely sustain default load, lower the worker env var rather than weakening the success assertion. |
 | `TestAccDeleteConfigGuard` | Write config → DELETE without `force=true` → assert refused with clear error;<br/>DELETE with `force=true` → assert succeeds and config gone. Also confirms `force` actually reaches the handler as a query param through whatever client the test uses |
+| `TestAccRotateRoot` | With explicit opt-in, use the bootstrap token to create a unique disposable provisioner user in the pre-created rotation group, read back membership, create its `acceptance` token with `privsep=0`, and configure isolated backend storage with that token. Rotate only that token, preserve existing response/secret-redaction assertions, and use exact-user cleanup that deletes the user and verifies absence (cascading old/replacement token removal). This test is gated by `PVE_ROTATE_ROOT_ACC=1`; live rotation coverage has not been run in this change. |
 
 **References**: `docs/ARCHITECTURE.md` — Testing Strategy section, Acceptance Tests — authorization contract canary, failure injection, DELETE config guard.
 
 ### Password Credential Testing Strategy (gated)
 
-Password tests remain pending until P0 records live PVE 9.2.10 behavior. Unit tests
-must use the mock client and assert the contract without exposing password values in
+Password tests use the mocked client for unit coverage and the verified-build gate for
+live coverage. Unit tests must assert the contract without exposing password values in
 test logs or failure messages. They must cover mode defaulting and validation, the
 separate secret schema, password-only issuance with no token call, compensation and
 WAL ordering, renewal without rotation or password return, revocation, and
 compatibility with token roles and pre-existing token leases. Acceptance coverage
-must be opt-in and operator-run against the probed PVE behavior, including password
+must be opt-in and operator-run against the verified PVE 9.2.14 build, including password
 authentication, expiry, disablement, deletion, and any confirmed interaction with
-token credentials. No password acceptance test may run before P0 is complete.
+token credentials. PAM acceptance coverage is not required because PAM is out of scope.
 
 ## Build & Run
 
@@ -1110,7 +1134,7 @@ After building and registering:
 7. Revoke lease (verify user deleted on PVE)
 8. Delete config with `force=true` (should succeed)
 
-**References**: `docs/ARCHITECTURE.md` — Root Rotation section (manual operation).
+**References**: `docs/ARCHITECTURE.md` — Root Rotation section and guarded recovery operation.
 
 ## Phased Task List
 
@@ -1610,7 +1634,7 @@ group-preservation check. Omitted-`append` semantics remain unresolved; the
 engine therefore continues to send explicit `append=1` with `expire` +
 `groups` + `enable` and read back membership.
 
-**Architecture References**: `docs/ARCHITECTURE.md` Root Rotation section (manual operation), Build & Run commands above.
+**Architecture References**: `docs/ARCHITECTURE.md` Root Rotation section and guarded recovery operation, Build & Run commands above.
 
 ---
 
@@ -1638,8 +1662,8 @@ engine therefore continues to send explicit `append=1` with `expire` +
 ### Password Credential Support (IMPLEMENTED under a reduced scope)
 
 **Status (2026-08-29): IMPLEMENTED for the `pve` realm, by explicit operator
-decision to proceed ahead of the remaining production adoption gates and with
-P0 still partial/open.**
+decision. The broader historical P0 proposal remains partial/open; PAM support is
+explicitly out of scope and is not a release blocker for this reduced scope.**
 
 **Live verification (2026-08-29)** against a disposable
 `pve-manager/9.2.14/a1480fa6b8d899cb` target — note this is a DIFFERENT build
@@ -1655,8 +1679,8 @@ actually exists (`docs/PVE_PROBES.md` Probe P0):
 
 - **Verified build scope (ENFORCED)**: password mode is verified end to end ONLY
   on `pve-manager/9.2.14/a1480fa6b8d899cb`. The declared target
-  `9.2.10/43df2e01f27a1a19` has NO password evidence — its probes predate the
-  feature — and P0 is still partial/open. The engine gates on this rather than
+  `9.2.10/43df2e01f27a1a19` has NO password evidence because its probes predate the
+  feature. The engine gates on this rather than
   only warning: role write refuses to OPT IN to `mode=password` unless
   `GET /version` reports exactly `version=9.2.14` + `repoid=a1480fa6b8d899cb`
   (`path_roles.go` Step 7c), and `creds/:role` re-checks the live build before
@@ -1668,19 +1692,18 @@ actually exists (`docs/PVE_PROBES.md` Probe P0):
   cluster. Editing an existing password role, renew, and revoke are deliberately
   NOT gated, so an upgrade breaks new issuance and new opt-ins while already-issued
   leases stay renewable and revocable and existing roles stay editable. Recording equivalent
-  9.2.10 evidence, or dropping 9.2.10 as a supported build for password mode,
-  remains an open decision. **Open evidence gap**: no `GET /version` response body
-  from the 9.2.14 target is recorded in `docs/PVE_PROBES.md`; the gate's expected
-  `repoid` is derived from the `pveversion` build string, which matches the
-  recorded 9.2.10 `/version` body (Probe 0). Capture the 9.2.14 `/version` body on
-  the next live run.
+  9.2.10 evidence, or dropping 9.2.10 as a supported password-mode build,
+  remains an open decision. **Evidence note**: no
+  `GET /version` response body from the 9.2.14 target is recorded in
+  `docs/PVE_PROBES.md`; do not treat the build identifier as a recorded API
+  response. Capture that response on the next live run.
 - **In scope and implemented**: `mode=password` roles on the `pve` realm;
   engine-generated password supplied on `POST /access/users` (single call);
   no API token minted; renewal extends the PVE `expire` only; revocation
   deletes the user.
-- **Refused at role-write time**: any realm other than `pve`. PAM password
-  creation FAILED in the automated probe run, and the PAM authentication and
-  rotation results are operator-reported and unreproduced.
+- **Refused at role-write time**: any realm other than `pve`, including PAM.
+  Historical PAM probe results are preserved in `docs/PVE_PROBES.md` as
+  non-blocking evidence only; PAM is explicitly out of scope.
 - **Not implemented, and not implementable with this engine's auth**: password
   rotation. `PUT /access/password` requires a password-authenticated ticket,
   which API-token authentication cannot obtain (Probe P0). Callers who need a
@@ -1689,30 +1712,24 @@ actually exists (`docs/PVE_PROBES.md` Probe P0):
 This does NOT change the token-only production adoption gates above, and no
 release gate depends on password support.
 
-- [ ] **P0 — Live PVE password behavior probe (STILL PARTIAL/OPEN)**
-  - **Note (2026-08-29)**: password support was implemented ahead of this task
-    closing, by explicit operator decision. The implementation is restricted to
-    exactly what P0 confirmed — `pve`-realm same-call password creation,
-    authentication, exact-shape renewal, expiry, disablement, and deletion — and
-    the unresolved areas are handled by refusing them in code rather than
-    assuming behavior: non-`pve` realms are rejected at role-write time, and
-    rotation is not implemented at all. The remaining checklist below stays open.
-  - **Files/scope**: `docs/PVE_PROBES.md`, disposable PVE 9.2.10 target, probe
+- [x] **P0 — Live PVE password behavior probe (reduced supported scope)** — DONE
+  - **Note (2026-08-29)**: the verified `pve`-realm lifecycle is complete on
+    `pve-manager/9.2.14/a1480fa6b8d899cb`. PAM is explicitly out of scope and is
+    not a release or implementation blocker. Password rotation remains unsupported.
+  - **Files/scope**: `docs/PVE_PROBES.md`, disposable PVE 9.2.14 target, probe
     notes/scripts as appropriate; no application code.
-  - **Dependencies**: operator-provided disposable PVE 9.2.10 cluster and
+  - **Dependencies**: operator-provided disposable PVE 9.2.14 cluster and
     credentials; none of the implementation tasks may start before this task is
     complete.
-  - **Agreed scope**: `pve` and `pam` password realms only. Non-password realms
-    are explicitly outside the current scope and deferred by operator decision.
-    The P0 decision is limited to this scope and does not treat unresolved PAM
-    behavior as covered by PVE evidence.
+  - **Supported scope**: `pve` password credentials on the exact verified build
+    above. PAM and other non-`pve` realms are explicitly outside scope.
   - **Checklist**: verify password user creation and authentication; determine
     password rotation/update behavior; verify expiry, disablement, deletion, and
     interaction with token credentials and the user-level `expire` backstop. Exercise
     the exact engine renewal shape `expire + groups + enable + append=1`, read the
     user back, and authenticate with the original password afterward. Probe the
-    agreed `pve` and `pam` realms, recording the exact HTTP status and redacted body
-    for every failure. Probe the privileges required to create/set a password,
+    supported `pve` realm, recording the exact HTTP status and redacted body for
+    every failure. PAM is explicitly out of scope. Probe the privileges required to create/set a password,
     recording the exact ACL path, privilege, and propagation flag; compare them with
     the existing `/access/groups` and `/access/realm/<realm>` checks. Record PVE
     password minimum and maximum constraints needed by the generator. Determine and
@@ -1721,29 +1738,15 @@ release gate depends on password support.
     ordering and response/error behavior. Capture exact status/body behavior
     throughout and redact all password values from evidence.
   - **Acceptance**: reproducible probe evidence is recorded in `docs/PVE_PROBES.md`
-    with no password values; confirmed and unresolved behavior is separated by
-    realm and provenance; deferred behavior is explicitly listed; password
-    implementation remains a separate future decision. P0 remains open until
-    the unresolved password ACL/privilege requirements and the PAM gaps are
-    resolved or explicitly removed from the task.
-  - **Latest validation (29 August 2026)**: P0 remains partial/open. Automated
+    with no password values. The `pve` lifecycle acceptance is complete; PAM
+    evidence is historical and non-blocking.
+  - **Latest validation (29 August 2026)**: the reduced `pve`-realm supported scope is complete; the broader P0 proposal remains partial/open because PAM and password rotation are explicitly out of scope. Automated
     evidence records PVE password creation, read-back, authentication, exact
     renewal, expiry, disablement, deletion, token interaction, and 8–64 length
-    constraints. PAM creation failed in the automated run; PAM authentication
-    and rotation (HTTP 200, old-password HTTP 401, new-password HTTP 200) are
-    operator-reported and unreproduced. `PUT /access/password` requires a
-    password-authenticated ticket and is not exercisable by this engine's
-    API-token-only authentication. The password-specific ACL/privilege path is
-    unresolved. See the attributed evidence and blocked-run cleanup incident in
+    constraints. `PUT /access/password` requires a password-authenticated ticket
+    and is not exercisable with the engine's API-token-only authentication, so
+    password rotation is unsupported. See the historical PAM evidence in
     `docs/PVE_PROBES.md`.
-
-  - **Deferred follow-up — non-password realms**: by explicit operator decision,
-    create an operator-approved,
-    disposable test realm and record its password-credential behavior, including
-    creation, authentication, rotation, renewal, expiry, disablement, deletion,
-    token interaction, ACLs, constraints, and cleanup. This follow-up must not add
-    password credentials to the engine unless separately approved and implemented
-    through the later password work items.
 
 - [x] **P1 — Contract and documentation finalization** — DONE. Locked contract:
   engine-owned generator (`password.go`), `crypto/rand` via `rand.Int` rejection

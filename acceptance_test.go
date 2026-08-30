@@ -2,8 +2,14 @@
 //
 // Acceptance tests in this file are gated by VAULT_ACC=1 and mutate a live
 // operator-provided Proxmox VE 9.2.10 cluster. Password coverage is separately
-// gated to the verified pve-manager/9.2.14 build. Required environment
-// variables are PVE_ADDR, PVE_TOKEN_ID, PVE_TOKEN_SECRET, and PVE_TEST_GROUP.
+// gated to the verified pve-manager/9.2.14 build. Provisioner rotation is
+// additionally gated by PVE_ROTATE_ROOT_ACC=1 because it rotates a disposable
+// provisioner identity created from the rotation-only bootstrap credentials.
+// Required environment variables for the normal suite are PVE_ADDR,
+// PVE_TOKEN_ID, PVE_TOKEN_SECRET, and PVE_TEST_GROUP. When rotation is opted
+// in, TestAccRotateRoot uses PVE_ROTATE_BOOTSTRAP_TOKEN_ID,
+// PVE_ROTATE_BOOTSTRAP_TOKEN_SECRET, and PVE_ROTATE_PROVISIONER_GROUP instead
+// of the normal provisioner token.
 // The test group must be pre-created and safely bound to a test-only role/path
 // before running the suite. The authorization canary additionally requires
 // PVE_BEHAVIORAL_PATH and PVE_BEHAVIORAL_MARKER so group-derived privilege is
@@ -34,17 +40,21 @@ import (
 )
 
 const (
-	accRoleName          = "acc"
-	accUserPrefix        = "vaultacc"
-	accDefaultTTL        = 300
-	accDefaultMaxTTL     = 900
-	accBehaviorPathEnv   = "PVE_BEHAVIORAL_PATH"
-	accBehaviorMarkerEnv = "PVE_BEHAVIORAL_MARKER"
-	accDefaultBehavior   = "/version"
-	accTestTimeout       = 2 * time.Minute
-	accPastExpireBuffer  = 60
-	accDefaultWorkers    = 10
-	accMaxWorkers        = 10
+	accRoleName               = "acc"
+	accUserPrefix             = "vaultacc"
+	accDefaultTTL             = 300
+	accDefaultMaxTTL          = 900
+	accBehaviorPathEnv        = "PVE_BEHAVIORAL_PATH"
+	accBehaviorMarkerEnv      = "PVE_BEHAVIORAL_MARKER"
+	accDefaultBehavior        = "/version"
+	accTestTimeout            = 2 * time.Minute
+	accPastExpireBuffer       = 60
+	accDefaultWorkers         = 10
+	accMaxWorkers             = 10
+	accRotateRootEnv          = "PVE_ROTATE_ROOT_ACC"
+	accRotateBootstrapID      = "PVE_ROTATE_BOOTSTRAP_TOKEN_ID"
+	accRotateBootstrapSecret  = "PVE_ROTATE_BOOTSTRAP_TOKEN_SECRET"
+	accRotateProvisionerGroup = "PVE_ROTATE_PROVISIONER_GROUP"
 )
 
 type accEnv struct {
@@ -452,6 +462,30 @@ func requireAccEnv(t *testing.T) accEnv {
 	}
 }
 
+func requireRotateAccEnv(t *testing.T) accEnv {
+	t.Helper()
+	if os.Getenv("VAULT_ACC") != "1" {
+		t.Skip("acceptance tests require VAULT_ACC=1")
+	}
+	if os.Getenv(accRotateRootEnv) != "1" {
+		t.Skipf("rotate-root acceptance test skipped: set %s=1 to opt in", accRotateRootEnv)
+	}
+	missing := requiredMissing("PVE_ADDR", "PVE_TEST_GROUP", accRotateBootstrapID, accRotateBootstrapSecret, accRotateProvisionerGroup)
+	if len(missing) > 0 {
+		t.Skipf("rotate-root acceptance test requires environment variables: %s", strings.Join(missing, ", "))
+	}
+	skipVerify, err := strconv.ParseBool(envDefault("PVE_TLS_SKIP_VERIFY", "false"))
+	if err != nil {
+		t.Fatalf("PVE_TLS_SKIP_VERIFY must parse as bool: %v", err)
+	}
+	return accEnv{
+		Address:       os.Getenv("PVE_ADDR"),
+		Group:         os.Getenv("PVE_TEST_GROUP"),
+		CACert:        os.Getenv("PVE_CA_CERT"),
+		TLSSkipVerify: skipVerify,
+	}
+}
+
 func TestValidateAccBehaviorEnvRequiresMarkerForCustomPath(t *testing.T) {
 	err := validateAccBehavioralCanaryEnv(accEnv{BehaviorPath: "/nodes"})
 	if err == nil {
@@ -649,12 +683,16 @@ func responseErr(resp *logical.Response) error {
 }
 
 func renewAccSecret(t *testing.T, ctx context.Context, h accHarness, secret *logical.Secret, increment time.Duration) *logical.Response {
+	return renewAccSecretNamed(t, ctx, h, accRoleName, secret, increment)
+}
+
+func renewAccSecretNamed(t *testing.T, ctx context.Context, h accHarness, roleName string, secret *logical.Secret, increment time.Duration) *logical.Response {
 	t.Helper()
 	secret.Increment = increment
 	if secret.IssueTime.IsZero() {
 		secret.IssueTime = time.Now()
 	}
-	req := logical.RenewRequest("creds/"+accRoleName, secret, nil)
+	req := logical.RenewRequest("creds/"+roleName, secret, nil)
 	req.Storage = h.Storage
 	resp, err := h.Backend.secretTokenRenew(ctx, req, nil)
 	if err != nil {
@@ -664,8 +702,12 @@ func renewAccSecret(t *testing.T, ctx context.Context, h accHarness, secret *log
 }
 
 func revokeAccSecret(t *testing.T, ctx context.Context, h accHarness, secret *logical.Secret) {
+	revokeAccSecretNamed(t, ctx, h, accRoleName, secret)
+}
+
+func revokeAccSecretNamed(t *testing.T, ctx context.Context, h accHarness, roleName string, secret *logical.Secret) {
 	t.Helper()
-	req := logical.RevokeRequest("creds/"+accRoleName, secret, nil)
+	req := logical.RevokeRequest("creds/"+roleName, secret, nil)
 	req.Storage = h.Storage
 	resp, err := h.Backend.secretTokenRevoke(ctx, req, nil)
 	if err != nil {
@@ -862,7 +904,7 @@ func assertAccTokenStatus(t *testing.T, ctx context.Context, env accEnv, tokenID
 		t.Fatalf("token request %s %s: %v", method, path, err)
 	}
 	if status != want {
-		t.Fatalf("token request %s %s status=%d; want %d body=%s", method, path, status, want, redactBody(body))
+		t.Fatalf("token request %s %s status=%d; want %d", method, path, status, want)
 	}
 	return status, body
 }
@@ -1028,9 +1070,163 @@ func TestAccPasswordLifecycle(t *testing.T) {
 	assertAccTicketStatus(t, ctx, h.Env, userID, password, http.StatusUnauthorized)
 }
 
+// TestAccRotateRoot exercises destructive provisioner-token rotation directly
+// against the backend with isolated in-memory storage; it never starts Vault.
+// The disposable provisioner token must be dedicated and exclusive to this test.
+func TestAccRotateRoot(t *testing.T) {
+	rotateEnv := requireRotateAccEnv(t)
+	bootstrapEnv := rotateEnv
+	bootstrapEnv.TokenID = os.Getenv(accRotateBootstrapID)
+	bootstrapEnv.TokenSecret = os.Getenv(accRotateBootstrapSecret)
+	bootstrapClient := newPVEClient(t, bootstrapEnv)
+	ctx, cancel := context.WithTimeout(context.Background(), accTestTimeout)
+	defer cancel()
+
+	// This user is the only provisioner identity this test may rotate. Register
+	// cleanup immediately after creation so every later failure removes it via
+	// the bootstrap client; deleting the user also cascades its tokens.
+	provisionerUser := accUserID(t, "rotate-provisioner")
+	if createErr := bootstrapClient.CreateUser(ctx, pveapi.CreateUserRequest{
+		UserID: provisionerUser,
+		Groups: os.Getenv(accRotateProvisionerGroup),
+		Expire: time.Now().Add(accTestTimeout + 10*time.Minute).Unix(),
+		Enable: true,
+	}); createErr != nil {
+		t.Fatalf("create disposable rotate provisioner user %q: %v", provisionerUser, createErr)
+	}
+	registerAccUserCleanup(t, bootstrapClient, provisionerUser)
+	assertAccUserInGroup(t, ctx, bootstrapClient, provisionerUser, os.Getenv(accRotateProvisionerGroup))
+
+	provisionerTokenID := provisionerUser + "!acceptance"
+	provisionerTokenSecret, err := bootstrapClient.CreateToken(ctx, provisionerUser, "acceptance")
+	if err != nil {
+		t.Fatalf("create disposable rotate provisioner token: %v", err)
+	}
+	rotateEnv.TokenID = provisionerTokenID
+	rotateEnv.TokenSecret = provisionerTokenSecret
+	b, storage := newAccBackend(t)
+	h := accHarness{Env: rotateEnv, Backend: b, Storage: storage, Client: newPVEClient(t, rotateEnv)}
+
+	suffix, err := randomSuffix()
+	if err != nil {
+		t.Fatalf("generate isolated rotate-root role name: %v", err)
+	}
+	roleName := "acc-rotate-" + suffix
+	writeAccConfig(t, ctx, h)
+	writeAccRoleNamed(t, ctx, h, roleName, modeToken)
+
+	oldTokenID, oldTokenSecret := h.Env.TokenID, h.Env.TokenSecret
+	rotationResp, err := h.Backend.HandleRequest(ctx, &logical.Request{
+		Operation: logical.UpdateOperation,
+		Path:      "rotate-root",
+		Storage:   h.Storage,
+		Data: map[string]interface{}{
+			"expected_token_id": oldTokenID,
+			"confirm_exclusive": true,
+		},
+	})
+	if err != nil {
+		t.Fatalf("rotate-root request: %v", err)
+	}
+	if rotationResp == nil || rotationResp.IsError() {
+		t.Fatalf("rotate-root returned an error response: %v", responseErr(rotationResp))
+	}
+	if rotationResp.Data["status"] != "rotated" {
+		t.Fatalf("rotate-root status=%v; want rotated", rotationResp.Data["status"])
+	}
+	newTokenID, ok := rotationResp.Data["token_id"].(string)
+	if !ok || newTokenID == "" || newTokenID == oldTokenID {
+		t.Fatal("rotate-root returned an invalid replacement token ID")
+	}
+	oldOwner, _, err := splitTokenID(oldTokenID)
+	if err != nil {
+		t.Fatalf("parse configured token ID: %v", err)
+	}
+	newOwner, _, err := splitTokenID(newTokenID)
+	if err != nil {
+		t.Fatalf("parse replacement token ID: %v", err)
+	}
+	if newOwner != oldOwner {
+		t.Fatal("replacement token owner changed")
+	}
+	assertAccNoSensitiveValues(t, rotationResp.Data, oldTokenSecret, "rotation response")
+
+	configResp, err := h.Backend.HandleRequest(ctx, &logical.Request{Operation: logical.ReadOperation, Path: "config", Storage: h.Storage})
+	if err != nil {
+		t.Fatalf("read rotated config: %v", err)
+	}
+	if configResp == nil || configResp.IsError() {
+		t.Fatalf("read rotated config returned an error response: %v", responseErr(configResp))
+	}
+	rotatedCfg, err := getConfig(ctx, h.Storage)
+	if err != nil || rotatedCfg == nil || rotatedCfg.TokenSecret == "" {
+		t.Fatal("rotated config did not retain a replacement token secret")
+	}
+	newTokenSecret := rotatedCfg.TokenSecret
+	assertAccNoSensitiveValues(t, configResp.Data, oldTokenSecret, "config response")
+	assertAccNoSensitiveValues(t, configResp.Data, newTokenSecret, "config response")
+	assertAccNoSensitiveValues(t, rotationResp.Data, newTokenSecret, "rotation response")
+
+	assertAccTokenStatus(t, ctx, h.Env, oldTokenID, oldTokenSecret, http.MethodGet, accDefaultBehavior, http.StatusUnauthorized)
+	replacementEnv := h.Env
+	replacementEnv.TokenID, replacementEnv.TokenSecret = newTokenID, newTokenSecret
+	// The disposable provisioner client is intentionally dead after rotation.
+	// Use the replacement for all subsequent PVE assertions.
+	h.Client = newPVEClient(t, replacementEnv)
+	issuedResp, err := h.Backend.HandleRequest(ctx, &logical.Request{Operation: logical.ReadOperation, Path: "creds/" + roleName, Storage: h.Storage})
+	if err != nil {
+		t.Fatalf("issue token credential with replacement token: %v", err)
+	}
+	if issuedResp == nil || issuedResp.IsError() || issuedResp.Secret == nil {
+		t.Fatalf("replacement token could not issue token credential: %v", responseErr(issuedResp))
+	}
+	userID, _ := issuedResp.Data["user_id"].(string)
+	tokenSecret, _ := issuedResp.Data["token_secret"].(string)
+	if userID == "" || tokenSecret == "" {
+		t.Fatal("token credential response missing user_id or token_secret")
+	}
+	// Register the exact lease user immediately; cleanup never deletes the
+	// replacement provisioner token.
+	registerAccUserCleanup(t, h.Client, userID)
+	issuedResp.Secret.IssueTime = time.Now()
+
+	assertAccUserInGroup(t, ctx, h.Client, userID, h.Env.Group)
+	assertAccTokenStatus(t, ctx, replacementEnv, issuedResp.Data["token_id"].(string), tokenSecret, http.MethodGet, accDefaultBehavior, http.StatusOK)
+	renewAccSecretNamed(t, ctx, h, roleName, issuedResp.Secret, 120*time.Second)
+	assertAccUserInGroup(t, ctx, h.Client, userID, h.Env.Group)
+	assertAccTokenStatus(t, ctx, replacementEnv, issuedResp.Data["token_id"].(string), tokenSecret, http.MethodGet, accDefaultBehavior, http.StatusOK)
+	revokeAccSecretNamed(t, ctx, h, roleName, issuedResp.Secret)
+	assertAccUserMissing(t, ctx, h.Client, userID)
+	assertAccTokenStatus(t, ctx, replacementEnv, issuedResp.Data["token_id"].(string), tokenSecret, http.MethodGet, accDefaultBehavior, http.StatusUnauthorized)
+}
+
+func assertAccNoSensitiveValues(t *testing.T, data map[string]interface{}, secret, contextName string) {
+	t.Helper()
+	assertAccNoSensitiveValue(t, data, secret, contextName)
+}
+
+func assertAccNoSensitiveValue(t *testing.T, value interface{}, secret, contextName string) {
+	t.Helper()
+	if text, ok := value.(string); ok && secret != "" && strings.Contains(text, secret) {
+		t.Fatalf("%s contains a sensitive token value", contextName)
+	}
+	switch nested := value.(type) {
+	case map[string]interface{}:
+		if _, present := nested["token_secret"]; present {
+			t.Fatalf("%s must not contain token_secret", contextName)
+		}
+		for _, child := range nested {
+			assertAccNoSensitiveValue(t, child, secret, contextName)
+		}
+	case []interface{}:
+		for _, child := range nested {
+			assertAccNoSensitiveValue(t, child, secret, contextName)
+		}
+	}
+}
+
 // assertAccTicketStatus posts credentials to /access/ticket and asserts the
-// HTTP status. The password is sent in the form body and never logged; only the
-// status and a redacted body appear in failures.
+// HTTP status. The password is sent in the form body and never logged.
 func assertAccTicketStatus(t *testing.T, ctx context.Context, env accEnv, userID, password string, want int) {
 	t.Helper()
 	client := newAccHTTPClient(t, env)
@@ -1052,11 +1248,11 @@ func assertAccTicketStatus(t *testing.T, ctx context.Context, env accEnv, userID
 		t.Fatalf("ticket request: %v", err)
 	}
 	defer resp.Body.Close() //nolint:errcheck // test helper; close errors are not actionable.
-	body, err := io.ReadAll(resp.Body)
+	_, err = io.ReadAll(resp.Body)
 	if err != nil {
 		t.Fatalf("read ticket response: %v", err)
 	}
 	if resp.StatusCode != want {
-		t.Fatalf("ticket status=%d; want %d body=%s", resp.StatusCode, want, redactBody(body))
+		t.Fatalf("ticket status=%d; want %d", resp.StatusCode, want)
 	}
 }
