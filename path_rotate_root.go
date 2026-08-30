@@ -242,6 +242,11 @@ func validateReplacement(ctx context.Context, client pveapi.Client, storage logi
 	if err != nil {
 		return fmt.Errorf("validate current token for replacement: %w", err)
 	}
+	// Second existence check, deliberately on the replacement client: rotateRoot
+	// already confirmed the token is live via oldClient before CreateToken. This
+	// one proves the replacement can list tokens, a distinct PVE permission that
+	// the post-delete confirmation depends on, and must run before config
+	// persistence so a replacement that cannot list fails closed.
 	exists, err := client.TokenExists(ctx, oldUser, oldToken)
 	if err != nil {
 		return fmt.Errorf("validate replacement token-list capability: %w", err)
@@ -253,11 +258,6 @@ func validateReplacement(ctx context.Context, client pveapi.Client, storage logi
 	if err != nil {
 		return err
 	}
-	// Second existence check, deliberately on the replacement client: rotateRoot
-	// already confirmed the token is live via oldClient before CreateToken. This
-	// one proves the replacement can list tokens, a distinct PVE permission that
-	// the post-delete confirmation depends on, and must run before config
-	// persistence so a replacement that cannot list fails closed.
 	for _, required := range []struct{ privilege, path string }{
 		{"User.Modify", "/access/groups"}, {"Sys.Audit", "/access/groups"},
 	} {
