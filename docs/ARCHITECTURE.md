@@ -1,7 +1,8 @@
 # Proxmox VE Secrets Engine
 
 Vault secrets engine that issues **dynamic Proxmox VE credentials**: API tokens
-by default, or passwords in the supported password mode. Each lease creates a
+by default on the PVE 9.2.10 token-mode target, or passwords only on the single
+verified `pve-manager/9.2.14/a1480fa6b8d899cb` build. Each lease creates a
 dedicated, throwaway PVE user and adds it to a pre-configured PVE group (which
 the operator has already bound to the desired ACL roles). Token mode mints an
 API token on the user; password mode supplies an engine-generated password
@@ -200,9 +201,10 @@ behave exactly as before.
 
 **Verification and support scope**: password mode has been exercised end to end
 only on `pve-manager/9.2.14/a1480fa6b8d899cb`. The declared target elsewhere in
-this document is `9.2.10/43df2e01f27a1a19`, whose probe evidence predates the
-feature and contains no password results; PVE 9.2.10 is explicitly token-mode
-only. A `mode=password` role write returns a warning naming the verified build
+this document is `9.2.10/43df2e01f27a1a19`. Raw-API password probes were run on
+9.2.10 (Probe P0 rerun, 28 August 2026), but password mode has not been
+exercised end to end through the engine on that build, so PVE 9.2.10 remains
+token-mode only. A `mode=password` role write returns a warning naming the verified build
 so operators do not infer 9.2.10 support. Token mode is verified on both builds.
 The exact 9.2.14 `GET /version` response body remains unrecorded, but the
 runtime exact-build gate is enforced.

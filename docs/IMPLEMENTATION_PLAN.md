@@ -1664,7 +1664,7 @@ engine therefore continues to send explicit `append=1` with `expire` +
   orphan `vault-*` PVE user was deleted. Do not make production adoption
   depend on this destructive failure-injection test.
 
-These four unchecked items are production-adoption verification gates, not
+These unchecked items are production-adoption verification gates, not
 implementation defects. The destructive failure-injection gate is operator-run
 evidence and should not make production adoption depend on a destructive test.
 
@@ -1689,8 +1689,9 @@ actually exists (`docs/PVE_PROBES.md` Probe P0):
 
 - **Verified build scope (ENFORCED)**: password mode is verified end to end ONLY
   on `pve-manager/9.2.14/a1480fa6b8d899cb`. The declared target
-  `9.2.10/43df2e01f27a1a19` has NO password evidence because its probes predate the
-  feature; PVE 9.2.10 is explicitly token-mode only. The engine gates on this rather than
+  `9.2.10/43df2e01f27a1a19` has raw-API password evidence from the automated
+  Probe P0 rerun on 28 August 2026, but no end-to-end engine lifecycle result;
+  PVE 9.2.10 is explicitly token-mode only. The engine gates on this rather than
   only warning: role write refuses to OPT IN to `mode=password` unless
   `GET /version` reports exactly `version=9.2.14` + `repoid=a1480fa6b8d899cb`
   (`path_roles.go` Step 7c), and `creds/:role` re-checks the live build before
@@ -1723,7 +1724,8 @@ Non-blocking evidence and support gaps remain explicit: the live `append=0`
 replacement control has not been run; live `TestAccRotateRoot` has not been run;
 the raw `GET /version` response body from the verified 9.2.14 build has not been
 captured in `docs/PVE_PROBES.md`. Password mode remains unsupported on the
-9.2.10 target because no 9.2.10 password evidence exists. These do
+  9.2.10 target because it lacks an end-to-end engine lifecycle result despite
+  the retained raw-API password evidence. These do
 not change the shipped password scope or the token-only production-adoption
 gates above, and no release gate depends on password support.
 
@@ -1743,7 +1745,10 @@ gates above, and no release gate depends on password support.
     scope; the historical PAM evidence is retained as non-blocking context.
   - **Evidence gap**: the raw `GET /version` response body from the 9.2.14
     target is not yet recorded in `docs/PVE_PROBES.md`; the engine's exact-build
-    gate remains enforced from the live response.
+    gate remains enforced from the live response. The exact ACL privilege path
+    and propagation required specifically for password creation are also not
+    isolated; the probe records the privileges held by the token, not a minimum
+    password-creation requirement, so this remains an evidence gap.
 
 - [x] **P1 — Contract and documentation finalization** — DONE. Locked contract:
   engine-owned generator (`password.go`), `crypto/rand` via `rand.Int` rejection

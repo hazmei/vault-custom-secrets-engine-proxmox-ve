@@ -15,6 +15,13 @@ not confirmed here is presumed **unverified**.
 
 ## Metadata
 
+The original probe series ran automatically on 17 August 2026 against
+`pve-manager/9.2.10/43df2e01f27a1a19`. The password rerun was an automated
+run on 28 August 2026 against that same 9.2.10 build. The 29 August 2026
+9.2.14 results include an automated engine acceptance run against
+`pve-manager/9.2.14/a1480fa6b8d899cb` and a separate operator report; the
+operator report is not automated probe output.
+
 | Field | Value |
 |---|---|
 | PVE version (target 9.2.10) | 9.2.10 |
@@ -1321,12 +1328,12 @@ engine depends on, its confirmation status, and the code area affected.
 | 7 | `PUT /access/users/{userid}` with `expire` only preserves `groups` | `groups` field unchanged after PUT | N — historical Probe 7 saw `groups:[]`; later live acceptance on build `43df2e01f27a1a19` preserved groups with `append` omitted | `secret_token.go` renew / `acceptance_test.go` control | Omitted-`append` semantics unresolved; renewal must re-send expire+groups+enable+append=1; control uses empty `groups=` with explicit append=0 |
 | 8 | Expired user's token returns 401 | 401 once `expire` is in the past | Y — 401 on expired user | creds `expire` backstop | |
 | 9 | Permissions tree distinguishes `propagate=0` from `propagate=1` | Config-time check can detect `propagate=0` at `/access/groups` | Y — propagate=0 shows :0 | `path_config.go` validation | C3 fixable: check per-group path /access/groups/<group> at role-write |
-| P0-password-create | Password supplied on `POST /access/users` is accepted | Password creation is available through the user-create call | Y for `pve` (automated 29 August 2026); historical PAM creation failed with HTTP 500 and no OS account | Password issuance | PAM is out of scope; do not generalize PVE evidence |
-| P0-password-auth | Password authenticates through `POST /access/ticket` | Created password can authenticate | Y for `pve` (automated 29 August 2026); Y reported for PAM but unreproduced | Future password secret / acceptance tests | PAM result is operator-reported only |
-| P0-password-expiry | Past user `expire` rejects password authentication | Expiry is a password backstop | Y for `pve` (automated 29 August 2026, HTTP 401) | Future password lifecycle | PAM expiry remains unresolved |
-| P0-password-disable | `enable=0` rejects password authentication | Disabled users cannot authenticate | Y for `pve` (automated 29 August 2026, HTTP 401) | Future password lifecycle | PAM disablement remains unresolved |
-| P0-password-constraints | Password length is bounded | Generator must honor PVE constraints | Y for `pve`: 8–64 accepted; 1–7 and 65 rejected | Future password generator | PAM/charset behavior remains unresolved |
-| P0-password-rotation | `PUT /access/password` changes the password | Rotation behavior is available to the engine | API-token call is not exercisable: PVE returned 403 and requires a password-authenticated ticket; PAM 200/old 401/new 200 is operator-reported and unreproduced | Future design decision | Engine auth is API-token-only; exact privilege path and a supported engine rotation mechanism remain unresolved |
+| P0-password-create | Password supplied on `POST /access/users` is accepted | Password creation is available through the user-create call | Y for `pve` (automated 28 Aug 2026 on 9.2.10; re-confirmed 29 Aug 2026 on `pve-manager/9.2.14/a1480fa6b8d899cb`); historical PAM creation failed with HTTP 500 and no OS account | Password issuance | PAM is out of scope; do not generalize PVE evidence |
+| P0-password-auth | Password authenticates through `POST /access/ticket` | Created password can authenticate | Y for `pve` (automated 28 Aug 2026 on 9.2.10; re-confirmed 29 Aug 2026 on `pve-manager/9.2.14/a1480fa6b8d899cb`); Y reported for PAM but unreproduced | Password secret / acceptance tests complete | PAM result is operator-reported only |
+| P0-password-expiry | Past user `expire` rejects password authentication | Expiry is a password backstop | Y for `pve` (automated 28 Aug 2026 on 9.2.10; re-confirmed 29 Aug 2026 on `pve-manager/9.2.14/a1480fa6b8d899cb`, HTTP 401) | Password lifecycle complete | PAM expiry remains unresolved |
+| P0-password-disable | `enable=0` rejects password authentication | Disabled users cannot authenticate | Y for `pve` (automated 28 Aug 2026 on 9.2.10; re-confirmed 29 Aug 2026 on `pve-manager/9.2.14/a1480fa6b8d899cb`, HTTP 401) | Password lifecycle complete | PAM disablement remains unresolved |
+| P0-password-constraints | Password length is bounded | Generator must honor PVE constraints | Y for `pve` (automated 28 Aug 2026 on 9.2.10; re-confirmed 29 Aug 2026 on `pve-manager/9.2.14/a1480fa6b8d899cb`): 8–64 accepted; 1–7 and 65 rejected | Password generator complete | PAM/charset behavior remains unresolved |
+| P0-password-rotation | `PUT /access/password` changes the password | Rotation behavior is available to the engine | Not supported: API-token authentication cannot obtain the required password-authenticated ticket; PAM 200/old 401/new 200 is operator-reported and unreproduced | Unsupported by design | Password rotation is explicitly unsupported; callers revoke and issue a new credential |
 | P0-pam-lifecycle | PAM creation and full lifecycle behave like PVE | PAM password behavior matches the `pve` realm | Not evaluated for support; historical creation failed and only authentication/rotation were operator-reported | None | PAM is explicitly out of scope and this row is non-blocking |
 | 6-fix | privsep=0 token inheritance (behavioral) | Token can call /cluster/resources?type=vm | SUPERSEDED — see CLEAN | pveapi CreateToken / canary | Confounded; re-run as Probe CLEAN |
 | 7-fix | Renewal re-sends expire+groups+enable preserves privileges | groups persist; token works post-renewal | SUPERSEDED — see CLEAN | secret_token.go renew / InternalData | Confounded; re-run as Probe CLEAN |
@@ -1439,11 +1446,11 @@ completed tests.
 ## Password-credential P0 status — supported scope is closed
 
 The 9.2.14 verification run closes the supported `pve`-realm behavior the engine
-depends on. PVE 9.2.10 is explicitly token-mode only: its historical probes
-predate password mode and contain no password evidence, so password compatibility
-on that build is not supported. The broader historical proposal is closed by
-scope rather than left open: PAM and password rotation are out of scope. PAM is
-explicitly out of scope, and the historical PAM results above are non-blocking.
+depends on. PVE 9.2.10 is explicitly token-mode only: raw-API password probes
+were run on 9.2.10 (automated Probe P0 rerun, 28 August 2026), but password
+mode was not exercised end to end through the engine on that build. The broader
+historical proposal is closed by scope rather than left open: PAM and password
+rotation are out of scope. The historical PAM results above are non-blocking.
 Password rotation is unsupported because `PUT /access/password` cannot be
 exercised with the engine's API-token-only authentication.
 
@@ -1460,9 +1467,10 @@ only and must not be generalized into supported behavior. Password rotation is
 also out of scope for this API-token-authenticated engine.
 
 This decision also explicitly closes password support for the declared PVE
-9.2.10 target: 9.2.10 is token-mode only. The absence of 9.2.10 password
-evidence is preserved as historical probe context, not as an open support
-decision.
+9.2.10 target: 9.2.10 is token-mode only. The raw-API password evidence from
+the automated 28 August 2026 Probe P0 rerun is retained, but it is not an
+end-to-end engine lifecycle result and therefore does not establish supported
+password compatibility on 9.2.10.
 
 This dated scope decision does not rewrite the historical run statuses above:
 `BLOCKED/FAILED`, `BLOCKED/INCOMPLETE`, and other recorded outcomes remain as
