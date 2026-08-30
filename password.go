@@ -2,7 +2,9 @@
 //
 // Contract locked in docs/IMPLEMENTATION_PLAN.md P1, from the verified
 // pve-manager/9.2.14/a1480fa6b8d899cb evidence in docs/PVE_PROBES.md Probe P0.
-// PVE 9.2.10 has no password evidence:
+// Raw-API password probes were also run on 9.2.10 (Probe P0 rerun, 28 August
+// 2026), but password mode was not exercised end to end through the engine on
+// that build and remains unsupported there:
 //
 //   - Ownership: the ENGINE generates the password. PVE never generates one,
 //     and PUT /access/password (PVE-side rotation) requires a password-
@@ -30,8 +32,8 @@ const (
 
 	// passwordLength is the generated password length in characters.
 	// 32 × log2(62) ≈ 190 bits of entropy, well inside PVE's 8..64 limit
-	// (pve-manager/9.2.14/a1480fa6b8d899cb: 7 rejected, 8 accepted, 64 accepted,
-	// 65 rejected).
+	// (28 August 2026 raw-API rerun on pve-manager/9.2.10: 7 rejected, 8
+	// accepted, 64 accepted, 65 rejected).
 	passwordLength = 32
 
 	// pvePasswordMinLength and pvePasswordMaxLength are PVE's confirmed

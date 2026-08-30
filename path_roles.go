@@ -123,8 +123,9 @@ const (
 // passwordVerifiedBuild is the ONLY PVE build on which password mode has been
 // verified end to end (docs/PVE_PROBES.md, "Probe P0 verification run ... on
 // PVE 9.2.14"). The project's declared target elsewhere is
-// pve-manager/9.2.10/43df2e01f27a1a19, and password behavior was NOT verified
-// there — the 9.2.10 probes predate the feature and P0 remains partial/open.
+// pve-manager/9.2.10/43df2e01f27a1a19. Raw-API password probes were run on
+// 9.2.10 (Probe P0 rerun, 28 August 2026), but password mode was not exercised
+// end to end through the engine on that build and remains unsupported there.
 //
 // Password mode is therefore GATED, not merely advisory: role-write refuses to
 // OPT IN to mode=password on any other build, and creds issuance re-checks the
@@ -551,7 +552,9 @@ func (b *backend) roleWrite(ctx context.Context, req *logical.Request, d *framew
 		resp := &logical.Response{}
 		resp.AddWarning(fmt.Sprintf(
 			"password mode is verified end to end only on %s; the project's declared target "+
-				"(pve-manager/9.2.10) has no password evidence and P0 remains partial/open. "+
+				"(pve-manager/9.2.10) has raw-API password evidence from the 28 August 2026 "+
+				"Probe P0 rerun, but no end-to-end engine lifecycle verification, so password mode "+
+				"remains unsupported there. "+
 				"Credential issuance re-checks the live build and REFUSES on any other one, so "+
 				"upgrading this cluster will break issuance for this role (editing this role, and "+
 				"renewal and revocation of already-issued leases, keep working). Verify password "+
