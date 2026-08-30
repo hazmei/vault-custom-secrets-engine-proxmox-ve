@@ -486,7 +486,7 @@ func (c *httpClient) CreateToken(ctx context.Context, userid, tokenid string) (s
 	form.Set("privsep", "0") // explicit literal "0" — NEVER omitted, NEVER "1"
 
 	// redactBody=true: token endpoint responses must never appear in error strings.
-	body, _, err := c.doRequest(ctx, http.MethodPost, path, form, true, endpointToken)
+	body, _, err := c.doRequest(ctx, http.MethodPost, path, form, true, endpointStandard)
 	if err != nil {
 		// Do not include any body content — could contain the token secret.
 		return "", fmt.Errorf("pveapi: CreateToken userid=%q tokenid=%q: %w", userid, tokenid, err)

@@ -22,10 +22,12 @@ These design choices are baked into the implementation and are **not open for re
 
 - **Provisioner rotation**: `rotate-root` requires `expected_token_id` and
   `confirm_exclusive=true`. Its dedicated `root-rotation` WAL and durable
-  `rotation` state contain only old/new token IDs plus phase; the replacement
+  `rotation` state contains old/new token IDs, the exact rotation WAL ID, and a
+  factual internal phase; the replacement
   secret is persisted only in seal-wrapped `config`. Token-list capability is
   validated before config persistence, and deletion is followed by a
-  `TokenExists` absence confirmation. Shared tokens are unsupported and
+  `TokenExists` absence confirmation (token-list permission is validated before
+  config persistence). Shared tokens are unsupported and
   exclusivity is an operator acknowledgement, not technically discoverable
   across mounts. A `recovery_token_id` operation is available only for an exact
   ID recorded in durable state, after matching `expected_token_id`; it verifies
@@ -1656,7 +1658,8 @@ engine therefore continues to send explicit `append=1` with `expire` +
 ### Password Credential Support (IMPLEMENTED under a reduced scope)
 
 **Status (2026-08-29): IMPLEMENTED for the `pve` realm, by explicit operator
-decision. PAM support is explicitly out of scope.**
+decision. The broader historical P0 proposal remains partial/open; PAM support is
+explicitly out of scope and is not a release blocker for this reduced scope.**
 
 **Live verification (2026-08-29)** against a disposable
 `pve-manager/9.2.14/a1480fa6b8d899cb` target — note this is a DIFFERENT build

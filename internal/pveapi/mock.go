@@ -67,9 +67,12 @@ type MockClient struct {
 	CreateTokenError error
 
 	// DeleteUserError, if non-nil, is returned by the default DeleteUser impl.
-	DeleteUserError   error
-	DeleteTokenError  error
-	TokenExistsResult bool
+	DeleteUserError  error
+	DeleteTokenError error
+	// TokenExistsResult controls the default TokenExists result. A nil value
+	// preserves the mock's happy-path default (the token exists); a pointer
+	// makes an explicit false distinguishable from the unset default.
+	TokenExistsResult *bool
 
 	// GetPermissionsResult, if non-nil, is returned by the default GetPermissions impl.
 	GetPermissionsResult PermissionTree
@@ -333,11 +336,10 @@ func (m *MockClient) TokenExists(ctx context.Context, userid, tokenid string) (b
 	if m.TokenExistsFn != nil {
 		return m.TokenExistsFn(ctx, userid, tokenid)
 	}
-	if m.TokenExistsFn == nil && !m.TokenExistsResult {
-		// The default mock represents the configured provisioner token as live.
+	if m.TokenExistsResult == nil {
 		return true, nil
 	}
-	return m.TokenExistsResult, nil
+	return *m.TokenExistsResult, nil
 }
 
 // ensure MockClient implements Client at compile time.

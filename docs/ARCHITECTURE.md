@@ -600,7 +600,8 @@ and exclusivity is an explicit operator policy acknowledgement. The engine
 creates and validates a fresh `privsep=0` token, persists the complete
 replacement config in seal-wrapped storage, then deletes and confirms absence
 of the old token. A dedicated WAL stores only token IDs for automatic crash
-recovery. The response contains only token ID and status; the secret remains in
+recovery. Durable rotation state stores the exact WAL ID and a factual internal
+phase, so guarded recovery deletes only its own WAL. The response contains only token ID and status; the secret remains in
 sealed config and is never returned or logged. There is no atomic
 "rotate-and-verify" primitive for the token currently in use; the WAL,
 durable rotation state, replacement validation, and post-delete read
@@ -615,7 +616,9 @@ never a force-clear operation. If automatic recovery cannot progress, the
 operator may submit `expected_token_id`, `confirm_exclusive=true`, and
 `recovery_token_id` on the same endpoint. The latter must exactly equal one of
 the two recorded IDs, must not be the active configured token, and is checked
-with `TokenExists` before deletion and after deletion. Any ambiguity or
+with `TokenExists` before deletion and after deletion. Listing a user's tokens is
+a separate PVE permission and is validated before configuration persistence;
+the provisioner must be able to list tokens as well as create/delete them. Any ambiguity or
 unconfirmed absence preserves state.
 
 | Failure point | Durable state | Compensation/recovery |
@@ -626,12 +629,14 @@ unconfirmed absence preserves state.
 | Missing config or undecodable WAL | No safe token selection | Preserve state and WAL; retry or repair through the documented operator process without deleting a token |
 | Decodable malformed WAL | Potentially stale metadata | Compare both token IDs with durable state; mismatches preserve both, matching terminal metadata may be dropped without token deletion |
 | Config names neither recorded token | Ambiguous | Preserve WAL and state; use the guarded token-ID recovery operation |
+| Configured current token is already absent | Unsafe replacement basis | Fail closed, retain rotation state/WAL, and report an actionable recovery-required status; restore the token or use guarded recovery |
 
 The provisioner must retain `User.Modify` at `/access/groups` (propagating),
 `Sys.Audit` at `/access/groups`, and `Realm.AllocateUser` at every realm used
-by a stored role. Rotation also creates a token on the provisioner user; the
-successful create call proves the configured token-management permission is
-usable, while no unrecorded permission-tree path is assumed. If the token is
+by a stored role. Rotation also creates a token on the provisioner user and
+lists that user's tokens for pre- and post-delete confirmation. Token listing
+is a separate PVE permission and is validated before config persistence; the
+successful create call alone does not prove that dependency. If the token is
 removed or loses these privileges, outstanding PVE users can become
 non-renewable and non-revocable. See the README [production
 runbook](../README.md#5-rotate-the-provisioner-token-safely).

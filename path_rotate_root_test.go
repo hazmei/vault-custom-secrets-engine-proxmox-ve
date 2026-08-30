@@ -3,8 +3,10 @@ package proxmox
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
+	"github.com/hashicorp/vault/sdk/framework"
 	"github.com/hashicorp/vault/sdk/logical"
 	"github.com/hazmei/vault-plugin-secrets-proxmox/internal/pveapi"
 )
@@ -92,6 +94,14 @@ func TestRotateRootCreateFailureRetainsRecoveryState(t *testing.T) {
 	}
 	if entry, getErr := storage.Get(context.Background(), rotationStorageKey); getErr != nil || entry == nil {
 		t.Fatalf("rotation state was not retained: entry=%v err=%v", entry, getErr)
+	} else {
+		var state rotationState
+		if decodeErr := entry.DecodeJSON(&state); decodeErr != nil {
+			t.Fatal(decodeErr)
+		}
+		if state.WALID == "" {
+			t.Fatal("rotation state must persist the exact WAL ID")
+		}
 	}
 }
 
@@ -188,8 +198,13 @@ func TestRotateRootRecoveryOperationDeletesOnlyVerifiedStateToken(t *testing.T) 
 		t.Fatal(err)
 	}
 	state := rotationState{OldTokenID: "vault-admin@pve!old", NewTokenID: "vault-admin@pve!new"}
-	if err := putRotationState(context.Background(), storage, state); err != nil {
+	walID, err := framework.PutWAL(context.Background(), storage, walTypeRotation, state)
+	if err != nil {
 		t.Fatal(err)
+	}
+	state.WALID = walID
+	if stateErr := putRotationState(context.Background(), storage, state); stateErr != nil {
+		t.Fatal(stateErr)
 	}
 	resp, err := b.HandleRequest(context.Background(), &logical.Request{Operation: logical.UpdateOperation, Path: "rotate-root", Storage: storage, Data: map[string]interface{}{
 		"expected_token_id": "vault-admin@pve!wrong", "confirm_exclusive": true, "recovery_token_id": state.NewTokenID,
@@ -208,6 +223,94 @@ func TestRotateRootRecoveryOperationDeletesOnlyVerifiedStateToken(t *testing.T) 
 	}
 	if len(calls) != 3 || calls[0] != "exists:vault-admin@pve!new" || calls[1] != "delete:vault-admin@pve!new" || calls[2] != "exists:vault-admin@pve!new" {
 		t.Fatalf("recovery calls=%v", calls)
+	}
+}
+
+func TestRotateRootRecoveryDeletesExactWALAndDoesNotPoisonNextRotation(t *testing.T) {
+	ctx := context.Background()
+	existsCalls := 0
+	b, storage := newTestBackend(t, func(mc *pveapi.MockClient) {
+		mc.TokenExistsFn = func(context.Context, string, string) (bool, error) {
+			existsCalls++
+			return existsCalls == 1, nil
+		}
+	})
+	if _, err := writeConfig(ctx, b, storage, validConfigData()); err != nil {
+		t.Fatal(err)
+	}
+	stateA := rotationState{OldTokenID: "vault-admin@pve!old-a", NewTokenID: "vault-admin@pve!new-a"}
+	walA, err := framework.PutWAL(ctx, storage, walTypeRotation, stateA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stateA.WALID = walA
+	if stateErr := putRotationState(ctx, storage, stateA); stateErr != nil {
+		t.Fatal(stateErr)
+	}
+	if _, configErr := writeConfig(ctx, b, storage, map[string]interface{}{
+		"address": "https://pve.example.com:8006", "token_id": stateA.NewTokenID,
+		"token_secret": "replacement-secret", "tls_skip_verify": true,
+	}); configErr != nil {
+		t.Fatal(configErr)
+	}
+	resp, err := b.recoverRotation(ctx, &logical.Request{Storage: storage}, stateA.NewTokenID, stateA.OldTokenID)
+	if err != nil || resp == nil || resp.IsError() {
+		t.Fatalf("recovery A failed: response=%v err=%v", resp, err)
+	}
+	if entry, walErr := framework.GetWAL(ctx, storage, walA); walErr != nil || entry != nil {
+		t.Fatalf("WAL A remains after recovery: entry=%v err=%v", entry, walErr)
+	}
+	stateB := rotationState{OldTokenID: stateA.NewTokenID, NewTokenID: "vault-admin@pve!new-b"}
+	walB, err := framework.PutWAL(ctx, storage, walTypeRotation, stateB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stateB.WALID = walB
+	if err := putRotationState(ctx, storage, stateB); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.walRollback(ctx, &logical.Request{Storage: storage}, walTypeRotation, map[string]interface{}{
+		"old_token_id": stateA.OldTokenID, "new_token_id": stateA.NewTokenID,
+	}); err == nil {
+		t.Fatal("stale WAL A must not clear or process rotation B state")
+	}
+	if entry, err := framework.GetWAL(ctx, storage, walB); err != nil || entry == nil {
+		t.Fatalf("WAL B was poisoned by stale WAL A: entry=%v err=%v", entry, err)
+	}
+}
+
+func TestRotateRootWALRollbackWithNewConfigDeletesOldToken(t *testing.T) {
+	ctx := context.Background()
+	var deletedUser, deletedToken string
+	b, storage := newTestBackend(t, func(mc *pveapi.MockClient) {
+		checks := 0
+		mc.TokenExistsFn = func(context.Context, string, string) (bool, error) {
+			checks++
+			return checks == 1, nil
+		}
+		mc.DeleteTokenFn = func(_ context.Context, user, token string) error {
+			deletedUser, deletedToken = user, token
+			return nil
+		}
+	})
+	if _, configErr := writeConfig(ctx, b, storage, map[string]interface{}{
+		"address": "https://pve.example.com:8006", "token_id": "vault-admin@pve!new",
+		"token_secret": "replacement-secret", "tls_skip_verify": true,
+	}); configErr != nil {
+		t.Fatal(configErr)
+	}
+	state := rotationState{OldTokenID: "vault-admin@pve!old", NewTokenID: "vault-admin@pve!new", WALID: "wal-a"}
+	if err := putRotationState(ctx, storage, state); err != nil {
+		t.Fatal(err)
+	}
+	err := b.walRollback(ctx, &logical.Request{Storage: storage}, walTypeRotation, map[string]interface{}{
+		"old_token_id": state.OldTokenID, "new_token_id": state.NewTokenID,
+	})
+	if err != nil {
+		t.Fatalf("rollback failed: %v", err)
+	}
+	if deletedUser != "vault-admin@pve" || deletedToken != "old" {
+		t.Fatalf("rollback deleted %q!%q, want vault-admin@pve!old", deletedUser, deletedToken)
 	}
 }
 
@@ -234,6 +337,32 @@ func TestReadRotationStateDistinguishesProgressAndRecovery(t *testing.T) {
 	}
 }
 
+func TestReadRotationStateUsesFactualPhases(t *testing.T) {
+	ctx := context.Background()
+	b, storage := newTestBackend(t, defaultMock())
+	if _, err := writeConfig(ctx, b, storage, validConfigData()); err != nil {
+		t.Fatal(err)
+	}
+	state := rotationState{OldTokenID: "vault-admin@pve!mytoken", NewTokenID: "vault-admin@pve!new", Phase: rotationPhaseConfigPersist}
+	if err := putRotationState(ctx, storage, state); err != nil {
+		t.Fatal(err)
+	}
+	resp, err := b.readRotationState(ctx, &logical.Request{Storage: storage}, nil)
+	if err != nil || resp.Data["status"] != "recovery-required" {
+		t.Fatalf("old configured token should require recovery: response=%v err=%v", resp, err)
+	}
+	if _, configErr := writeConfig(ctx, b, storage, map[string]interface{}{
+		"address": "https://pve.example.com:8006", "token_id": state.NewTokenID,
+		"token_secret": "replacement-secret", "tls_skip_verify": true,
+	}); configErr != nil {
+		t.Fatal(configErr)
+	}
+	resp, err = b.readRotationState(ctx, &logical.Request{Storage: storage}, nil)
+	if err != nil || resp.Data["status"] != "in-progress" {
+		t.Fatalf("config-persisted rotation should be in progress: response=%v err=%v", resp, err)
+	}
+}
+
 func TestRotateRootRetainsStateWhenAbsenceConfirmationFails(t *testing.T) {
 	b, storage := newTestBackend(t, func(mc *pveapi.MockClient) {
 		calls := 0
@@ -256,6 +385,33 @@ func TestRotateRootRetainsStateWhenAbsenceConfirmationFails(t *testing.T) {
 	}
 }
 
+func TestRotateRootRetainsStateWhenTokenStillExistsAfterDelete(t *testing.T) {
+	var deletedUser, deletedToken string
+	b, storage := newTestBackend(t, func(mc *pveapi.MockClient) {
+		checks := 0
+		mc.TokenExistsFn = func(context.Context, string, string) (bool, error) {
+			checks++
+			return true, nil
+		}
+		mc.DeleteTokenFn = func(_ context.Context, user, token string) error {
+			deletedUser, deletedToken = user, token
+			return nil
+		}
+	})
+	if _, err := writeConfig(context.Background(), b, storage, validConfigData()); err != nil {
+		t.Fatal(err)
+	}
+	_, err := b.HandleRequest(context.Background(), &logical.Request{Operation: logical.UpdateOperation, Path: "rotate-root", Storage: storage, Data: map[string]interface{}{
+		"expected_token_id": "vault-admin@pve!mytoken", "confirm_exclusive": true,
+	}})
+	if err == nil || deletedUser != "vault-admin@pve" || deletedToken != "mytoken" {
+		t.Fatalf("expected guarded failure with exact old token delete, err=%v deleted=%q!%q", err, deletedUser, deletedToken)
+	}
+	if entry, getErr := storage.Get(context.Background(), rotationStorageKey); getErr != nil || entry == nil {
+		t.Fatalf("rotation state must remain after unconfirmed deletion: %v %v", entry, getErr)
+	}
+}
+
 func TestRotateRootReplacementValidationFailurePrecedesConfigWrite(t *testing.T) {
 	b, storage := newTestBackend(t, func(mc *pveapi.MockClient) {
 		mc.TokenExistsFn = func(context.Context, string, string) (bool, error) { return false, nil }
@@ -272,6 +428,30 @@ func TestRotateRootReplacementValidationFailurePrecedesConfigWrite(t *testing.T)
 	cfg, cfgErr := getConfig(context.Background(), storage)
 	if cfgErr != nil || cfg.TokenID != "vault-admin@pve!mytoken" {
 		t.Fatalf("config changed after validation failure: %+v %v", cfg, cfgErr)
+	}
+}
+
+func TestRotateRootRefusesAbsentConfiguredTokenAndRequiresRecovery(t *testing.T) {
+	b, storage := newTestBackend(t, func(mc *pveapi.MockClient) {
+		absent := false
+		mc.TokenExistsResult = &absent
+	})
+	if _, err := writeConfig(context.Background(), b, storage, validConfigData()); err != nil {
+		t.Fatal(err)
+	}
+	_, err := b.HandleRequest(context.Background(), &logical.Request{Operation: logical.UpdateOperation, Path: "rotate-root", Storage: storage, Data: map[string]interface{}{
+		"expected_token_id": "vault-admin@pve!mytoken", "confirm_exclusive": true,
+	}})
+	if err == nil || !strings.Contains(err.Error(), "absent") || !strings.Contains(err.Error(), "fail-closed") {
+		t.Fatalf("absent configured token should fail closed explicitly: %v", err)
+	}
+	entry, getErr := storage.Get(context.Background(), rotationStorageKey)
+	if getErr != nil || entry == nil {
+		t.Fatalf("recovery state must remain for explicit recovery: %v %v", entry, getErr)
+	}
+	resp, statusErr := b.readRotationState(context.Background(), &logical.Request{Storage: storage}, nil)
+	if statusErr != nil || resp.Data["status"] != "recovery-required" {
+		t.Fatalf("absent configured token status=%v err=%v, want recovery-required", resp, statusErr)
 	}
 }
 

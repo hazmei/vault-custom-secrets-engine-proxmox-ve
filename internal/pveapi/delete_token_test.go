@@ -55,3 +55,18 @@ func TestTokenExistsConfirmsAbsentToken(t *testing.T) {
 		t.Fatalf("TokenExists=(%v, %v), want (false, nil)", exists, err)
 	}
 }
+
+func TestCreateTokenUsesStandardErrorClassification(t *testing.T) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		if _, err := w.Write([]byte(`{"data":null,"message":"no such token"}`)); err != nil {
+			t.Errorf("write response: %v", err)
+		}
+	}))
+	defer server.Close()
+	client := makeTestClient(t, server.URL, "admin@pve!old", "secret")
+	_, err := client.CreateToken(context.Background(), "admin@pve", "new")
+	if errors.Is(err, ErrTokenNotFound) {
+		t.Fatalf("CreateToken must not use delete-only ErrTokenNotFound classification: %v", err)
+	}
+}

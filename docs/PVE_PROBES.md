@@ -1124,7 +1124,7 @@ modified by this rerun; the environment token owner was unintentionally
 removed during cleanup and required operator restoration in that run. See the
 later run-status note below for what the subsequent evidence shows.
 
-**Historical run status: incomplete for the then-proposed broader scope.** The password authentication, rotation,
+**Historical run status: BLOCKED/FAILED.** The password authentication, rotation,
 expiry/disablement, PAM, and exact ACL prerequisites were not all confirmed in
 this run. The cleanup incident is retained as an operational warning: a broad
 `vault-p0-*` prefix scan is not a safe cleanup criterion because it can delete
@@ -1235,7 +1235,7 @@ ACL entries. One pre-existing `vault-p0-admin@pve` user remains because it owns
 the environment token; it was not created by this run and was deliberately
 protected. No local PAM account, group, role, or ACL was created or modified.
 
-**Historical run status: incomplete for PAM, which is out of scope.** PAM password creation and the
+**Historical run status: BLOCKED/INCOMPLETE.** PAM password creation and the
 remaining PAM lifecycle behavior were not
 fully confirmed by this automated run, and the pre-existing protected `vault-p0-admin@pve` artifact
 means a zero-count scan of every `vault-p0-*` user is not an appropriate cleanup
@@ -1436,13 +1436,22 @@ anti-privilege-escalation, negative authorization, insufficient privileges)
 SKIPPED because their documented prerequisites were unset; skips are not
 completed tests.
 
-## Password-credential P0 status — supported scope complete
+## Password-credential P0 status — STILL PARTIAL/OPEN (broader proposal)
 
 The 9.2.14 verification run closes the supported `pve`-realm behavior the engine
-depends on. PAM is explicitly out of scope, and the historical PAM results above
+depends on. The broader historical P0 proposal remains partial/open because PAM
+and password rotation are not supported. PAM is explicitly out of scope, and the historical PAM results above
 are non-blocking. Password rotation is unsupported because `PUT /access/password`
 cannot be exercised with the engine's API-token-only authentication.
 
 Password mode is implemented by explicit operator decision and restricted to
 exactly the confirmed surface: `pve` realm only on
 `pve-manager/9.2.14/a1480fa6b8d899cb`, with no rotation.
+
+## Scope decision — 29 August 2026
+
+The operator decision is to support password credentials only for the `pve`
+realm on the verified 9.2.14 build. PAM is explicitly out of scope; its
+historical creation, authentication, and rotation observations remain evidence
+only and must not be generalized into supported behavior. Password rotation is
+also out of scope for this API-token-authenticated engine.

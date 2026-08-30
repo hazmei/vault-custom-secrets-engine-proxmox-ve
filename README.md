@@ -358,7 +358,12 @@ operation. Do not retry with a different expected token or edit Vault storage.
 Rotation requires the same propagating `/access/groups`
 `User.Modify`, `/access/groups` `Sys.Audit`, and each stored role realm's
 `Realm.AllocateUser` privileges as issuance, plus usable token-management
-permission on the provisioner user.
+permission on the provisioner user. Token-list permission is also required:
+rotation validates it before persisting replacement config and uses it for both
+pre- and post-delete `TokenExists` checks. If the configured current token is
+already absent, rotation fails closed, retains its recovery state, and reports
+an actionable `recovery-required` status; restore the token or use guarded
+recovery rather than silently replacing it.
 
 Changing or deleting the configured provisioner token can strand outstanding
 leases: their PVE users and lease tokens remain on the cluster, but the engine
