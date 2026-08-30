@@ -333,6 +333,10 @@ func (m *MockClient) TokenExists(ctx context.Context, userid, tokenid string) (b
 	if m.TokenExistsFn != nil {
 		return m.TokenExistsFn(ctx, userid, tokenid)
 	}
+	if m.TokenExistsFn == nil && !m.TokenExistsResult {
+		// The default mock represents the configured provisioner token as live.
+		return true, nil
+	}
 	return m.TokenExistsResult, nil
 }
 

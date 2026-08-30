@@ -98,7 +98,7 @@ not make the project production-ready.
 | `<mount>/config` | POST, GET, DELETE | Configure Proxmox connection (address, admin token, TLS, default TTLs); GET returns `address`, `tls_skip_verify`, `ca_cert`, `default_ttl`, `default_max_ttl`, `token_id`; `token_secret` never returned; DELETE requires `force=true` as a **data parameter** (not the `vault delete -force` CLI flag — see [Deleting the Configuration](#deleting-the-configuration-forcetrue-is-a-data-parameter-not--force)) — outstanding leases become non-revocable and non-renewable (renewal also loads config to reach PVE, so it fails immediately too; revoke them first) |
 | `<mount>/roles/:name` | POST, GET, LIST, DELETE | Define credential roles with group name, TTLs, user prefix, and `mode` (`token` default, or `password`); DELETE does not revoke outstanding leases |
 | `<mount>/creds/:role` | GET | Issue a new dynamic credential — token mode returns `user_id`, `token_id`, `token_secret`; password mode returns `user_id`, `password` |
-| `<mount>/rotate-root` | POST | Automated crash-recoverable rotation of the dedicated provisioner token; requires `expected_token_id` and `confirm_exclusive=true`, irreversibly deletes the old token, and can block the mount until recovery if confirmation fails |
+| `<mount>/rotate-root` | POST, GET | Automated crash-recoverable rotation of the dedicated provisioner token; requires `expected_token_id` and `confirm_exclusive=true`; GET reports token-ID-only state |
 
 ## Requirements / Prerequisites
 
@@ -331,47 +331,31 @@ secret remains in seal-wrapped config and is never returned or written to
 rotation metadata, WAL, logs, or errors. A durable recovery record retries
 ambiguous cleanup automatically.
 
-Manual fallback — use only if `rotate-root` is unavailable or the mount is in
-the documented recovery state:
+If GET reports `recovery-required` and automatic WAL recovery is not making
+progress, use the guarded recovery operation below. First copy the exact
+`old_token_id` and `new_token_id` from GET, and confirm the active configured
+token ID with GET on `config`. Then submit **the exact token ID recorded in the
+rotation state**; the engine verifies that the token exists before deleting it
+and verifies absence afterward:
 
-1. Create a replacement token for the same dedicated provisioner user, again
-   with explicit `--privsep 0`.
-2. Verify its secret is captured safely and test it against a maintenance or
-   controlled mount/configuration path without exposing the secret. Ensure the
-   protected secret file is mode 0600 and contains no trailing newline; for
-   example:
+```bash
+vault write proxmox/rotate-root \
+  expected_token_id='CURRENT_CONFIG_TOKEN_ID' \
+  confirm_exclusive=true \
+  recovery_token_id='EXACT_OLD_OR_NEW_TOKEN_ID_FROM_STATUS'
+```
 
-   ```bash
-   read -rs SECRET   # paste the one-time secret; not echoed, not in history
-   install -d -m 0700 /run/secrets
-   install -m 0600 /dev/null /run/secrets/pve-provisioner-token
-   printf '%s' "$SECRET" > /run/secrets/pve-provisioner-token
-   ```
+The operation refuses to delete the active configured token, refuses IDs not
+recorded in durable rotation state, and fails without clearing state when
+absence cannot be confirmed. There is no force-clear operation. Do not edit
+Vault storage or manually replace config while rotation state is present.
 
-3. Re-send the complete `<mount>/config` configuration with the replacement
-   `token_id` and one-time secret. Config writes are full replacements, not
-   patches: include `address`, `token_id`, `token_secret`,
-   `tls_skip_verify`, `ca_cert`, `default_ttl`, and `default_max_ttl` as
-   applicable. Use a protected `@file` or equivalent secret-input mechanism;
-   never put the secret directly on the command line.
-   After the replacement config write completes, remove the secret from the
-   shell environment:
-
-   ```bash
-   unset SECRET
-   rm -f /run/secrets/pve-provisioner-token
-   ```
-
-4. Confirm the config and a controlled lease lifecycle, then revoke/delete the
-   old token out-of-band in Proxmox. Keep the rotation state until absence is
-   independently confirmed; never use an unsafe force-clear operation.
-
-If `rotate-root` reports that another rotation is active, read
-`<mount>/rotate-root` to inspect the token IDs and allow the automatic WAL
-rollback manager to retry. Do not retry with a different expected token or edit
-Vault storage. A response after config persistence can still indicate failed
-confirmation; verify the current config and old-token absence before taking
-further action. Rotation requires the same propagating `/access/groups`
+If `rotate-root` reports another rotation, GET distinguishes `in-progress`
+(replacement creation or validation is not complete) from
+`recovery-required` (config changed or cleanup/confirmation needs recovery).
+Allow the automatic WAL rollback manager to retry before using the guarded
+operation. Do not retry with a different expected token or edit Vault storage.
+Rotation requires the same propagating `/access/groups`
 `User.Modify`, `/access/groups` `Sys.Audit`, and each stored role realm's
 `Realm.AllocateUser` privileges as issuance, plus usable token-management
 permission on the provisioner user.
@@ -727,7 +711,7 @@ Key points:
 - Full lifecycle: pre-create a safe PVE group bound to a test role → issue credential → run a `/version` authentication smoke check with the issued token → renew lease → revoke and confirm cleanup.
 - Authorization contract canary: requires `PVE_BEHAVIORAL_PATH` and `PVE_BEHAVIORAL_MARKER`; the issued token must receive HTTP 200 from that group-role-gated endpoint and the body must contain the marker. Optional subtests cover direct `PUT /access/acl` anti-privilege-escalation (configured unheld role must return 403) and negative authorization with expected 403. Unconfigured optional subtests skip with explicit prerequisites rather than assuming full-admin or cluster-specific endpoints.
 - Password lifecycle (`TestAccPasswordLifecycle`, opt-in): gated by `VAULT_ACC=1` **plus** `PVE_PASSWORD_ACC=1`, because it creates a password-authenticating PVE user on the target. It additionally skips when the target is not the verified `pve-manager/9.2.14/a1480fa6b8d899cb` build, a cluster property rather than an operator choice. Covers issuance, `POST /access/ticket` authentication, confirmed absence of any API token on the user, renewal with the ORIGINAL password still valid, the past-`expire` 401 backstop, disablement 401, and deletion on revoke. It reports HTTP status codes only and never prints a password. Neither an unset opt-in nor a non-verified build is completed coverage.
-- Dedicated provisioner rotation (`TestAccRotateRoot`, opt-in): gated by `VAULT_ACC=1` **plus** `PVE_ROTATE_ROOT_ACC=1` and the exact verified `pve-manager/9.2.14/a1480fa6b8d899cb` build. It runs the backend directly with isolated in-memory storage, not a Vault server. It uses the rotation-only bootstrap credentials to create a unique disposable provisioner user in `PVE_ROTATE_PROVISIONER_GROUP`, creates that user's `acceptance` token with `privsep=0`, and rotates only that disposable token. Exact-user cleanup deletes the disposable user (cascading its old and replacement tokens) and verifies absence; the normal `PVE_TOKEN_ID` is never rotated or deleted. The test then issues and authenticates an isolated password credential, confirms no API token was minted, renews using the generated role name, revokes it, and verifies deletion. Secrets are not printed.
+- Dedicated provisioner rotation (`TestAccRotateRoot`, opt-in): gated by `VAULT_ACC=1` plus `PVE_ROTATE_ROOT_ACC=1`. It runs the token-mode rotation path against an operator-provided disposable cluster and has not been run as part of this change. Password lifecycle evidence is a separate test and is limited to the verified `pve-manager/9.2.14/a1480fa6b8d899cb` build; PAM remains explicitly out of scope.
 - Failure coverage: idempotent revocation after an issued PVE user is deleted out-of-band, WAL rollback, delete-config guard, configurable concurrent issuance, and optional insufficient-privilege config validation in `TestAccInsufficientPrivileges`.
 - Unit tests cover deterministic mid-provisioning network/error injection and WAL-delete failure paths. The live acceptance suite does not inject network failures, quorum loss, or ACL lock contention.
 - Run against an operator-provided disposable/dev Proxmox VE 9.2.10 cluster with a test admin token. These tests mutate the cluster by creating, renewing, expiring, and deleting temporary `vaultacc-*@pve` users.

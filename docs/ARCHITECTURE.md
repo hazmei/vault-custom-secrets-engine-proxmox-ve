@@ -608,19 +608,24 @@ confirmation are the compensating controls for that one-way operation.
 `privsep=0` is explicit because the replacement must inherit the provisioner
 user's ACL.
 
-`GET <mount>/rotate-root` reports pending state using token IDs only. It is
-diagnostic, not a force-clear operation. A failed confirmation leaves the WAL
-and rotation state for automatic recovery. Operators should inspect this
-status and wait for the rollback manager to retry. Ambiguous or inconsistent
-state is preserved rather than cleared by an unsafe override.
+`GET <mount>/rotate-root` reports token-ID-only state. `in-progress` means the
+replacement has not reached config persistence; `recovery-required` means the
+config changed or cleanup/confirmation needs recovery. It is diagnostic and
+never a force-clear operation. If automatic recovery cannot progress, the
+operator may submit `expected_token_id`, `confirm_exclusive=true`, and
+`recovery_token_id` on the same endpoint. The latter must exactly equal one of
+the two recorded IDs, must not be the active configured token, and is checked
+with `TokenExists` before deletion and after deletion. Any ambiguity or
+unconfirmed absence preserves state.
 
 | Failure point | Durable state | Compensation/recovery |
 |---|---|---|
 | Replacement creation/validation or config persistence fails | Old config remains | WAL rollback deletes the replacement only when unambiguous |
 | Config persists, old-token delete or absence read fails | New config remains | WAL rollback deletes the old token and confirms absence |
 | Cleanup after confirmed deletion fails | New config remains | Retry cleanup; token state is already safe |
-| Missing config or malformed WAL | No safe token selection | Log terminal error and drop malformed metadata without deleting a token |
-| Config names neither recorded token | Ambiguous | Preserve WAL and state; inspect `GET rotate-root` and use approved recovery |
+| Missing config or undecodable WAL | No safe token selection | Preserve state and WAL; retry or repair through the documented operator process without deleting a token |
+| Decodable malformed WAL | Potentially stale metadata | Compare both token IDs with durable state; mismatches preserve both, matching terminal metadata may be dropped without token deletion |
+| Config names neither recorded token | Ambiguous | Preserve WAL and state; use the guarded token-ID recovery operation |
 
 The provisioner must retain `User.Modify` at `/access/groups` (propagating),
 `Sys.Audit` at `/access/groups`, and `Realm.AllocateUser` at every realm used

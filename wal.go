@@ -115,19 +115,36 @@ func (b *backend) walRollbackRotation(ctx context.Context, req *logical.Request,
 	defer b.rotationLock.Unlock()
 	var state rotationState
 	if err := mapstructure.Decode(data, &state); err != nil {
-		return b.dropMalformedRotationWAL(ctx, req, fmt.Errorf("proxmox: rotation WAL decode: %w", err))
+		// The entry cannot be associated with the shared lock without a decoded
+		// token pair. Never clear rotation state on an undecodable entry.
+		return fmt.Errorf("proxmox: rotation WAL decode: %w", err)
 	}
 	oldUser, oldToken, err := splitTokenID(state.OldTokenID)
 	newUser, newToken, newErr := splitTokenID(state.NewTokenID)
 	if err != nil || newErr != nil || oldUser != newUser {
-		return b.dropMalformedRotationWAL(ctx, req, fmt.Errorf("proxmox: malformed rotation WAL"))
+		return b.dropMalformedRotationWAL(ctx, req, state, fmt.Errorf("proxmox: malformed rotation WAL"))
+	}
+	stateEntry, stateErr := req.Storage.Get(ctx, rotationStorageKey)
+	if stateErr != nil {
+		return fmt.Errorf("proxmox: read rotation state during recovery: %w", stateErr)
+	}
+	if stateEntry == nil {
+		// The operation completed and only the framework WAL deletion remained.
+		return nil
+	}
+	var storedState rotationState
+	if decodeErr := stateEntry.DecodeJSON(&storedState); decodeErr != nil {
+		return fmt.Errorf("proxmox: decode stored rotation state: %w", decodeErr)
+	}
+	if storedState.OldTokenID != state.OldTokenID || storedState.NewTokenID != state.NewTokenID {
+		return fmt.Errorf("proxmox: rotation WAL does not match shared rotation state; preserving both")
 	}
 	cfg, err := getConfig(ctx, req.Storage)
 	if err != nil || cfg == nil {
 		if err != nil {
 			return err
 		}
-		return b.dropMalformedRotationWAL(ctx, req, fmt.Errorf("proxmox: rotation recovery has no config; no token can be safely selected"))
+		return fmt.Errorf("proxmox: rotation recovery has no config; preserving state because no token can be safely selected")
 	}
 	client, err := b.getClient(ctx, req.Storage)
 	if err != nil {
@@ -135,23 +152,9 @@ func (b *backend) walRollbackRotation(ctx context.Context, req *logical.Request,
 	}
 	switch cfg.TokenID {
 	case state.OldTokenID:
-		err = client.DeleteToken(ctx, oldUser, newToken)
-		if err == nil || errors.Is(err, pveapi.ErrTokenNotFound) {
-			var exists bool
-			exists, err = client.TokenExists(ctx, oldUser, newToken)
-			if err == nil && exists {
-				err = fmt.Errorf("proxmox: replacement token remains during rotation recovery")
-			}
-		}
+		err = recoverRotationToken(ctx, client, oldUser, newToken, "replacement")
 	case state.NewTokenID:
-		err = client.DeleteToken(ctx, oldUser, oldToken)
-		if err == nil || errors.Is(err, pveapi.ErrTokenNotFound) {
-			var exists bool
-			exists, err = client.TokenExists(ctx, oldUser, oldToken)
-			if err == nil && exists {
-				err = fmt.Errorf("proxmox: old token remains during rotation recovery")
-			}
-		}
+		err = recoverRotationToken(ctx, client, oldUser, oldToken, "old")
 	default:
 		return fmt.Errorf("proxmox: rotation recovery found inconsistent token ID; preserving WAL and rotation state")
 	}
@@ -164,8 +167,49 @@ func (b *backend) walRollbackRotation(ctx context.Context, req *logical.Request,
 	return nil
 }
 
-func (b *backend) dropMalformedRotationWAL(ctx context.Context, req *logical.Request, cause error) error {
+func recoverRotationToken(ctx context.Context, client pveapi.Client, user, token, label string) error {
+	exists, err := client.TokenExists(ctx, user, token)
+	if errors.Is(err, pveapi.ErrUserNotFound) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if !exists {
+		return nil
+	}
+	if deleteErr := client.DeleteToken(ctx, user, token); deleteErr != nil && !errors.Is(deleteErr, pveapi.ErrTokenNotFound) {
+		return deleteErr
+	}
+	exists, err = client.TokenExists(ctx, user, token)
+	if errors.Is(err, pveapi.ErrUserNotFound) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if exists {
+		return fmt.Errorf("proxmox: %s token remains during rotation recovery", label)
+	}
+	return nil
+}
+
+func (b *backend) dropMalformedRotationWAL(ctx context.Context, req *logical.Request, state rotationState, cause error) error {
 	b.Logger().Error("walRollback: dropping malformed terminal rotation WAL", "error", cause)
+	entry, err := req.Storage.Get(ctx, rotationStorageKey)
+	if err != nil {
+		return fmt.Errorf("proxmox: read rotation state before malformed WAL cleanup: %w", err)
+	}
+	if entry == nil {
+		return nil
+	}
+	var stored rotationState
+	if err := entry.DecodeJSON(&stored); err != nil {
+		return fmt.Errorf("proxmox: decode rotation state before malformed WAL cleanup: %w", err)
+	}
+	if stored.OldTokenID != state.OldTokenID || stored.NewTokenID != state.NewTokenID {
+		return fmt.Errorf("proxmox: malformed rotation WAL does not match shared state; preserving both")
+	}
 	if err := req.Storage.Delete(ctx, rotationStorageKey); err != nil {
 		return fmt.Errorf("proxmox: clear malformed rotation state: %w", err)
 	}

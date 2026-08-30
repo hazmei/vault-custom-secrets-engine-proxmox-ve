@@ -16,6 +16,7 @@ const rotationStorageKey = "rotation"
 type rotationState struct {
 	OldTokenID string `json:"old_token_id" mapstructure:"old_token_id"`
 	NewTokenID string `json:"new_token_id" mapstructure:"new_token_id"`
+	Phase      string `json:"phase" mapstructure:"phase"`
 }
 
 func pathRotateRoot(b *backend) *framework.Path {
@@ -24,6 +25,7 @@ func pathRotateRoot(b *backend) *framework.Path {
 		Fields: map[string]*framework.FieldSchema{
 			"expected_token_id": {Type: framework.TypeString, Required: true},
 			"confirm_exclusive": {Type: framework.TypeBool, Required: true},
+			"recovery_token_id": {Type: framework.TypeString, Required: false},
 		},
 		Operations: map[logical.Operation]framework.OperationHandler{
 			logical.ReadOperation: &framework.PathOperation{Callback: b.readRotationState},
@@ -60,8 +62,19 @@ func (b *backend) readRotationState(ctx context.Context, req *logical.Request, _
 	if err := entry.DecodeJSON(&state); err != nil {
 		return nil, fmt.Errorf("proxmox: decode rotation state: %w", err)
 	}
+	status := state.Phase
+	if status == "" {
+		status = "in-progress"
+	}
+	cfg, cfgErr := getConfig(ctx, req.Storage)
+	if cfgErr != nil {
+		return nil, fmt.Errorf("proxmox: read config for rotation status: %w", cfgErr)
+	}
+	if cfg != nil && cfg.TokenID != state.OldTokenID {
+		status = "recovery-required"
+	}
 	return &logical.Response{Data: map[string]interface{}{
-		"status": "recovery-required", "old_token_id": state.OldTokenID, "new_token_id": state.NewTokenID,
+		"status": status, "old_token_id": state.OldTokenID, "new_token_id": state.NewTokenID,
 	}}, nil
 }
 
@@ -79,6 +92,9 @@ func (b *backend) rotateRoot(ctx context.Context, req *logical.Request, d *frame
 	}
 	b.rotationLock.Lock()
 	defer b.rotationLock.Unlock()
+	if recoveryToken, ok := d.GetOk("recovery_token_id"); ok && recoveryToken.(string) != "" {
+		return b.recoverRotation(ctx, req, d.Get("expected_token_id").(string), recoveryToken.(string))
+	}
 
 	cfg, err := getConfig(ctx, req.Storage)
 	if err != nil || cfg == nil {
@@ -105,7 +121,7 @@ func (b *backend) rotateRoot(ctx context.Context, req *logical.Request, d *frame
 		return nil, fmt.Errorf("proxmox: rotate-root: generate token ID: %w", err)
 	}
 	newToken := oldUser + "!vault-rotation-" + suffix
-	state := rotationState{OldTokenID: cfg.TokenID, NewTokenID: newToken}
+	state := rotationState{OldTokenID: cfg.TokenID, NewTokenID: newToken, Phase: "in-progress"}
 	walID, err := framework.PutWAL(ctx, req.Storage, walTypeRotation, state)
 	if err != nil {
 		return nil, fmt.Errorf("proxmox: rotate-root: write recovery WAL: %w", err)
@@ -129,7 +145,7 @@ func (b *backend) rotateRoot(ctx context.Context, req *logical.Request, d *frame
 	if err != nil {
 		return nil, fmt.Errorf("proxmox: rotate-root: build replacement client: %w", err)
 	}
-	if validationErr := validateReplacement(ctx, replacement, req.Storage); validationErr != nil {
+	if validationErr := validateReplacement(ctx, replacement, req.Storage, cfg.TokenID); validationErr != nil {
 		return nil, fmt.Errorf("proxmox: rotate-root: replacement validation failed: %w", validationErr)
 	}
 	entry, err := logical.StorageEntryJSON("config", &newCfg)
@@ -140,11 +156,15 @@ func (b *backend) rotateRoot(ctx context.Context, req *logical.Request, d *frame
 		return nil, fmt.Errorf("proxmox: rotate-root: persist replacement config: %w", err)
 	}
 	b.invalidate(ctx, "config")
+	state.Phase = "recovery-required"
+	if err := putRotationState(ctx, req.Storage, state); err != nil {
+		return nil, fmt.Errorf("proxmox: rotate-root: mark recovery state: %w", err)
+	}
 
 	if err := replacement.DeleteToken(ctx, oldUser, oldToken); err != nil && !errors.Is(err, pveapi.ErrTokenNotFound) {
 		return nil, fmt.Errorf("proxmox: rotate-root: delete old token: %w", err)
 	}
-	if exists, err := replacement.TokenExists(ctx, oldUser, oldToken); err != nil {
+	if exists, err := replacement.TokenExists(ctx, oldUser, oldToken); err != nil && !errors.Is(err, pveapi.ErrUserNotFound) {
 		return nil, fmt.Errorf("proxmox: rotate-root: confirm old token deletion: %w", err)
 	} else if exists {
 		return nil, fmt.Errorf("proxmox: rotate-root: old token deletion could not be confirmed")
@@ -166,13 +186,24 @@ func putRotationState(ctx context.Context, storage logical.Storage, state rotati
 	return storage.Put(ctx, entry)
 }
 
-func validateReplacement(ctx context.Context, client pveapi.Client, storage logical.Storage) error {
+func validateReplacement(ctx context.Context, client pveapi.Client, storage logical.Storage, currentTokenID string) error {
 	if _, err := client.GetVersion(ctx); err != nil {
 		return err
 	}
 	tree, err := client.GetPermissions(ctx)
 	if err != nil {
 		return err
+	}
+	oldUser, oldToken, err := splitTokenID(currentTokenID)
+	if err != nil {
+		return err
+	}
+	exists, err := client.TokenExists(ctx, oldUser, oldToken)
+	if err != nil {
+		return fmt.Errorf("replacement token cannot list current token: %w", err)
+	}
+	if !exists {
+		return fmt.Errorf("replacement validation could not confirm current token %q", oldToken)
 	}
 	for _, required := range []struct{ privilege, path string }{
 		{"User.Modify", "/access/groups"}, {"Sys.Audit", "/access/groups"},
@@ -195,4 +226,62 @@ func validateReplacement(ctx context.Context, client pveapi.Client, storage logi
 		}
 	}
 	return nil
+}
+
+func (b *backend) recoverRotation(ctx context.Context, req *logical.Request, expected, recoveryToken string) (*logical.Response, error) {
+	stateEntry, err := req.Storage.Get(ctx, rotationStorageKey)
+	if err != nil {
+		return nil, fmt.Errorf("proxmox: read rotation state: %w", err)
+	}
+	if stateEntry == nil {
+		return logical.ErrorResponse("rotate-root recovery found no pending rotation"), nil
+	}
+	var state rotationState
+	if decodeErr := stateEntry.DecodeJSON(&state); decodeErr != nil {
+		return nil, fmt.Errorf("proxmox: decode rotation state: %w", decodeErr)
+	}
+	cfg, err := getConfig(ctx, req.Storage)
+	if err != nil || cfg == nil {
+		if err != nil {
+			return nil, err
+		}
+		return logical.ErrorResponse("rotate-root recovery requires an existing configuration"), nil
+	}
+	if expected != cfg.TokenID {
+		return logical.ErrorResponse("rotate-root recovery rejected: expected_token_id does not match current token ID"), nil
+	}
+	if recoveryToken != state.OldTokenID && recoveryToken != state.NewTokenID {
+		return logical.ErrorResponse("rotate-root recovery rejected: recovery_token_id must equal old_token_id or new_token_id"), nil
+	}
+	if recoveryToken == cfg.TokenID {
+		return logical.ErrorResponse("rotate-root recovery rejected: recovery_token_id is the active configured token"), nil
+	}
+	user, token, err := splitTokenID(recoveryToken)
+	if err != nil {
+		return logical.ErrorResponse("rotate-root recovery: %s", err), nil
+	}
+	client, err := b.getClient(ctx, req.Storage)
+	if err != nil {
+		return nil, err
+	}
+	exists, err := client.TokenExists(ctx, user, token)
+	if err != nil && !errors.Is(err, pveapi.ErrUserNotFound) {
+		return nil, fmt.Errorf("proxmox: verify recovery token: %w", err)
+	}
+	if err == nil && exists {
+		if deleteErr := client.DeleteToken(ctx, user, token); deleteErr != nil && !errors.Is(deleteErr, pveapi.ErrTokenNotFound) {
+			return nil, deleteErr
+		}
+		exists, err = client.TokenExists(ctx, user, token)
+		if err != nil && !errors.Is(err, pveapi.ErrUserNotFound) {
+			return nil, fmt.Errorf("proxmox: confirm recovery token deletion: %w", err)
+		}
+		if err == nil && exists {
+			return nil, fmt.Errorf("proxmox: recovery token deletion could not be confirmed")
+		}
+	}
+	if err := req.Storage.Delete(ctx, rotationStorageKey); err != nil {
+		return nil, err
+	}
+	return &logical.Response{Data: map[string]interface{}{"status": "recovered", "token_id": recoveryToken}}, nil
 }

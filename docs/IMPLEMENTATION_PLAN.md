@@ -21,11 +21,16 @@ These design choices are baked into the implementation and are **not open for re
 - **No issuance-time requested TTL**: `<mount>/creds/:role` declares NO `ttl` field, matching the database and terraform secrets engines. The effective TTL comes from role values with config defaults as fallback; `increment` is passed to `CalculateTTL` only on renewal (from `req.Secret.Increment`).
 
 - **Provisioner rotation**: `rotate-root` requires `expected_token_id` and
-  `confirm_exclusive=true`. Its dedicated `root-rotation` WAL contains only
-  old/new token IDs; the replacement secret is persisted only in seal-wrapped
-  `config`. Old-token deletion is confirmed using PVE's HTTP 500 body
-  `no such token` contract. Shared tokens are unsupported and exclusivity is
-  an operator acknowledgement, not technically discoverable across mounts.
+  `confirm_exclusive=true`. Its dedicated `root-rotation` WAL and durable
+  `rotation` state contain only old/new token IDs plus phase; the replacement
+  secret is persisted only in seal-wrapped `config`. Token-list capability is
+  validated before config persistence, and deletion is followed by a
+  `TokenExists` absence confirmation. Shared tokens are unsupported and
+  exclusivity is an operator acknowledgement, not technically discoverable
+  across mounts. A `recovery_token_id` operation is available only for an exact
+  ID recorded in durable state, after matching `expected_token_id`; it verifies
+  existence before deletion and absence afterward, and never deletes the active
+  configured token. Ambiguity preserves state; there is no force-clear.
 - **`expire=0` (unlimited TTL) policy**: The engine REFUSES issuance when the effective TTL resolves to 0 (unlimited). Sending PVE `expire=0` creates a never-expiring user, disabling the `expire` backstop — the sole defense-in-depth if Vault revocation is delayed or fails. `creds/:role` returns a clear error: `"role %q resolves to an unlimited TTL; set a non-zero ttl/max_ttl on the role or config default_ttl/default_max_ttl (the PVE expire backstop requires a finite lease)"`. (Alternative considered and rejected as more complex: floor the PVE `expire` at `now + effMaxTTL + grace` when a finite max exists but ttl is 0.) This makes the backstop non-optional.
 
 ## Confirmed Password Credential Decisions
@@ -1123,7 +1128,7 @@ After building and registering:
 7. Revoke lease (verify user deleted on PVE)
 8. Delete config with `force=true` (should succeed)
 
-**References**: `docs/ARCHITECTURE.md` — Root Rotation section (manual operation).
+**References**: `docs/ARCHITECTURE.md` — Root Rotation section and guarded recovery operation.
 
 ## Phased Task List
 
@@ -1623,7 +1628,7 @@ group-preservation check. Omitted-`append` semantics remain unresolved; the
 engine therefore continues to send explicit `append=1` with `expire` +
 `groups` + `enable` and read back membership.
 
-**Architecture References**: `docs/ARCHITECTURE.md` Root Rotation section (manual operation), Build & Run commands above.
+**Architecture References**: `docs/ARCHITECTURE.md` Root Rotation section and guarded recovery operation, Build & Run commands above.
 
 ---
 
@@ -1728,7 +1733,7 @@ release gate depends on password support.
   - **Acceptance**: reproducible probe evidence is recorded in `docs/PVE_PROBES.md`
     with no password values. The `pve` lifecycle acceptance is complete; PAM
     evidence is historical and non-blocking.
-  - **Latest validation (29 August 2026)**: the supported P0 scope is complete. Automated
+  - **Latest validation (29 August 2026)**: the reduced `pve`-realm supported scope is complete; the broader P0 proposal remains partial/open because PAM and password rotation are explicitly out of scope. Automated
     evidence records PVE password creation, read-back, authentication, exact
     renewal, expiry, disablement, deletion, token interaction, and 8–64 length
     constraints. `PUT /access/password` requires a password-authenticated ticket

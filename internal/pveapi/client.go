@@ -92,6 +92,13 @@ type Client interface {
 	TokenExists(ctx context.Context, userid, tokenid string) (bool, error)
 }
 
+type endpointKind uint8
+
+const (
+	endpointStandard endpointKind = iota
+	endpointToken
+)
+
 // httpClient is the real PVE API client backed by net/http.
 type httpClient struct {
 	baseURL  string // e.g. "https://pve.example.com:8006/api2/json"
@@ -168,7 +175,7 @@ func (c *httpClient) doRequest(
 	method, path string,
 	form url.Values,
 	redactBody bool,
-	tokenEndpoint ...bool,
+	kind endpointKind,
 ) ([]byte, int, error) {
 	var reqBody io.Reader
 	if form != nil {
@@ -199,10 +206,8 @@ func (c *httpClient) doRequest(
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		classified := classifyPVEError(resp.StatusCode, body)
-		if len(tokenEndpoint) > 0 && tokenEndpoint[0] && classified == nil &&
-			(resp.StatusCode == http.StatusBadRequest || resp.StatusCode == http.StatusInternalServerError) &&
-			strings.Contains(strings.ToLower(string(body)), "no such token") {
-			classified = ErrTokenNotFound
+		if kind == endpointToken {
+			classified = classifyTokenPVEError(resp.StatusCode, body, classified)
 		}
 		if classified != nil {
 			return nil, resp.StatusCode, classified
@@ -348,7 +353,7 @@ func (c *httpClient) GetVersion(ctx context.Context) (string, error) {
 // here would either name the wrong method (GetVersion delegates) or stack two
 // of them on one error.
 func (c *httpClient) GetVersionInfo(ctx context.Context) (VersionInfo, error) {
-	body, _, err := c.doRequest(ctx, http.MethodGet, "/version", nil, false)
+	body, _, err := c.doRequest(ctx, http.MethodGet, "/version", nil, false, endpointStandard)
 	if err != nil {
 		return VersionInfo{}, err
 	}
@@ -368,7 +373,7 @@ func (c *httpClient) GetVersionInfo(ctx context.Context) (VersionInfo, error) {
 // Use PermissionTree.HasPrivilege to check effective privileges with the
 // correct ancestor-path walk.
 func (c *httpClient) GetPermissions(ctx context.Context) (PermissionTree, error) {
-	body, _, err := c.doRequest(ctx, http.MethodGet, "/access/permissions", nil, false)
+	body, _, err := c.doRequest(ctx, http.MethodGet, "/access/permissions", nil, false, endpointStandard)
 	if err != nil {
 		return nil, fmt.Errorf("pveapi: GetPermissions: %w", err)
 	}
@@ -385,7 +390,7 @@ func (c *httpClient) GetPermissions(ctx context.Context) (PermissionTree, error)
 // Returns ErrGroupNotFound if PVE responds HTTP 500 + body containing "does not exist".
 func (c *httpClient) GetGroup(ctx context.Context, group string) error {
 	path := "/access/groups/" + url.PathEscape(group)
-	_, _, err := c.doRequest(ctx, http.MethodGet, path, nil, false)
+	_, _, err := c.doRequest(ctx, http.MethodGet, path, nil, false, endpointStandard)
 	if err != nil {
 		return fmt.Errorf("pveapi: GetGroup %q: %w", group, err)
 	}
@@ -428,7 +433,7 @@ func (c *httpClient) CreateUser(ctx context.Context, req CreateUserRequest) erro
 	// redactBody when a password is present: PVE's validation errors name the
 	// field rather than echoing the value, but redaction removes the whole
 	// class of accidental credential echo from error strings.
-	_, _, err := c.doRequest(ctx, http.MethodPost, "/access/users", form, req.Password != "")
+	_, _, err := c.doRequest(ctx, http.MethodPost, "/access/users", form, req.Password != "", endpointStandard)
 	if err != nil {
 		return fmt.Errorf("pveapi: CreateUser %q: %w", req.UserID, err)
 	}
@@ -442,7 +447,7 @@ func (c *httpClient) CreateUser(ctx context.Context, req CreateUserRequest) erro
 // Returns ErrUserNotFound if PVE responds HTTP 500 + body "no such user".
 func (c *httpClient) GetUser(ctx context.Context, userid string) (UserInfo, error) {
 	path := "/access/users/" + url.PathEscape(userid)
-	body, _, err := c.doRequest(ctx, http.MethodGet, path, nil, false)
+	body, _, err := c.doRequest(ctx, http.MethodGet, path, nil, false, endpointStandard)
 	if err != nil {
 		return UserInfo{}, fmt.Errorf("pveapi: GetUser %q: %w", userid, err)
 	}
@@ -481,7 +486,7 @@ func (c *httpClient) CreateToken(ctx context.Context, userid, tokenid string) (s
 	form.Set("privsep", "0") // explicit literal "0" — NEVER omitted, NEVER "1"
 
 	// redactBody=true: token endpoint responses must never appear in error strings.
-	body, _, err := c.doRequest(ctx, http.MethodPost, path, form, true)
+	body, _, err := c.doRequest(ctx, http.MethodPost, path, form, true, endpointToken)
 	if err != nil {
 		// Do not include any body content — could contain the token secret.
 		return "", fmt.Errorf("pveapi: CreateToken userid=%q tokenid=%q: %w", userid, tokenid, err)
@@ -527,7 +532,7 @@ func (c *httpClient) UpdateUser(ctx context.Context, req UpdateUserRequest) erro
 		form.Set("append", "1") // explicit literal "1" — never omitted on renewal
 	}
 
-	_, _, err := c.doRequest(ctx, http.MethodPut, path, form, false)
+	_, _, err := c.doRequest(ctx, http.MethodPut, path, form, false, endpointStandard)
 	if err != nil {
 		return fmt.Errorf("pveapi: UpdateUser %q: %w", req.UserID, err)
 	}
@@ -541,7 +546,7 @@ func (c *httpClient) UpdateUser(ctx context.Context, req UpdateUserRequest) erro
 // should treat ErrUserNotFound as success for idempotent revocation.
 func (c *httpClient) DeleteUser(ctx context.Context, userid string) error {
 	path := "/access/users/" + url.PathEscape(userid)
-	_, _, err := c.doRequest(ctx, http.MethodDelete, path, nil, false)
+	_, _, err := c.doRequest(ctx, http.MethodDelete, path, nil, false, endpointStandard)
 	if err != nil {
 		return fmt.Errorf("pveapi: DeleteUser %q: %w", userid, err)
 	}
@@ -552,7 +557,7 @@ func (c *httpClient) DeleteUser(ctx context.Context, userid string) error {
 // need positive absence confirmation.
 func (c *httpClient) DeleteToken(ctx context.Context, userid, tokenid string) error {
 	path := "/access/users/" + url.PathEscape(userid) + "/token/" + url.PathEscape(tokenid)
-	_, _, err := c.doRequest(ctx, http.MethodDelete, path, nil, true, true)
+	_, _, err := c.doRequest(ctx, http.MethodDelete, path, nil, true, endpointToken)
 	if err != nil {
 		return fmt.Errorf("pveapi: DeleteToken userid=%q tokenid=%q: %w", userid, tokenid, err)
 	}
@@ -564,7 +569,7 @@ func (c *httpClient) DeleteToken(ctx context.Context, userid, tokenid string) er
 // the unverified absent-token DELETE contract.
 func (c *httpClient) TokenExists(ctx context.Context, userid, tokenid string) (bool, error) {
 	path := "/access/users/" + url.PathEscape(userid) + "/token"
-	body, _, err := c.doRequest(ctx, http.MethodGet, path, nil, true)
+	body, _, err := c.doRequest(ctx, http.MethodGet, path, nil, true, endpointToken)
 	if err != nil {
 		return false, fmt.Errorf("pveapi: TokenExists userid=%q tokenid=%q: %w", userid, tokenid, err)
 	}
