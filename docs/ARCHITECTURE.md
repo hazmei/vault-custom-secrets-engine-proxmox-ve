@@ -601,7 +601,8 @@ creates and validates a fresh `privsep=0` token, persists the complete
 replacement config in seal-wrapped storage, then deletes and confirms absence
 of the old token. A dedicated WAL stores only token IDs for automatic crash
 recovery. Durable rotation state stores the exact WAL ID and a factual internal
-phase, so guarded recovery deletes only its own WAL. The response contains only token ID and status; the secret remains in
+phase plus its start time, so status can distinguish recent work from stale
+crash state and guarded recovery deletes only its own WAL. The response contains only token ID and status; the secret remains in
 sealed config and is never returned or logged. There is no atomic
 "rotate-and-verify" primitive for the token currently in use; the WAL,
 durable rotation state, replacement validation, and post-delete read
@@ -609,17 +610,35 @@ confirmation are the compensating controls for that one-way operation.
 `privsep=0` is explicit because the replacement must inherit the provisioner
 user's ACL.
 
+The initial provisioner token must also be created with `privsep=0` (for
+example, `pveum user token add ... --privsep 0`). Proxmox's default `privsep=1`
+gives the token a separate ACL that is empty unless separately managed, so the
+engine cannot operate. A replacement created with `privsep=0` inherits the
+provisioner user's ACL; requiring the initial token to use the same mode makes
+that inheritance continuous across rotations.
+
 `GET <mount>/rotate-root` reports token-ID-only state. `in-progress` means the
-replacement has not reached config persistence; `recovery-required` means the
-config changed or cleanup/confirmation needs recovery. It is diagnostic and
-never a force-clear operation. If automatic recovery cannot progress, the
+durable state is recent and the rotation may still be active;
+`recovery-required` means the config changed, cleanup/confirmation needs
+recovery, or the state is stale. State older than five minutes, and legacy
+state without a timestamp, is treated conservatively as recovery-required. It
+is diagnostic and never a force-clear operation. If automatic recovery cannot progress, the
 operator may submit `expected_token_id`, `confirm_exclusive=true`, and
 `recovery_token_id` on the same endpoint. The latter must exactly equal one of
 the two recorded IDs, must not be the active configured token, and is checked
 with `TokenExists` before deletion and after deletion. Listing a user's tokens is
 a separate PVE permission and is validated before configuration persistence;
 the provisioner must be able to list tokens as well as create/delete them. Any ambiguity or
-unconfirmed absence preserves state.
+unconfirmed absence preserves state. If config names neither recorded token,
+automatic WAL rollback intentionally cannot choose safely and preserves both
+records. Use guarded recovery only with the exact IDs shown by status: submit
+the configured ID as `expected_token_id`, one recorded ID as
+`recovery_token_id`, and `confirm_exclusive=true`. The engine verifies
+existence, deletes only that exact token, confirms absence, deletes the matching
+WAL by its recorded ID, and clears state. It never accepts a hand-made ID,
+deletes the active configured token, returns or logs a secret, or force-clears
+state. If both recorded tokens may be orphaned, repeat only after a fresh
+status read confirms that the pending state remains.
 
 | Failure point | Durable state | Compensation/recovery |
 |---|---|---|
@@ -628,7 +647,7 @@ unconfirmed absence preserves state.
 | Cleanup after confirmed deletion fails | New config remains | Retry cleanup; token state is already safe |
 | Missing config or undecodable WAL | No safe token selection | Preserve state and WAL; retry or repair through the documented operator process without deleting a token |
 | Decodable malformed WAL | Potentially stale metadata | Compare both token IDs with durable state; mismatches preserve both, matching terminal metadata may be dropped without token deletion |
-| Config names neither recorded token | Ambiguous | Preserve WAL and state; use the guarded token-ID recovery operation |
+| Config names neither recorded token | Ambiguous | Automatic rollback preserves both; use guarded recovery with exact status IDs and no secrets |
 | Configured current token is already absent | Unsafe replacement basis | Fail closed, retain rotation state/WAL, and report an actionable recovery-required status; restore the token or use guarded recovery |
 
 The provisioner must retain `User.Modify` at `/access/groups` (propagating),

@@ -1455,3 +1455,8 @@ realm on the verified 9.2.14 build. PAM is explicitly out of scope; its
 historical creation, authentication, and rotation observations remain evidence
 only and must not be generalized into supported behavior. Password rotation is
 also out of scope for this API-token-authenticated engine.
+
+This dated scope decision does not rewrite the historical run statuses above:
+`BLOCKED/FAILED`, `BLOCKED/INCOMPLETE`, and other recorded outcomes remain as
+reported. The narrower supported `pve` surface is a later decision, not evidence
+that the broader PAM or password-rotation proposal was completed.

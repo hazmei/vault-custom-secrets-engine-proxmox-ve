@@ -33,6 +33,10 @@ These design choices are baked into the implementation and are **not open for re
   ID recorded in durable state, after matching `expected_token_id`; it verifies
   existence before deletion and absence afterward, and never deletes the active
   configured token. Ambiguity preserves state; there is no force-clear.
+  Automatic rollback intentionally cannot choose when config names neither
+  recorded token; guarded recovery must use the exact token IDs from status.
+  The initial provisioner token must be created with `privsep=0` so rotated
+  replacements inherit the provisioner user's ACL.
 - **`expire=0` (unlimited TTL) policy**: The engine REFUSES issuance when the effective TTL resolves to 0 (unlimited). Sending PVE `expire=0` creates a never-expiring user, disabling the `expire` backstop — the sole defense-in-depth if Vault revocation is delayed or fails. `creds/:role` returns a clear error: `"role %q resolves to an unlimited TTL; set a non-zero ttl/max_ttl on the role or config default_ttl/default_max_ttl (the PVE expire backstop requires a finite lease)"`. (Alternative considered and rejected as more complex: floor the PVE `expire` at `now + effMaxTTL + grace` when a finite max exists but ttl is 0.) This makes the backstop non-optional.
 
 ## Confirmed Password Credential Decisions

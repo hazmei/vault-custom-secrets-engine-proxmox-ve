@@ -259,6 +259,12 @@ pveum user token add vault-provisioner@pve vault \
   --comment "Vault production provisioner token"
 ```
 
+The initial provisioner token must use this same `privsep=0` setting. Rotation
+creates replacements with `privsep=0`, which makes them inherit the
+provisioner user's ACL. If the initial token used `privsep=1`, its separate
+token ACL may differ from the user's ACL, so successful use of the old token
+does not prove that a replacement can continue operating.
+
 Proxmox prints the token secret only once. Capture the complete one-time secret
 directly into an approved secret manager or protected operator session. The
 provisioner token is the **engine's administrative credential** and is distinct
@@ -350,11 +356,24 @@ recorded in durable rotation state, and fails without clearing state when
 absence cannot be confirmed. There is no force-clear operation. Do not edit
 Vault storage or manually replace config while rotation state is present.
 
+If config names neither recorded token, automatic rollback intentionally leaves
+both tokens and the WAL/state untouched because it cannot safely choose one.
+The guarded procedure is exact and status-driven: copy the configured token,
+`old_token_id`, and `new_token_id` from status, pass the configured value as
+`expected_token_id`, and pass exactly one recorded value as
+`recovery_token_id`. The engine verifies existence, deletes only that token,
+confirms absence, deletes its recorded WAL, and clears state. It never accepts
+a hand-made ID, deletes the active token, exposes a secret, or force-clears
+state. If both recorded tokens need cleanup, repeat only after a fresh status
+read confirms the pending state remains.
+
 If `rotate-root` reports another rotation, GET distinguishes `in-progress`
-(replacement creation or validation is not complete) from
-`recovery-required` (config changed or cleanup/confirmation needs recovery).
-Allow the automatic WAL rollback manager to retry before using the guarded
-operation. Do not retry with a different expected token or edit Vault storage.
+(the durable state is recent and may still be active) from
+`recovery-required` (config changed, cleanup/confirmation needs recovery, or
+the state is stale). Legacy state without a timestamp is treated
+conservatively as recovery-required. Allow the automatic WAL rollback manager
+to retry before using the guarded operation. Do not retry with a different
+expected token or edit Vault storage.
 Rotation requires the same propagating `/access/groups`
 `User.Modify`, `/access/groups` `Sys.Audit`, and each stored role realm's
 `Realm.AllocateUser` privileges as issuance, plus usable token-management

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/hashicorp/vault/sdk/framework"
 	"github.com/hashicorp/vault/sdk/logical"
@@ -18,6 +19,7 @@ const (
 	rotationPhaseValidationFail = "validation-failed"
 	rotationPhaseConfigPersist  = "config-persisted"
 	rotationPhaseDeletingOld    = "deleting-old"
+	rotationStaleAfter          = 5 * time.Minute
 )
 
 type rotationState struct {
@@ -25,15 +27,16 @@ type rotationState struct {
 	NewTokenID string `json:"new_token_id" mapstructure:"new_token_id"`
 	Phase      string `json:"phase" mapstructure:"phase"`
 	WALID      string `json:"wal_id" mapstructure:"wal_id"`
+	StartedAt  int64  `json:"started_at" mapstructure:"started_at"`
 }
 
 func pathRotateRoot(b *backend) *framework.Path {
 	return &framework.Path{
 		Pattern: "rotate-root",
 		Fields: map[string]*framework.FieldSchema{
-			"expected_token_id": {Type: framework.TypeString, Required: true},
-			"confirm_exclusive": {Type: framework.TypeBool, Required: true},
-			"recovery_token_id": {Type: framework.TypeString, Required: false},
+			"expected_token_id": {Type: framework.TypeString, Required: true, Description: "The complete token ID currently stored in config; prevents rotating a stale configuration."},
+			"confirm_exclusive": {Type: framework.TypeBool, Required: true, Description: "Acknowledge that this mount exclusively owns the provisioner token and that shared tokens are unsupported."},
+			"recovery_token_id": {Type: framework.TypeString, Required: false, Description: "During guarded recovery, the exact old_token_id or new_token_id from the pending rotation status; never a secret."},
 		},
 		Operations: map[logical.Operation]framework.OperationHandler{
 			logical.ReadOperation: &framework.PathOperation{Callback: b.readRotationState},
@@ -48,8 +51,9 @@ func pathRotateRoot(b *backend) *framework.Path {
 				ForwardPerformanceSecondary: true,
 			},
 		},
-		ExistenceCheck: b.rotationExistenceCheck,
-		HelpSynopsis:   "Rotate the dedicated Proxmox provisioner token.",
+		ExistenceCheck:  b.rotationExistenceCheck,
+		HelpSynopsis:    "Rotate the dedicated Proxmox provisioner token.",
+		HelpDescription: "Rotates the exclusive provisioner API token. The response and status expose token IDs only; token secrets remain in seal-wrapped config. If status reports recovery-required, automatic WAL rollback should be allowed to retry first. Guarded recovery requires expected_token_id, confirm_exclusive=true, and an exact recovery_token_id copied from the pending status; it refuses active or unrecorded IDs and never force-clears state.",
 	}
 }
 
@@ -85,6 +89,9 @@ func rotationStatus(state rotationState, cfg *proxmoxConfig) string {
 		return "recovery-required"
 	}
 	if cfg == nil {
+		return "recovery-required"
+	}
+	if state.StartedAt == 0 || time.Since(time.Unix(state.StartedAt, 0)) > rotationStaleAfter {
 		return "recovery-required"
 	}
 	if cfg.TokenID == state.OldTokenID && (state.Phase == rotationPhaseProvisioning || state.Phase == "in-progress") {
@@ -138,8 +145,9 @@ func (b *backend) rotateRoot(ctx context.Context, req *logical.Request, d *frame
 	if err != nil {
 		return nil, fmt.Errorf("proxmox: rotate-root: generate token ID: %w", err)
 	}
-	newToken := oldUser + "!vault-rotation-" + suffix
-	state := rotationState{OldTokenID: cfg.TokenID, NewTokenID: newToken, Phase: rotationPhaseProvisioning}
+	rotationTokenID := "vault-rotation-" + suffix
+	newToken := oldUser + "!" + rotationTokenID
+	state := rotationState{OldTokenID: cfg.TokenID, NewTokenID: newToken, Phase: rotationPhaseProvisioning, StartedAt: time.Now().Unix()}
 	walID, err := framework.PutWAL(ctx, req.Storage, walTypeRotation, state)
 	if err != nil {
 		return nil, fmt.Errorf("proxmox: rotate-root: write recovery WAL: %w", err)
@@ -153,7 +161,20 @@ func (b *backend) rotateRoot(ctx context.Context, req *logical.Request, d *frame
 	if err != nil {
 		return nil, err
 	}
-	secret, err := oldClient.CreateToken(ctx, oldUser, "vault-rotation-"+suffix)
+	if exists, existsErr := oldClient.TokenExists(ctx, oldUser, oldToken); existsErr != nil {
+		state.Phase = rotationPhaseValidationFail
+		if stateErr := putRotationState(ctx, req.Storage, state); stateErr != nil {
+			return nil, fmt.Errorf("proxmox: rotate-root: mark current-token validation failure: %w (original: %v)", stateErr, existsErr)
+		}
+		return nil, fmt.Errorf("proxmox: rotate-root: validate current token before replacement: %w", existsErr)
+	} else if !exists {
+		state.Phase = rotationPhaseValidationFail
+		if stateErr := putRotationState(ctx, req.Storage, state); stateErr != nil {
+			return nil, fmt.Errorf("proxmox: rotate-root: mark current-token validation failure: %w", stateErr)
+		}
+		return nil, fmt.Errorf("proxmox: rotate-root: current configured token %q is absent; rotation refused fail-closed; restore the token or use guarded recovery", oldToken)
+	}
+	secret, err := oldClient.CreateToken(ctx, oldUser, rotationTokenID)
 	if err != nil {
 		return nil, fmt.Errorf("proxmox: rotate-root: create replacement token: %w", err)
 	}
@@ -179,11 +200,6 @@ func (b *backend) rotateRoot(ctx context.Context, req *logical.Request, d *frame
 		return nil, fmt.Errorf("proxmox: rotate-root: persist replacement config: %w", err)
 	}
 	b.invalidate(ctx, "config")
-	state.Phase = rotationPhaseConfigPersist
-	if err := putRotationState(ctx, req.Storage, state); err != nil {
-		return nil, fmt.Errorf("proxmox: rotate-root: mark recovery state: %w", err)
-	}
-
 	state.Phase = rotationPhaseDeletingOld
 	if err := putRotationState(ctx, req.Storage, state); err != nil {
 		return nil, fmt.Errorf("proxmox: rotate-root: mark deletion phase: %w", err)
@@ -213,7 +229,7 @@ func putRotationState(ctx context.Context, storage logical.Storage, state rotati
 	return storage.Put(ctx, entry)
 }
 
-func validateReplacement(ctx context.Context, client pveapi.Client, storage logical.Storage, currentTokenID string) error {
+func validateReplacement(ctx context.Context, client pveapi.Client, storage logical.Storage, _ string) error {
 	if _, err := client.GetVersion(ctx); err != nil {
 		return err
 	}
@@ -221,17 +237,8 @@ func validateReplacement(ctx context.Context, client pveapi.Client, storage logi
 	if err != nil {
 		return err
 	}
-	oldUser, oldToken, err := splitTokenID(currentTokenID)
-	if err != nil {
-		return err
-	}
-	exists, err := client.TokenExists(ctx, oldUser, oldToken)
-	if err != nil {
-		return fmt.Errorf("replacement token cannot list current token: %w", err)
-	}
-	if !exists {
-		return fmt.Errorf("current configured token %q is absent; rotation refused fail-closed; restore the token or use guarded recovery", oldToken)
-	}
+	// The current-token existence check deliberately runs before CreateToken in
+	// rotateRoot, avoiding a live orphan when config names an absent token.
 	for _, required := range []struct{ privilege, path string }{
 		{"User.Modify", "/access/groups"}, {"Sys.Audit", "/access/groups"},
 	} {
@@ -283,6 +290,9 @@ func (b *backend) recoverRotation(ctx context.Context, req *logical.Request, exp
 	if recoveryToken == cfg.TokenID {
 		return logical.ErrorResponse("rotate-root recovery rejected: recovery_token_id is the active configured token"), nil
 	}
+	if state.WALID == "" {
+		return nil, fmt.Errorf("proxmox: rotation recovery state has no WAL ID; refusing to mutate tokens; automatic WAL rollback must resolve this legacy state")
+	}
 	user, token, err := splitTokenID(recoveryToken)
 	if err != nil {
 		return logical.ErrorResponse("rotate-root recovery: %s", err), nil
@@ -306,9 +316,6 @@ func (b *backend) recoverRotation(ctx context.Context, req *logical.Request, exp
 		if err == nil && exists {
 			return nil, fmt.Errorf("proxmox: recovery token deletion could not be confirmed")
 		}
-	}
-	if state.WALID == "" {
-		return nil, fmt.Errorf("proxmox: rotation recovery state has no WAL ID; state retained; manual intervention is required")
 	}
 	if err := framework.DeleteWAL(ctx, req.Storage, state.WALID); err != nil {
 		return nil, fmt.Errorf("proxmox: delete rotation recovery WAL %q: %w", state.WALID, err)

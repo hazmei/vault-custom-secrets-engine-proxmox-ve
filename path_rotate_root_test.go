@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/hashicorp/vault/sdk/framework"
 	"github.com/hashicorp/vault/sdk/logical"
@@ -226,6 +227,75 @@ func TestRotateRootRecoveryOperationDeletesOnlyVerifiedStateToken(t *testing.T) 
 	}
 }
 
+func TestRotateRootGuardedRecoverySelectsExactTokenWhenConfigNamesNeither(t *testing.T) {
+	ctx := context.Background()
+	var deleted string
+	b, storage := newTestBackend(t, func(mc *pveapi.MockClient) {
+		checks := 0
+		mc.TokenExistsFn = func(context.Context, string, string) (bool, error) {
+			checks++
+			return checks == 1, nil
+		}
+		mc.DeleteTokenFn = func(_ context.Context, _, token string) error {
+			deleted = token
+			return nil
+		}
+	})
+	if _, err := writeConfig(ctx, b, storage, map[string]interface{}{
+		"address": "https://pve.example.com:8006", "token_id": "vault-admin@pve!third",
+		"token_secret": "configured-secret", "tls_skip_verify": true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	state := rotationState{OldTokenID: "vault-admin@pve!old", NewTokenID: "vault-admin@pve!new"}
+	walID, err := framework.PutWAL(ctx, storage, walTypeRotation, state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state.WALID = walID
+	if stateErr := putRotationState(ctx, storage, state); stateErr != nil {
+		t.Fatal(stateErr)
+	}
+	resp, err := b.recoverRotation(ctx, &logical.Request{Storage: storage}, "vault-admin@pve!third", state.NewTokenID)
+	if err != nil || resp == nil || resp.IsError() {
+		t.Fatalf("guarded recovery failed: response=%v err=%v", resp, err)
+	}
+	if deleted != "new" {
+		t.Fatalf("recovery deleted %q, want exact recorded new token", deleted)
+	}
+	if entry, err := framework.GetWAL(ctx, storage, walID); err != nil || entry != nil {
+		t.Fatalf("recovery did not delete exact WAL: entry=%v err=%v", entry, err)
+	}
+}
+
+func TestRotateRootRecoveryWithoutWALRefusesBeforeTokenMutation(t *testing.T) {
+	calls := 0
+	b, storage := newTestBackend(t, func(mc *pveapi.MockClient) {
+		mc.TokenExistsFn = func(context.Context, string, string) (bool, error) {
+			calls++
+			return true, nil
+		}
+		mc.DeleteTokenFn = func(context.Context, string, string) error {
+			calls++
+			return nil
+		}
+	})
+	if _, err := writeConfig(context.Background(), b, storage, validConfigData()); err != nil {
+		t.Fatal(err)
+	}
+	state := rotationState{OldTokenID: "vault-admin@pve!old", NewTokenID: "vault-admin@pve!new"}
+	if err := putRotationState(context.Background(), storage, state); err != nil {
+		t.Fatal(err)
+	}
+	_, err := b.recoverRotation(context.Background(), &logical.Request{Storage: storage}, "vault-admin@pve!mytoken", state.NewTokenID)
+	if err == nil || !strings.Contains(err.Error(), "no WAL ID") {
+		t.Fatalf("legacy recovery should fail before mutation: %v", err)
+	}
+	if calls != 0 {
+		t.Fatalf("legacy recovery mutated tokens through %d PVE calls", calls)
+	}
+}
+
 func TestRotateRootRecoveryDeletesExactWALAndDoesNotPoisonNextRotation(t *testing.T) {
 	ctx := context.Background()
 	existsCalls := 0
@@ -300,8 +370,8 @@ func TestRotateRootWALRollbackWithNewConfigDeletesOldToken(t *testing.T) {
 		t.Fatal(configErr)
 	}
 	state := rotationState{OldTokenID: "vault-admin@pve!old", NewTokenID: "vault-admin@pve!new", WALID: "wal-a"}
-	if err := putRotationState(ctx, storage, state); err != nil {
-		t.Fatal(err)
+	if stateErr := putRotationState(ctx, storage, state); stateErr != nil {
+		t.Fatal(stateErr)
 	}
 	err := b.walRollback(ctx, &logical.Request{Storage: storage}, walTypeRotation, map[string]interface{}{
 		"old_token_id": state.OldTokenID, "new_token_id": state.NewTokenID,
@@ -319,7 +389,7 @@ func TestReadRotationStateDistinguishesProgressAndRecovery(t *testing.T) {
 	if _, err := writeConfig(context.Background(), b, storage, validConfigData()); err != nil {
 		t.Fatal(err)
 	}
-	state := rotationState{OldTokenID: "vault-admin@pve!mytoken", NewTokenID: "vault-admin@pve!new", Phase: "in-progress"}
+	state := rotationState{OldTokenID: "vault-admin@pve!mytoken", NewTokenID: "vault-admin@pve!new", Phase: "in-progress", StartedAt: time.Now().Unix()}
 	if err := putRotationState(context.Background(), storage, state); err != nil {
 		t.Fatal(err)
 	}
@@ -343,7 +413,7 @@ func TestReadRotationStateUsesFactualPhases(t *testing.T) {
 	if _, err := writeConfig(ctx, b, storage, validConfigData()); err != nil {
 		t.Fatal(err)
 	}
-	state := rotationState{OldTokenID: "vault-admin@pve!mytoken", NewTokenID: "vault-admin@pve!new", Phase: rotationPhaseConfigPersist}
+	state := rotationState{OldTokenID: "vault-admin@pve!mytoken", NewTokenID: "vault-admin@pve!new", Phase: rotationPhaseConfigPersist, StartedAt: time.Now().Unix()}
 	if err := putRotationState(ctx, storage, state); err != nil {
 		t.Fatal(err)
 	}
@@ -360,6 +430,14 @@ func TestReadRotationStateUsesFactualPhases(t *testing.T) {
 	resp, err = b.readRotationState(ctx, &logical.Request{Storage: storage}, nil)
 	if err != nil || resp.Data["status"] != "in-progress" {
 		t.Fatalf("config-persisted rotation should be in progress: response=%v err=%v", resp, err)
+	}
+	state.StartedAt = time.Now().Add(-rotationStaleAfter - time.Second).Unix()
+	if stateErr := putRotationState(ctx, storage, state); stateErr != nil {
+		t.Fatal(stateErr)
+	}
+	resp, err = b.readRotationState(ctx, &logical.Request{Storage: storage}, nil)
+	if err != nil || resp.Data["status"] != "recovery-required" {
+		t.Fatalf("stale rotation should require recovery: response=%v err=%v", resp, err)
 	}
 }
 
