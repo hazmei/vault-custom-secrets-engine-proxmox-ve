@@ -12,11 +12,14 @@ its token(s), group memberships, and ACL entries in one call.
 
 ## Service API Summary
 - Base URL: `https://<host>:8006/api2/json`
-- Target version: Proxmox VE 9.2.10
+- Target version: Proxmox VE 9.2.10 (token mode). Password mode requires the
+  exact verified build `pve-manager/9.2.14/a1480fa6b8d899cb` and is refused on
+  any other build, 9.2.10 included.
 - Authentication (engine → Proxmox): API Token header —
   `Authorization: PVEAPIToken=<user>@<realm>!<tokenid>=<secret>`
-- Credential Types: Proxmox API tokens (`tokenid` + `secret`) or generated
-  passwords, one credential per lease, bound to a synthetic per-lease PVE user
+- Credential Types: Proxmox API tokens (`tokenid` + `secret`), or generated
+  passwords on the verified 9.2.14 build only — one credential per lease, bound
+  to a synthetic per-lease PVE user
 - Lifecycle: full dynamic create/delete — token mode creates a user and token;
   password mode creates a user with a password; revocation deletes the user
 

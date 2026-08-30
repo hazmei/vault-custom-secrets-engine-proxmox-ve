@@ -1723,9 +1723,10 @@ actually exists (`docs/PVE_PROBES.md` Probe P0):
 Non-blocking evidence and support gaps remain explicit: the live `append=0`
 replacement control has not been run; live `TestAccRotateRoot` has not been run;
 the raw `GET /version` response body from the verified 9.2.14 build has not been
-captured in `docs/PVE_PROBES.md`. Password mode remains unsupported on the
-  9.2.10 target because it lacks an end-to-end engine lifecycle result despite
-  the retained raw-API password evidence. These do
+captured in `docs/PVE_PROBES.md`; and password length constraints have not been
+re-checked on 9.2.14. Password mode remains unsupported on the 9.2.10 target
+because it lacks an end-to-end engine lifecycle result despite the retained
+raw-API password evidence. These do
 not change the shipped password scope or the token-only production-adoption
 gates above, and no release gate depends on password support.
 
@@ -1735,8 +1736,10 @@ gates above, and no release gate depends on password support.
     password-redacted evidence is recorded in `docs/PVE_PROBES.md`.
   - **Completed evidence**: password creation, read-back, authentication,
     exact renewal with the original password preserved, expiry, disablement,
-    deletion, token interaction, and the 8–64 character constraints were
-    verified. The password is supplied on `POST /access/users`; no API token is
+    deletion, and token interaction were verified on 9.2.14. The 8–64
+    character constraints were verified on 9.2.10 on 28 August 2026 only
+    (`docs/PVE_PROBES.md` Probe P0); they were not exercised on 9.2.14. The
+    password is supplied on `POST /access/users`; no API token is
     created. `PUT /access/password` requires a password-authenticated ticket,
     which API-token authentication cannot obtain, so password rotation is
     unsupported.
@@ -1748,7 +1751,8 @@ gates above, and no release gate depends on password support.
     gate remains enforced from the live response. The exact ACL privilege path
     and propagation required specifically for password creation are also not
     isolated; the probe records the privileges held by the token, not a minimum
-    password-creation requirement, so this remains an evidence gap.
+    password-creation requirement. The password length bounds also need a
+    9.2.14 re-check. These remain evidence gaps.
 
 - [x] **P1 — Contract and documentation finalization** — DONE. Locked contract:
   engine-owned generator (`password.go`), `crypto/rand` via `rand.Int` rejection
