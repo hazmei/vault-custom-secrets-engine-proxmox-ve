@@ -404,7 +404,8 @@ func (c *httpClient) GetGroup(ctx context.Context, group string) error {
 // API-token authentication cannot use PUT /access/password, which requires a
 // password-authenticated ticket — PVE_PROBES.md Probe P0 on
 // pve-manager/9.2.14/a1480fa6b8d899cb; raw-API password probes were also run
-// on 9.2.10 on 28 August 2026, but engine lifecycle support was not verified there).
+// against 9.2.10 on 28 August 2026, but engine lifecycle support was not
+// verified there).
 //
 // Form-encoding notes (from AGENTS.md — both are silent-failure traps):
 //   - groups: ONE comma-separated field, never array-repeated.
