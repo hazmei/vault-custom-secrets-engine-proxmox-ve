@@ -1,6 +1,6 @@
 # Proxmox VE Secrets Engine for HashiCorp Vault
 
-A HashiCorp Vault custom secrets engine plugin that issues **dynamic, per-lease Proxmox VE API tokens** with scoped access control and automatic cleanup on revocation.
+A HashiCorp Vault custom secrets engine plugin that issues **dynamic, per-lease Proxmox VE credentials** — API tokens by default, or passwords in the supported password mode — with scoped access control and automatic cleanup on revocation.
 
 ## Overview
 
@@ -643,7 +643,8 @@ Operator notes:
 
 - **Password mode is gated to the exact `pve-manager/9.2.14/a1480fa6b8d899cb`
   build, the only verified build.** The project's token-mode target is 9.2.10,
-  whose probe evidence predates password mode and contains no password results.
+  which is explicitly token-mode only: its probe evidence predates password mode
+  and contains no password results. This support decision is closed, not open.
   The engine enforces this rather than merely warning:
   OPTING IN to `mode=password` is REFUSED unless `GET /version` reports exactly
   `version=9.2.14` and `repoid=a1480fa6b8d899cb`, and `creds/:role` re-checks the

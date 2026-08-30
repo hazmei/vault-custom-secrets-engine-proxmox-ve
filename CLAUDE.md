@@ -32,6 +32,12 @@ Current phase validation status, including the recorded PVE build, optional
 acceptance-test skip gates, and production catalog registration status, is
 tracked in `docs/IMPLEMENTATION_PLAN.md`.
 
+Password mode is supported only on the exact verified
+`pve-manager/9.2.14/a1480fa6b8d899cb` build. PVE 9.2.10 is explicitly
+token-mode only; this support decision is closed. The 9.2.14 `GET /version`
+response body remains an evidence gap, although the runtime exact-build gate
+is enforced.
+
 Recorded validation (2026-08-20) against disposable PVE
 `pve-manager/9.2.10/43df2e01f27a1a19` includes a successful `make build`, Vault
 `server -dev` plugin auto-registration with

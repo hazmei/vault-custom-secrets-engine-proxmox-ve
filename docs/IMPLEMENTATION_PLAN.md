@@ -45,7 +45,8 @@ The password credential feature is implemented under a deliberately narrow scope
 Password credentials are supported only for the `pve` realm and only on the exact
 verified build `pve-manager/9.2.14/a1480fa6b8d899cb`. PAM support is explicitly out
 of scope. The PVE 9.2.14 lifecycle acceptance run is complete. Password rotation is
-unsupported.
+unsupported. PVE 9.2.10 is explicitly token-mode only; password support for that
+build is closed as unsupported rather than remaining an open decision.
 
 - The role field is `mode` with values `token` and `password`.
 - An omitted `mode` defaults to `token`, preserving existing role and lease behavior.
@@ -333,6 +334,7 @@ type proxmoxRole struct {
     Group      string `json:"group"`
     UserPrefix string `json:"user_prefix"`
     Realm      string `json:"realm"`
+    Mode       string `json:"mode"` // "token" (default) or "password"
     TTL        int    `json:"ttl"`
     MaxTTL     int    `json:"max_ttl"`
 }
@@ -649,6 +651,7 @@ type proxmoxRole struct {
     Group      string `json:"group"`
     UserPrefix string `json:"user_prefix"`
     Realm      string `json:"realm"`
+    Mode       string `json:"mode"` // "token" (default) or "password"
     TTL        int    `json:"ttl"`
     MaxTTL     int    `json:"max_ttl"`
 }
@@ -1687,7 +1690,7 @@ actually exists (`docs/PVE_PROBES.md` Probe P0):
 - **Verified build scope (ENFORCED)**: password mode is verified end to end ONLY
   on `pve-manager/9.2.14/a1480fa6b8d899cb`. The declared target
   `9.2.10/43df2e01f27a1a19` has NO password evidence because its probes predate the
-  feature. The engine gates on this rather than
+  feature; PVE 9.2.10 is explicitly token-mode only. The engine gates on this rather than
   only warning: role write refuses to OPT IN to `mode=password` unless
   `GET /version` reports exactly `version=9.2.14` + `repoid=a1480fa6b8d899cb`
   (`path_roles.go` Step 7c), and `creds/:role` re-checks the live build before
@@ -1698,9 +1701,9 @@ actually exists (`docs/PVE_PROBES.md` Probe P0):
   write would block routine edits to an existing password role on an upgraded
   cluster. Editing an existing password role, renew, and revoke are deliberately
   NOT gated, so an upgrade breaks new issuance and new opt-ins while already-issued
-  leases stay renewable and revocable and existing roles stay editable. Recording equivalent
-  9.2.10 evidence, or dropping 9.2.10 as a supported password-mode build,
-  remains an open support decision. **Evidence note**: no
+  leases stay renewable and revocable and existing roles stay editable. Password mode is
+  not supported on 9.2.10, and this support decision is closed.
+  **Evidence note**: no
   `GET /version` response body from the 9.2.14 target is recorded in
   `docs/PVE_PROBES.md`; do not treat the build identifier as a recorded API
   response. Capture that response on the next live run.
@@ -1719,8 +1722,8 @@ actually exists (`docs/PVE_PROBES.md` Probe P0):
 Non-blocking evidence and support gaps remain explicit: the live `append=0`
 replacement control has not been run; live `TestAccRotateRoot` has not been run;
 the raw `GET /version` response body from the verified 9.2.14 build has not been
-captured in `docs/PVE_PROBES.md`; and the password-support decision for the
-9.2.10 target remains open because no 9.2.10 password evidence exists. These do
+captured in `docs/PVE_PROBES.md`. Password mode remains unsupported on the
+9.2.10 target because no 9.2.10 password evidence exists. These do
 not change the shipped password scope or the token-only production-adoption
 gates above, and no release gate depends on password support.
 
