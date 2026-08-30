@@ -253,8 +253,11 @@ func validateReplacement(ctx context.Context, client pveapi.Client, storage logi
 	if err != nil {
 		return err
 	}
-	// The current-token existence check deliberately runs before CreateToken in
-	// rotateRoot, avoiding a live orphan when config names an absent token.
+	// Second existence check, deliberately on the replacement client: rotateRoot
+	// already confirmed the token is live via oldClient before CreateToken. This
+	// one proves the replacement can list tokens, a distinct PVE permission that
+	// the post-delete confirmation depends on, and must run before config
+	// persistence so a replacement that cannot list fails closed.
 	for _, required := range []struct{ privilege, path string }{
 		{"User.Modify", "/access/groups"}, {"Sys.Audit", "/access/groups"},
 	} {
