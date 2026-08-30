@@ -601,19 +601,35 @@ creates and validates a fresh `privsep=0` token, persists the complete
 replacement config in seal-wrapped storage, then deletes and confirms absence
 of the old token. A dedicated WAL stores only token IDs for automatic crash
 recovery. The response contains only token ID and status; the secret remains in
-sealed config and is never returned or logged. Rotating a full-admin
-token is high-blast-radius and there's no atomic "rotate and verify"
-primitive in the Proxmox API for the token currently in use; document as
-a manual operation (create new token, update `<mount>/config`, delete old
-token) rather than an automated endpoint. Operators can read the current
-`token_id` via `GET <mount>/config` to identify the token being replaced
-and confirm the swap. Create the replacement with `privsep=0`, verify it before
-removing the old token, and revoke outstanding leases before rotation where
-possible. If the configured provisioner token is removed or loses its required
-privileges, outstanding PVE users and lease tokens can remain on the cluster
-while becoming non-renewable and non-revocable by the engine. The README
-[production runbook](../README.md#5-rotate-the-provisioner-token-safely)
-contains the operator sequence and recovery warning.
+sealed config and is never returned or logged. There is no atomic
+"rotate-and-verify" primitive for the token currently in use; the WAL,
+durable rotation state, replacement validation, and post-delete read
+confirmation are the compensating controls for that one-way operation.
+`privsep=0` is explicit because the replacement must inherit the provisioner
+user's ACL.
+
+`GET <mount>/rotate-root` reports pending state using token IDs only. It is
+diagnostic, not a force-clear operation. A failed confirmation leaves the WAL
+and rotation state for automatic recovery. Operators should inspect this
+status and wait for the rollback manager to retry. Ambiguous or inconsistent
+state is preserved rather than cleared by an unsafe override.
+
+| Failure point | Durable state | Compensation/recovery |
+|---|---|---|
+| Replacement creation/validation or config persistence fails | Old config remains | WAL rollback deletes the replacement only when unambiguous |
+| Config persists, old-token delete or absence read fails | New config remains | WAL rollback deletes the old token and confirms absence |
+| Cleanup after confirmed deletion fails | New config remains | Retry cleanup; token state is already safe |
+| Missing config or malformed WAL | No safe token selection | Log terminal error and drop malformed metadata without deleting a token |
+| Config names neither recorded token | Ambiguous | Preserve WAL and state; inspect `GET rotate-root` and use approved recovery |
+
+The provisioner must retain `User.Modify` at `/access/groups` (propagating),
+`Sys.Audit` at `/access/groups`, and `Realm.AllocateUser` at every realm used
+by a stored role. Rotation also creates a token on the provisioner user; the
+successful create call proves the configured token-management permission is
+usable, while no unrecorded permission-tree path is assumed. If the token is
+removed or loses these privileges, outstanding PVE users can become
+non-renewable and non-revocable. See the README [production
+runbook](../README.md#5-rotate-the-provisioner-token-safely).
 
 ### Error Handling
 

@@ -111,17 +111,23 @@ func (b *backend) walRollback(ctx context.Context, req *logical.Request, kind st
 }
 
 func (b *backend) walRollbackRotation(ctx context.Context, req *logical.Request, data interface{}) error {
+	b.rotationLock.Lock()
+	defer b.rotationLock.Unlock()
 	var state rotationState
 	if err := mapstructure.Decode(data, &state); err != nil {
-		return fmt.Errorf("proxmox: rotation WAL decode: %w", err)
+		return b.dropMalformedRotationWAL(ctx, req, fmt.Errorf("proxmox: rotation WAL decode: %w", err))
 	}
 	oldUser, oldToken, err := splitTokenID(state.OldTokenID)
-	if err != nil || state.NewTokenID == "" {
-		return fmt.Errorf("proxmox: malformed rotation WAL")
+	newUser, newToken, newErr := splitTokenID(state.NewTokenID)
+	if err != nil || newErr != nil || oldUser != newUser {
+		return b.dropMalformedRotationWAL(ctx, req, fmt.Errorf("proxmox: malformed rotation WAL"))
 	}
 	cfg, err := getConfig(ctx, req.Storage)
 	if err != nil || cfg == nil {
-		return fmt.Errorf("proxmox: rotation recovery config: %w", err)
+		if err != nil {
+			return err
+		}
+		return b.dropMalformedRotationWAL(ctx, req, fmt.Errorf("proxmox: rotation recovery has no config; no token can be safely selected"))
 	}
 	client, err := b.getClient(ctx, req.Storage)
 	if err != nil {
@@ -129,21 +135,39 @@ func (b *backend) walRollbackRotation(ctx context.Context, req *logical.Request,
 	}
 	switch cfg.TokenID {
 	case state.OldTokenID:
-		_, newToken, splitErr := splitTokenID(state.NewTokenID)
-		if splitErr != nil {
-			return splitErr
-		}
 		err = client.DeleteToken(ctx, oldUser, newToken)
+		if err == nil || errors.Is(err, pveapi.ErrTokenNotFound) {
+			var exists bool
+			exists, err = client.TokenExists(ctx, oldUser, newToken)
+			if err == nil && exists {
+				err = fmt.Errorf("proxmox: replacement token remains during rotation recovery")
+			}
+		}
 	case state.NewTokenID:
 		err = client.DeleteToken(ctx, oldUser, oldToken)
+		if err == nil || errors.Is(err, pveapi.ErrTokenNotFound) {
+			var exists bool
+			exists, err = client.TokenExists(ctx, oldUser, oldToken)
+			if err == nil && exists {
+				err = fmt.Errorf("proxmox: old token remains during rotation recovery")
+			}
+		}
 	default:
-		return fmt.Errorf("proxmox: rotation recovery found inconsistent token ID")
+		return fmt.Errorf("proxmox: rotation recovery found inconsistent token ID; preserving WAL and rotation state")
 	}
 	if err != nil && !errors.Is(err, pveapi.ErrTokenNotFound) {
 		return err
 	}
 	if err := req.Storage.Delete(ctx, rotationStorageKey); err != nil {
 		return err
+	}
+	return nil
+}
+
+func (b *backend) dropMalformedRotationWAL(ctx context.Context, req *logical.Request, cause error) error {
+	b.Logger().Error("walRollback: dropping malformed terminal rotation WAL", "error", cause)
+	if err := req.Storage.Delete(ctx, rotationStorageKey); err != nil {
+		return fmt.Errorf("proxmox: clear malformed rotation state: %w", err)
 	}
 	return nil
 }

@@ -1081,13 +1081,6 @@ func TestAccRotateRoot(t *testing.T) {
 	bootstrapClient := newPVEClient(t, bootstrapEnv)
 	ctx, cancel := context.WithTimeout(context.Background(), accTestTimeout)
 	defer cancel()
-	info, err := bootstrapClient.GetVersionInfo(ctx)
-	if err != nil {
-		t.Fatalf("verify rotate-root PVE build: %v", err)
-	}
-	if info.Version != passwordVerifiedVersion || info.RepoID != passwordVerifiedRepoID {
-		t.Skipf("rotate-root acceptance test requires verified PVE build %s; target reports version=%q repoid=%q", passwordVerifiedBuild, info.Version, info.RepoID)
-	}
 
 	// This user is the only provisioner identity this test may rotate. Register
 	// cleanup immediately after creation so every later failure removes it via
@@ -1096,7 +1089,7 @@ func TestAccRotateRoot(t *testing.T) {
 	if createErr := bootstrapClient.CreateUser(ctx, pveapi.CreateUserRequest{
 		UserID: provisionerUser,
 		Groups: os.Getenv(accRotateProvisionerGroup),
-		Expire: time.Now().Add(accTestTimeout).Unix(),
+		Expire: time.Now().Add(accTestTimeout + 10*time.Minute).Unix(),
 		Enable: true,
 	}); createErr != nil {
 		t.Fatalf("create disposable rotate provisioner user %q: %v", provisionerUser, createErr)
@@ -1120,7 +1113,7 @@ func TestAccRotateRoot(t *testing.T) {
 	}
 	roleName := "acc-rotate-" + suffix
 	writeAccConfig(t, ctx, h)
-	writeAccRoleNamed(t, ctx, h, roleName, modePassword)
+	writeAccRoleNamed(t, ctx, h, roleName, modeToken)
 
 	oldTokenID, oldTokenSecret := h.Env.TokenID, h.Env.TokenSecret
 	rotationResp, err := h.Backend.HandleRequest(ctx, &logical.Request{
@@ -1182,15 +1175,15 @@ func TestAccRotateRoot(t *testing.T) {
 	h.Client = newPVEClient(t, replacementEnv)
 	issuedResp, err := h.Backend.HandleRequest(ctx, &logical.Request{Operation: logical.ReadOperation, Path: "creds/" + roleName, Storage: h.Storage})
 	if err != nil {
-		t.Fatalf("issue password credential with replacement token: %v", err)
+		t.Fatalf("issue token credential with replacement token: %v", err)
 	}
 	if issuedResp == nil || issuedResp.IsError() || issuedResp.Secret == nil {
-		t.Fatalf("replacement token could not issue password credential: %v", responseErr(issuedResp))
+		t.Fatalf("replacement token could not issue token credential: %v", responseErr(issuedResp))
 	}
 	userID, _ := issuedResp.Data["user_id"].(string)
-	password, _ := issuedResp.Data["password"].(string)
-	if userID == "" || password == "" {
-		t.Fatal("password credential response missing user_id or password")
+	tokenSecret, _ := issuedResp.Data["token_secret"].(string)
+	if userID == "" || tokenSecret == "" {
+		t.Fatal("token credential response missing user_id or token_secret")
 	}
 	// Register the exact lease user immediately; cleanup never deletes the
 	// replacement provisioner token.
@@ -1198,40 +1191,37 @@ func TestAccRotateRoot(t *testing.T) {
 	issuedResp.Secret.IssueTime = time.Now()
 
 	assertAccUserInGroup(t, ctx, h.Client, userID, h.Env.Group)
-	assertAccTicketStatus(t, ctx, replacementEnv, userID, password, http.StatusOK)
-	assertAccNoAPIToken(t, ctx, replacementEnv, userID)
+	assertAccTokenStatus(t, ctx, replacementEnv, issuedResp.Data["token_id"].(string), tokenSecret, http.MethodGet, accDefaultBehavior, http.StatusOK)
 	renewAccSecretNamed(t, ctx, h, roleName, issuedResp.Secret, 120*time.Second)
 	assertAccUserInGroup(t, ctx, h.Client, userID, h.Env.Group)
-	assertAccTicketStatus(t, ctx, replacementEnv, userID, password, http.StatusOK)
+	assertAccTokenStatus(t, ctx, replacementEnv, issuedResp.Data["token_id"].(string), tokenSecret, http.MethodGet, accDefaultBehavior, http.StatusOK)
 	revokeAccSecretNamed(t, ctx, h, roleName, issuedResp.Secret)
 	assertAccUserMissing(t, ctx, h.Client, userID)
-	assertAccTicketStatus(t, ctx, replacementEnv, userID, password, http.StatusUnauthorized)
+	assertAccTokenStatus(t, ctx, replacementEnv, issuedResp.Data["token_id"].(string), tokenSecret, http.MethodGet, accDefaultBehavior, http.StatusUnauthorized)
 }
 
 func assertAccNoSensitiveValues(t *testing.T, data map[string]interface{}, secret, contextName string) {
 	t.Helper()
-	if _, present := data["token_secret"]; present {
-		t.Fatalf("%s must not contain token_secret", contextName)
-	}
-	for _, value := range data {
-		if text, ok := value.(string); ok && secret != "" && strings.Contains(text, secret) {
-			t.Fatalf("%s contains a sensitive token value", contextName)
-		}
-	}
+	assertAccNoSensitiveValue(t, data, secret, contextName)
 }
 
-func assertAccNoAPIToken(t *testing.T, ctx context.Context, env accEnv, userid string) {
+func assertAccNoSensitiveValue(t *testing.T, value interface{}, secret, contextName string) {
 	t.Helper()
-	client := newAccHTTPClient(t, env)
-	status, body, err := client.do(ctx, http.MethodGet, "/access/users/"+url.PathEscape(userid)+"/token", env.TokenID, env.TokenSecret, nil)
-	if err != nil {
-		t.Fatalf("list password-user tokens: %v", err)
+	if text, ok := value.(string); ok && secret != "" && strings.Contains(text, secret) {
+		t.Fatalf("%s contains a sensitive token value", contextName)
 	}
-	if status != http.StatusOK {
-		t.Fatalf("list password-user tokens status=%d; want %d", status, http.StatusOK)
-	}
-	if strings.Contains(string(body), `"tokenid"`) {
-		t.Fatal("password mode minted an API token")
+	switch nested := value.(type) {
+	case map[string]interface{}:
+		if _, present := nested["token_secret"]; present {
+			t.Fatalf("%s must not contain token_secret", contextName)
+		}
+		for _, child := range nested {
+			assertAccNoSensitiveValue(t, child, secret, contextName)
+		}
+	case []interface{}:
+		for _, child := range nested {
+			assertAccNoSensitiveValue(t, child, secret, contextName)
+		}
 	}
 }
 

@@ -26,6 +26,7 @@ func pathRotateRoot(b *backend) *framework.Path {
 			"confirm_exclusive": {Type: framework.TypeBool, Required: true},
 		},
 		Operations: map[logical.Operation]framework.OperationHandler{
+			logical.ReadOperation: &framework.PathOperation{Callback: b.readRotationState},
 			logical.CreateOperation: &framework.PathOperation{
 				Callback:                    b.rotateRoot,
 				ForwardPerformanceStandby:   true,
@@ -47,6 +48,23 @@ func (b *backend) rotationExistenceCheck(ctx context.Context, req *logical.Reque
 	return entry != nil, err
 }
 
+func (b *backend) readRotationState(ctx context.Context, req *logical.Request, _ *framework.FieldData) (*logical.Response, error) {
+	entry, err := req.Storage.Get(ctx, rotationStorageKey)
+	if err != nil {
+		return nil, fmt.Errorf("proxmox: read rotation state: %w", err)
+	}
+	if entry == nil {
+		return nil, nil
+	}
+	var state rotationState
+	if err := entry.DecodeJSON(&state); err != nil {
+		return nil, fmt.Errorf("proxmox: decode rotation state: %w", err)
+	}
+	return &logical.Response{Data: map[string]interface{}{
+		"status": "recovery-required", "old_token_id": state.OldTokenID, "new_token_id": state.NewTokenID,
+	}}, nil
+}
+
 func splitTokenID(tokenID string) (string, string, error) {
 	idx := strings.LastIndex(tokenID, "!")
 	if idx <= 0 || idx == len(tokenID)-1 {
@@ -65,7 +83,7 @@ func (b *backend) rotateRoot(ctx context.Context, req *logical.Request, d *frame
 	cfg, err := getConfig(ctx, req.Storage)
 	if err != nil || cfg == nil {
 		if err == nil {
-			err = fmt.Errorf("no configuration found")
+			return logical.ErrorResponse("rotate-root requires an existing configuration"), nil
 		}
 		return nil, fmt.Errorf("proxmox: rotate-root: read config: %w", err)
 	}
@@ -86,7 +104,7 @@ func (b *backend) rotateRoot(ctx context.Context, req *logical.Request, d *frame
 	if err != nil {
 		return nil, fmt.Errorf("proxmox: rotate-root: generate token ID: %w", err)
 	}
-	newToken := oldUser + "!" + suffix
+	newToken := oldUser + "!vault-rotation-" + suffix
 	state := rotationState{OldTokenID: cfg.TokenID, NewTokenID: newToken}
 	walID, err := framework.PutWAL(ctx, req.Storage, walTypeRotation, state)
 	if err != nil {
@@ -100,7 +118,7 @@ func (b *backend) rotateRoot(ctx context.Context, req *logical.Request, d *frame
 	if err != nil {
 		return nil, err
 	}
-	secret, err := oldClient.CreateToken(ctx, oldUser, newToken[strings.LastIndex(newToken, "!")+1:])
+	secret, err := oldClient.CreateToken(ctx, oldUser, "vault-rotation-"+suffix)
 	if err != nil {
 		return nil, fmt.Errorf("proxmox: rotate-root: create replacement token: %w", err)
 	}
@@ -111,7 +129,7 @@ func (b *backend) rotateRoot(ctx context.Context, req *logical.Request, d *frame
 	if err != nil {
 		return nil, fmt.Errorf("proxmox: rotate-root: build replacement client: %w", err)
 	}
-	if validationErr := validateReplacement(ctx, replacement); validationErr != nil {
+	if validationErr := validateReplacement(ctx, replacement, req.Storage); validationErr != nil {
 		return nil, fmt.Errorf("proxmox: rotate-root: replacement validation failed: %w", validationErr)
 	}
 	entry, err := logical.StorageEntryJSON("config", &newCfg)
@@ -126,11 +144,10 @@ func (b *backend) rotateRoot(ctx context.Context, req *logical.Request, d *frame
 	if err := replacement.DeleteToken(ctx, oldUser, oldToken); err != nil && !errors.Is(err, pveapi.ErrTokenNotFound) {
 		return nil, fmt.Errorf("proxmox: rotate-root: delete old token: %w", err)
 	}
-	if err := replacement.DeleteToken(ctx, oldUser, oldToken); !errors.Is(err, pveapi.ErrTokenNotFound) {
-		if err == nil {
-			return nil, fmt.Errorf("proxmox: rotate-root: old token deletion could not be confirmed")
-		}
+	if exists, err := replacement.TokenExists(ctx, oldUser, oldToken); err != nil {
 		return nil, fmt.Errorf("proxmox: rotate-root: confirm old token deletion: %w", err)
+	} else if exists {
+		return nil, fmt.Errorf("proxmox: rotate-root: old token deletion could not be confirmed")
 	}
 	if err := req.Storage.Delete(ctx, rotationStorageKey); err != nil {
 		return nil, fmt.Errorf("proxmox: rotate-root: clear rotation state: %w", err)
@@ -149,7 +166,7 @@ func putRotationState(ctx context.Context, storage logical.Storage, state rotati
 	return storage.Put(ctx, entry)
 }
 
-func validateReplacement(ctx context.Context, client pveapi.Client) error {
+func validateReplacement(ctx context.Context, client pveapi.Client, storage logical.Storage) error {
 	if _, err := client.GetVersion(ctx); err != nil {
 		return err
 	}
@@ -157,8 +174,25 @@ func validateReplacement(ctx context.Context, client pveapi.Client) error {
 	if err != nil {
 		return err
 	}
-	if !tree.HasPrivilege("/access/groups", "User.Modify") || !tree.HasPrivilege("/access/groups", "Sys.Audit") {
-		return fmt.Errorf("replacement token lacks required permissions")
+	for _, required := range []struct{ privilege, path string }{
+		{"User.Modify", "/access/groups"}, {"Sys.Audit", "/access/groups"},
+	} {
+		if !tree.HasPrivilege(required.path, required.privilege) {
+			return fmt.Errorf("replacement token lacks %s at %s", required.privilege, required.path)
+		}
+	}
+	roles, err := storage.List(ctx, "roles/")
+	if err != nil {
+		return fmt.Errorf("list roles for replacement validation: %w", err)
+	}
+	for _, name := range roles {
+		role, roleErr := getRole(ctx, storage, name)
+		if roleErr != nil {
+			return roleErr
+		}
+		if role != nil && !tree.HasPrivilege("/access/realm/"+role.Realm, "Realm.AllocateUser") {
+			return fmt.Errorf("replacement token lacks Realm.AllocateUser at /access/realm/%s for role %q", role.Realm, name)
+		}
 	}
 	return nil
 }

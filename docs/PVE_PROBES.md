@@ -25,16 +25,15 @@ not confirmed here is presumed **unverified**.
 
 ---
 
-## Verified token deletion contract
+## Token deletion evidence status
 
-The token-delete probe passed on the target PVE build. `DELETE
-/api2/json/access/users/<userid>/token/<tokenid>` returns HTTP 200 and the
-deleted token subsequently authenticates with HTTP 401. The replacement token
-continues to return HTTP 200. Repeated or missing-token deletion returns HTTP
-500 with body `no such token`. Exact temporary-user cleanup returns HTTP 200,
-and a subsequent missing-user deletion returns HTTP 500 with body `no such
-user`. The client therefore classifies `no such token` separately and uses it
-only for idempotent deletion confirmation.
+No live token-deletion probe was run for this change. The status/body contract
+for `DELETE /access/users/<userid>/token/<tokenid>` and the follow-up absence
+read therefore remains unverified here. The client keeps `no such token`
+classification endpoint-specific and requires an explicit token read to confirm
+absence; it does not infer absence from a successful delete or from an
+unattributed status/body claim. Add a dated probe with the exact PVE build,
+request, status, and body before treating this contract as verified.
 
 ## Part A — Bootstrap the vault-admin user, role, and token
 

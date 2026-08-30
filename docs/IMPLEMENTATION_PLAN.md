@@ -1019,7 +1019,7 @@ recorded a `DeleteUser` for the just-created userid. No live PVE needed.
 | `TestAccWALRollback` | Write config+role → create `nonce := walCommentPrefix + <8-char-random>` → manually `framework.PutWAL(ctx, storage, walTypeUser, walUser{UserID: userid, Nonce: nonce})` → manually `client.CreateUser(userid)` with `comment=nonce` → **invoke `b.walRollback(ctx, req, walTypeUser, walEntryData)` DIRECTLY** (there is NO `PeriodicFunc` on this backend — rollback is registered via `backend.WALRollback`, and in a live Vault it fires on the rollback manager's schedule; the test calls the func directly rather than waiting) → verify `DeleteUser` ran and the user is gone on PVE (assert `GET` returns body "no such user"). Because `walRollback` receives `data interface{}` holding a `map[string]interface{}`, construct the call arg the same JSON-round-tripped way core would (see wal.go decode note). |
 | `TestAccConcurrentIssuance` | Spawn 10 goroutines by default (configurable 1–10 with `PVE_CONCURRENT_WORKERS`), each calls `creds/:role` concurrently → verify all succeed (no collision errors, ErrConflict retry works). Every issued credential is revoked and absence-verified, and WAL rollback cleanup is attempted on all paths. If a disposable/dev cluster cannot safely sustain default load, lower the worker env var rather than weakening the success assertion. |
 | `TestAccDeleteConfigGuard` | Write config → DELETE without `force=true` → assert refused with clear error;<br/>DELETE with `force=true` → assert succeeds and config gone. Also confirms `force` actually reaches the handler as a query param through whatever client the test uses |
-| `TestAccRotateRoot` | With explicit opt-in, use the bootstrap token to create a unique disposable provisioner user in the pre-created rotation group, read back membership, create its `acceptance` token with `privsep=0`, and configure isolated backend storage with that token. Rotate only that token, preserve existing response/secret-redaction assertions, and use exact-user cleanup that deletes the user and verifies absence (cascading old/replacement token removal). |
+| `TestAccRotateRoot` | With explicit opt-in, use the bootstrap token to create a unique disposable provisioner user in the pre-created rotation group, read back membership, create its `acceptance` token with `privsep=0`, and configure isolated backend storage with that token. Rotate only that token, preserve existing response/secret-redaction assertions, and use exact-user cleanup that deletes the user and verifies absence (cascading old/replacement token removal). This test is gated by `PVE_ROTATE_ROOT_ACC=1`; live rotation coverage has not been run in this change. |
 
 **References**: `docs/ARCHITECTURE.md` — Testing Strategy section, Acceptance Tests — authorization contract canary, failure injection, DELETE config guard.
 
@@ -1680,10 +1680,11 @@ actually exists (`docs/PVE_PROBES.md` Probe P0):
   cluster. Editing an existing password role, renew, and revoke are deliberately
   NOT gated, so an upgrade breaks new issuance and new opt-ins while already-issued
   leases stay renewable and revocable and existing roles stay editable. Recording equivalent
-  9.2.10 is not a supported password-mode build. **Evidence note**: no
+  9.2.10 evidence, or dropping 9.2.10 as a supported password-mode build,
+  remains an open decision. **Evidence note**: no
   `GET /version` response body from the 9.2.14 target is recorded in
   `docs/PVE_PROBES.md`; do not treat the build identifier as a recorded API
-  response.
+  response. Capture that response on the next live run.
 - **In scope and implemented**: `mode=password` roles on the `pve` realm;
   engine-generated password supplied on `POST /access/users` (single call);
   no API token minted; renewal extends the PVE `expire` only; revocation

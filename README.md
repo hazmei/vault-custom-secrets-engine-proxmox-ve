@@ -98,7 +98,7 @@ not make the project production-ready.
 | `<mount>/config` | POST, GET, DELETE | Configure Proxmox connection (address, admin token, TLS, default TTLs); GET returns `address`, `tls_skip_verify`, `ca_cert`, `default_ttl`, `default_max_ttl`, `token_id`; `token_secret` never returned; DELETE requires `force=true` as a **data parameter** (not the `vault delete -force` CLI flag — see [Deleting the Configuration](#deleting-the-configuration-forcetrue-is-a-data-parameter-not--force)) — outstanding leases become non-revocable and non-renewable (renewal also loads config to reach PVE, so it fails immediately too; revoke them first) |
 | `<mount>/roles/:name` | POST, GET, LIST, DELETE | Define credential roles with group name, TTLs, user prefix, and `mode` (`token` default, or `password`); DELETE does not revoke outstanding leases |
 | `<mount>/creds/:role` | GET | Issue a new dynamic credential — token mode returns `user_id`, `token_id`, `token_secret`; password mode returns `user_id`, `password` |
-| `<mount>/rotate-root` | `expected_token_id`, `confirm_exclusive` | Automated crash-recoverable rotation of the dedicated provisioner token |
+| `<mount>/rotate-root` | POST | Automated crash-recoverable rotation of the dedicated provisioner token; requires `expected_token_id` and `confirm_exclusive=true`, irreversibly deletes the old token, and can block the mount until recovery if confirmation fails |
 
 ## Requirements / Prerequisites
 
@@ -129,6 +129,12 @@ The engine requires a Proxmox API token with privileges to manage users, tokens,
   pveum acl modify /access/realm/pve --user vault-admin@pve --role VaultProvisioner
   ```
   **IMPORTANT**: The `/access/groups` grant MUST be propagating (`--propagate 1`, which is PVE's default). The parent-path grant at `/access/groups` satisfies the renewal/revocation privilege check (which PVE checks at the parent) AND satisfies the creation per-group check at `/access/groups/<group>` ONLY via propagation. An operator who sets `--propagate 0` gets a broken partial config: user creation will 403 (per-group check unsatisfied) while renew/revoke still work — a confusing partial failure. Always use propagating grants for `/access/groups`.
+
+  Rotation also creates a token on the dedicated provisioner user. The
+  replacement is accepted only after that create succeeds and its permission
+  tree is checked; this repository has no live evidence for a narrower
+  token-management ACL path, so verify token creation with the chosen PVE role
+  before enabling rotation.
 - **Per-operation privilege-path asymmetry** (discovered in live testing):
   - User creation (`POST /access/users` with `groups=<group>`) checks `User.Modify` at the PER-GROUP path `/access/groups/<group>` AND `Realm.AllocateUser` at `/access/realm/<realm>`.
   - User renewal (`PUT /access/users/{userid}` with `expire` only) and revocation (`DELETE /access/users/{userid}`) check `User.Modify` at the PARENT `/access/groups` (NOT per-group).
@@ -325,7 +331,8 @@ secret remains in seal-wrapped config and is never returned or written to
 rotation metadata, WAL, logs, or errors. A durable recovery record retries
 ambiguous cleanup automatically.
 
-Legacy manual rotation is not supported by the engine:
+Manual fallback — use only if `rotate-root` is unavailable or the mount is in
+the documented recovery state:
 
 1. Create a replacement token for the same dedicated provisioner user, again
    with explicit `--privsep 0`.
@@ -356,7 +363,18 @@ Legacy manual rotation is not supported by the engine:
    ```
 
 4. Confirm the config and a controlled lease lifecycle, then revoke/delete the
-   old token out-of-band in Proxmox.
+   old token out-of-band in Proxmox. Keep the rotation state until absence is
+   independently confirmed; never use an unsafe force-clear operation.
+
+If `rotate-root` reports that another rotation is active, read
+`<mount>/rotate-root` to inspect the token IDs and allow the automatic WAL
+rollback manager to retry. Do not retry with a different expected token or edit
+Vault storage. A response after config persistence can still indicate failed
+confirmation; verify the current config and old-token absence before taking
+further action. Rotation requires the same propagating `/access/groups`
+`User.Modify`, `/access/groups` `Sys.Audit`, and each stored role realm's
+`Realm.AllocateUser` privileges as issuance, plus usable token-management
+permission on the provisioner user.
 
 Changing or deleting the configured provisioner token can strand outstanding
 leases: their PVE users and lease tokens remain on the cluster, but the engine

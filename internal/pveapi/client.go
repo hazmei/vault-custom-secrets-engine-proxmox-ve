@@ -89,6 +89,7 @@ type Client interface {
 	// as success for idempotent revocation.
 	DeleteUser(ctx context.Context, userid string) error
 	DeleteToken(ctx context.Context, userid, tokenid string) error
+	TokenExists(ctx context.Context, userid, tokenid string) (bool, error)
 }
 
 // httpClient is the real PVE API client backed by net/http.
@@ -167,6 +168,7 @@ func (c *httpClient) doRequest(
 	method, path string,
 	form url.Values,
 	redactBody bool,
+	tokenEndpoint ...bool,
 ) ([]byte, int, error) {
 	var reqBody io.Reader
 	if form != nil {
@@ -197,6 +199,11 @@ func (c *httpClient) doRequest(
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		classified := classifyPVEError(resp.StatusCode, body)
+		if len(tokenEndpoint) > 0 && tokenEndpoint[0] && classified == nil &&
+			(resp.StatusCode == http.StatusBadRequest || resp.StatusCode == http.StatusInternalServerError) &&
+			strings.Contains(strings.ToLower(string(body)), "no such token") {
+			classified = ErrTokenNotFound
+		}
 		if classified != nil {
 			return nil, resp.StatusCode, classified
 		}
@@ -300,8 +307,6 @@ func classifyPVEError(status int, body []byte) error {
 	case strings.Contains(haystack, "no such user"):
 		// DR-2: user-specific sentinel; revocation treats this as idempotent success.
 		return ErrUserNotFound
-	case strings.Contains(haystack, "no such token"):
-		return ErrTokenNotFound
 	case strings.Contains(haystack, "no such group"):
 		// DR-2: group-specific sentinel; role-write surfaces as "group does not exist".
 		return ErrGroupNotFound
@@ -310,6 +315,16 @@ func classifyPVEError(status int, body []byte) error {
 		return ErrGroupNotFound
 	}
 
+	return nil
+}
+
+func classifyTokenPVEError(status int, body []byte, classified error) error {
+	if classified != nil || (status != http.StatusBadRequest && status != http.StatusInternalServerError) {
+		return classified
+	}
+	if strings.Contains(strings.ToLower(string(body)), "no such token") {
+		return ErrTokenNotFound
+	}
 	return nil
 }
 
@@ -533,16 +548,40 @@ func (c *httpClient) DeleteUser(ctx context.Context, userid string) error {
 	return nil
 }
 
-// DeleteToken deletes one API token. PVE reports an already absent token as
-// HTTP 500 with body "no such token"; callers may use ErrTokenNotFound for
-// idempotent deletion confirmation.
+// DeleteToken deletes one API token. Callers must use TokenExists when they
+// need positive absence confirmation.
 func (c *httpClient) DeleteToken(ctx context.Context, userid, tokenid string) error {
 	path := "/access/users/" + url.PathEscape(userid) + "/token/" + url.PathEscape(tokenid)
-	_, _, err := c.doRequest(ctx, http.MethodDelete, path, nil, true)
+	_, _, err := c.doRequest(ctx, http.MethodDelete, path, nil, true, true)
 	if err != nil {
 		return fmt.Errorf("pveapi: DeleteToken userid=%q tokenid=%q: %w", userid, tokenid, err)
 	}
 	return nil
+}
+
+// TokenExists confirms whether a token remains after deletion by listing the
+// user's tokens. A successful empty list is definitive and does not depend on
+// the unverified absent-token DELETE contract.
+func (c *httpClient) TokenExists(ctx context.Context, userid, tokenid string) (bool, error) {
+	path := "/access/users/" + url.PathEscape(userid) + "/token"
+	body, _, err := c.doRequest(ctx, http.MethodGet, path, nil, true)
+	if err != nil {
+		return false, fmt.Errorf("pveapi: TokenExists userid=%q tokenid=%q: %w", userid, tokenid, err)
+	}
+	var response struct {
+		Data []struct {
+			TokenID string `json:"tokenid"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(body, &response); err != nil {
+		return false, fmt.Errorf("pveapi: TokenExists userid=%q tokenid=%q: parse response: %w", userid, tokenid, err)
+	}
+	for _, token := range response.Data {
+		if token.TokenID == tokenid {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // ensure httpClient implements Client at compile time.
