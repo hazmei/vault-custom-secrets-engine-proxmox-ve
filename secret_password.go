@@ -11,9 +11,10 @@
 //
 //   - Renew: PUT /access/users with expire+groups+enable+append=1. Evidence from
 //     pve-manager/9.2.14/a1480fa6b8d899cb (docs/PVE_PROBES.md Probe P0) confirms
-//     the ORIGINAL password still authenticates after exactly this renewal shape;
-//     9.2.10 has no password evidence. Renewal extends expiry only. It never
-//     rotates and never returns a password.
+//     the ORIGINAL password still authenticates after exactly this renewal shape.
+//     The 9.2.10 raw-API rerun did not exercise the engine end to end, so password
+//     mode remains unsupported there. Renewal extends expiry only. It never rotates
+//     and never returns a password.
 //   - Revoke: idempotent DELETE /access/users/{userid}, cascading to the user's
 //     group memberships and ACL entries.
 //

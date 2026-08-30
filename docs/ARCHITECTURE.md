@@ -1,20 +1,27 @@
 # Proxmox VE Secrets Engine
 
-Vault secrets engine that issues **dynamic Proxmox VE API tokens**. Each
-lease creates a dedicated, throwaway PVE user, adds it to a pre-configured
-PVE group (which the operator has already bound to the desired ACL roles),
-and mints an API token on it. Revocation deletes the user, which cascades
-and removes its token(s), group memberships, and ACL entries in one call.
+Vault secrets engine that issues **dynamic Proxmox VE credentials**: API tokens
+by default on the PVE 9.2.10 token-mode target. Password mode is restricted to
+the exact verified `pve-manager/9.2.14/a1480fa6b8d899cb` build and refused on
+every other build. Each lease creates a
+dedicated, throwaway PVE user and adds it to a pre-configured PVE group (which
+the operator has already bound to the desired ACL roles). Token mode mints an
+API token on the user; password mode supplies an engine-generated password
+during user creation. Revocation deletes the user, which cascades and removes
+its token(s), group memberships, and ACL entries in one call.
 
 ## Service API Summary
 - Base URL: `https://<host>:8006/api2/json`
-- Target version: Proxmox VE 9.2.10
+- Target version: Proxmox VE 9.2.10 (token mode). Password mode requires the
+  exact verified build `pve-manager/9.2.14/a1480fa6b8d899cb` and is refused on
+  any other build, 9.2.10 included.
 - Authentication (engine → Proxmox): API Token header —
   `Authorization: PVEAPIToken=<user>@<realm>!<tokenid>=<secret>`
-- Credential Types: Proxmox API tokens (`tokenid` + `secret`), one per
-  lease, bound to a synthetic per-lease PVE user
-- Lifecycle: full dynamic create/delete — Proxmox supports user and token
-  creation/deletion natively, so no static-secret fallback is needed
+- Credential Types: Proxmox API tokens (`tokenid` + `secret`), or generated
+  passwords on the verified 9.2.14 build only — one credential per lease, bound
+  to a synthetic per-lease PVE user
+- Lifecycle: full dynamic create/delete — token mode creates a user and token;
+  password mode creates a user with a password; revocation deletes the user
 
 ## Implementation and Validation Status
 
@@ -196,12 +203,15 @@ An absent or empty stored `mode` normalizes to `token` in `getRole`, so roles
 written before the field existed — and every lease already issued from them —
 behave exactly as before.
 
-**Verification scope**: password mode has been exercised end to end only on
-`pve-manager/9.2.14/a1480fa6b8d899cb`. The declared target elsewhere in this
-document is `9.2.10/43df2e01f27a1a19`, whose probe evidence predates the feature
-and contains no password results. A `mode=password` role write returns a warning naming the verified
-build so operators do not infer 9.2.10 coverage. Token mode is verified on both
-builds.
+**Verification and support scope**: password mode has been exercised end to end
+only on `pve-manager/9.2.14/a1480fa6b8d899cb`. The declared target elsewhere in
+this document is `9.2.10/43df2e01f27a1a19`. Raw-API password probes were run on
+9.2.10 (Probe P0 rerun, 28 August 2026), but password mode has not been
+exercised end to end through the engine on that build, so PVE 9.2.10 remains
+token-mode only. A `mode=password` role write returns a warning naming the verified build
+so operators do not infer 9.2.10 support. Token mode is verified on both builds.
+The exact 9.2.14 `GET /version` response body remains unrecorded, but the
+runtime exact-build gate is enforced.
 
 `mode=password` is accepted **only for the `pve` realm**. PVE-realm password
 creation, authentication, exact-shape renewal, expiry, disablement, and deletion

@@ -45,7 +45,8 @@ The password credential feature is implemented under a deliberately narrow scope
 Password credentials are supported only for the `pve` realm and only on the exact
 verified build `pve-manager/9.2.14/a1480fa6b8d899cb`. PAM support is explicitly out
 of scope. The PVE 9.2.14 lifecycle acceptance run is complete. Password rotation is
-unsupported.
+unsupported. PVE 9.2.10 is explicitly token-mode only; password support for that
+build is closed as unsupported rather than remaining an open decision.
 
 - The role field is `mode` with values `token` and `password`.
 - An omitted `mode` defaults to `token`, preserving existing role and lease behavior.
@@ -333,6 +334,7 @@ type proxmoxRole struct {
     Group      string `json:"group"`
     UserPrefix string `json:"user_prefix"`
     Realm      string `json:"realm"`
+    Mode       string `json:"mode"` // "token" (default) or "password"
     TTL        int    `json:"ttl"`
     MaxTTL     int    `json:"max_ttl"`
 }
@@ -649,6 +651,7 @@ type proxmoxRole struct {
     Group      string `json:"group"`
     UserPrefix string `json:"user_prefix"`
     Realm      string `json:"realm"`
+    Mode       string `json:"mode"` // "token" (default) or "password"
     TTL        int    `json:"ttl"`
     MaxTTL     int    `json:"max_ttl"`
 }
@@ -1534,7 +1537,9 @@ not run by CI.
 
 ### Phase 6 — Build/Register/Smoke + CI + Docs
 
-**Status**: ⚠️ PARTIALLY COMPLETE (2026-08-20) — `make build`, `make test`,
+**Status**: ⚠️ PARTIALLY COMPLETE (2026-08-20) — implementation and the recorded
+single-node checks are complete; the remaining unchecked items are production-adoption
+verification gates, not implementation defects. `make build`, `make test`,
 and `make lint` passed, and the full real Vault-server lifecycle smoke test
 passed against the disposable `pve-manager/9.2.10/43df2e01f27a1a19` target.
 Development-mode registration through `-dev-plugin-dir=./vault/plugins` and
@@ -1640,7 +1645,7 @@ engine therefore continues to send explicit `append=1` with `expire` +
 
 ## Deferred / Future Work
 
-### Production adoption gates
+### Production-adoption verification gates (operator-run)
 
 - [ ] Build one approved artifact, distribute it to every Vault node, and
   verify identical digest, executable permissions, ownership, and path.
@@ -1659,11 +1664,16 @@ engine therefore continues to send explicit `append=1` with `expire` +
   orphan `vault-*` PVE user was deleted. Do not make production adoption
   depend on this destructive failure-injection test.
 
+These unchecked items are production-adoption verification gates, not
+implementation defects. The destructive failure-injection gate is operator-run
+evidence and should not make production adoption depend on a destructive test.
+
 ### Password Credential Support (IMPLEMENTED under a reduced scope)
 
-**Status (2026-08-29): IMPLEMENTED for the `pve` realm, by explicit operator
-decision. The broader historical P0 proposal remains partial/open; PAM support is
-explicitly out of scope and is not a release blocker for this reduced scope.**
+**Status (2026-08-29): IMPLEMENTED and complete within the shipped supported
+scope: the `pve` realm on the exact verified `pve-manager/9.2.14/a1480fa6b8d899cb`
+build. PAM/password rotation are explicitly out of scope and are not release
+blockers for this scope.**
 
 **Live verification (2026-08-29)** against a disposable
 `pve-manager/9.2.14/a1480fa6b8d899cb` target — note this is a DIFFERENT build
@@ -1679,8 +1689,9 @@ actually exists (`docs/PVE_PROBES.md` Probe P0):
 
 - **Verified build scope (ENFORCED)**: password mode is verified end to end ONLY
   on `pve-manager/9.2.14/a1480fa6b8d899cb`. The declared target
-  `9.2.10/43df2e01f27a1a19` has NO password evidence because its probes predate the
-  feature. The engine gates on this rather than
+  `9.2.10/43df2e01f27a1a19` has raw-API password evidence from the automated
+  Probe P0 rerun on 28 August 2026, but no end-to-end engine lifecycle result;
+  PVE 9.2.10 is explicitly token-mode only. The engine gates on this rather than
   only warning: role write refuses to OPT IN to `mode=password` unless
   `GET /version` reports exactly `version=9.2.14` + `repoid=a1480fa6b8d899cb`
   (`path_roles.go` Step 7c), and `creds/:role` re-checks the live build before
@@ -1691,9 +1702,9 @@ actually exists (`docs/PVE_PROBES.md` Probe P0):
   write would block routine edits to an existing password role on an upgraded
   cluster. Editing an existing password role, renew, and revoke are deliberately
   NOT gated, so an upgrade breaks new issuance and new opt-ins while already-issued
-  leases stay renewable and revocable and existing roles stay editable. Recording equivalent
-  9.2.10 evidence, or dropping 9.2.10 as a supported password-mode build,
-  remains an open decision. **Evidence note**: no
+  leases stay renewable and revocable and existing roles stay editable. Password mode is
+  not supported on 9.2.10, and this support decision is closed.
+  **Evidence note**: no
   `GET /version` response body from the 9.2.14 target is recorded in
   `docs/PVE_PROBES.md`; do not treat the build identifier as a recorded API
   response. Capture that response on the next live run.
@@ -1709,44 +1720,39 @@ actually exists (`docs/PVE_PROBES.md` Probe P0):
   which API-token authentication cannot obtain (Probe P0). Callers who need a
   new password revoke the lease and issue a new credential.
 
-This does NOT change the token-only production adoption gates above, and no
-release gate depends on password support.
+Non-blocking evidence and support gaps remain explicit: the live `append=0`
+replacement control has not been run; live `TestAccRotateRoot` has not been run;
+the raw `GET /version` response body from the verified 9.2.14 build has not been
+captured in `docs/PVE_PROBES.md`; and password length constraints have not been
+re-checked on 9.2.14. Password mode remains unsupported on the 9.2.10 target
+because it lacks an end-to-end engine lifecycle result despite the retained
+raw-API password evidence. These do
+not change the shipped password scope or the token-only production-adoption
+gates above, and no release gate depends on password support.
 
 - [x] **P0 — Live PVE password behavior probe (reduced supported scope)** — DONE
-  - **Note (2026-08-29)**: the verified `pve`-realm lifecycle is complete on
-    `pve-manager/9.2.14/a1480fa6b8d899cb`. PAM is explicitly out of scope and is
-    not a release or implementation blocker. Password rotation remains unsupported.
-  - **Files/scope**: `docs/PVE_PROBES.md`, disposable PVE 9.2.14 target, probe
-    notes/scripts as appropriate; no application code.
-  - **Dependencies**: operator-provided disposable PVE 9.2.14 cluster and
-    credentials; none of the implementation tasks may start before this task is
-    complete.
-  - **Supported scope**: `pve` password credentials on the exact verified build
-    above. PAM and other non-`pve` realms are explicitly outside scope.
-  - **Checklist**: verify password user creation and authentication; determine
-    password rotation/update behavior; verify expiry, disablement, deletion, and
-    interaction with token credentials and the user-level `expire` backstop. Exercise
-    the exact engine renewal shape `expire + groups + enable + append=1`, read the
-    user back, and authenticate with the original password afterward. Probe the
-    supported `pve` realm, recording the exact HTTP status and redacted body for
-    every failure. PAM is explicitly out of scope. Probe the privileges required to create/set a password,
-    recording the exact ACL path, privilege, and propagation flag; compare them with
-    the existing `/access/groups` and `/access/realm/<realm>` checks. Record PVE
-    password minimum and maximum constraints needed by the generator. Determine and
-    record the exact password API call shape: whether the password is supplied on
-    `POST /access/users` or set by a separate password-setting call, including request
-    ordering and response/error behavior. Capture exact status/body behavior
-    throughout and redact all password values from evidence.
-  - **Acceptance**: reproducible probe evidence is recorded in `docs/PVE_PROBES.md`
-    with no password values. The `pve` lifecycle acceptance is complete; PAM
-    evidence is historical and non-blocking.
-  - **Latest validation (29 August 2026)**: the reduced `pve`-realm supported scope is complete; the broader P0 proposal remains partial/open because PAM and password rotation are explicitly out of scope. Automated
-    evidence records PVE password creation, read-back, authentication, exact
-    renewal, expiry, disablement, deletion, token interaction, and 8–64 length
-    constraints. `PUT /access/password` requires a password-authenticated ticket
-    and is not exercisable with the engine's API-token-only authentication, so
-    password rotation is unsupported. See the historical PAM evidence in
-    `docs/PVE_PROBES.md`.
+  - **Status (29 August 2026)**: the `pve`-realm lifecycle is complete on the
+    exact verified `pve-manager/9.2.14/a1480fa6b8d899cb` build. Reproducible,
+    password-redacted evidence is recorded in `docs/PVE_PROBES.md`.
+  - **Completed evidence**: password creation, read-back, authentication,
+    exact renewal with the original password preserved, expiry, disablement,
+    deletion, and token interaction were verified on 9.2.14. The 8–64
+    character constraints were verified on 9.2.10 on 28 August 2026 only
+    (`docs/PVE_PROBES.md` Probe P0); they were not exercised on 9.2.14. The
+    password is supplied on `POST /access/users`; no API token is
+    created. `PUT /access/password` requires a password-authenticated ticket,
+    which API-token authentication cannot obtain, so password rotation is
+    unsupported.
+  - **Scope decision**: password mode is shipped only for the `pve` realm on
+    the exact verified 9.2.14 build. PAM and other non-`pve` realms are out of
+    scope; the historical PAM evidence is retained as non-blocking context.
+  - **Evidence gap**: the raw `GET /version` response body from the 9.2.14
+    target is not yet recorded in `docs/PVE_PROBES.md`; the engine's exact-build
+    gate remains enforced from the live response. The exact ACL privilege path
+    and propagation required specifically for password creation are also not
+    isolated; the probe records the privileges held by the token, not a minimum
+    password-creation requirement. The password length bounds also need a
+    9.2.14 re-check. These remain evidence gaps.
 
 - [x] **P1 — Contract and documentation finalization** — DONE. Locked contract:
   engine-owned generator (`password.go`), `crypto/rand` via `rand.Int` rejection
@@ -1758,34 +1764,6 @@ release gate depends on password support.
   no rotation, ever. Redaction: the password never enters logs, error strings, the
   WAL, `Secret.InternalData`, or `req.Storage` — only Vault core's encrypted lease
   entry, which is outside the backend's control.
-
-- [ ] **P1 — original checklist (retained for reference)**
-  - **Files/scope**: `docs/IMPLEMENTATION_PLAN.md`, `docs/ARCHITECTURE.md`,
-    `README.md`, and any password-specific operator documentation.
-  - **Dependencies**: P0 evidence and review.
-  - **Checklist**: reconcile the confirmed `mode` contract with probe findings;
-    document exact response fields, separate secret type, no-token behavior,
-    one-time password handling, compatibility, and error paths; define migration
-    behavior for existing token roles/leases. Lock password-generator ownership
-    (engine versus PVE), length, charset, `crypto/rand` entropy requirements, and
-    PVE minimum/maximum constraints from P0 before P4 can start. Define redaction
-    requirements for responses, errors, logs, WAL, and `InternalData`. Lock the
-    password API call shape and compensation ordering before P4. If the password is
-    supplied on `POST /access/users`, explicitly treat the credential as live before
-    group read-back and WAL cleanup complete. Any post-create or read-back failure
-    MUST compensate by revoking/deleting the live credential; if deletion fails,
-    retain the nonce-gated WAL entry for rollback. If separate post-create password
-    setting is required, P4 MUST apply the same `DeleteUser` compensation and
-    conditional WAL cleanup rules to password-setting failure. Explicitly decide and
-    lock the password-mode comment read-back policy: retain the token-mode soft
-    warning, or make a nonce mismatch fatal and delete the user before failing
-    issuance. Under the fatal policy, if `DeleteUser` fails after a nonce mismatch,
-    WAL is not an automatic retry path: `walRollback` drops nonce-mismatched entries
-    without deleting the user. Cleanup is therefore bounded by the PVE `expire`
-    lifetime or manual cleanup, as documented in P7. Treat renewal as design intent
-    unless P0 proves the original password still authenticates.
-  - **Acceptance**: the plan, architecture, README, and operator guidance agree;
-    no document claims unsupported PVE behavior or exposes a secret.
 
 - [x] **P2 — Role schema and validation** — DONE (`path_roles.go`: `mode` field, `token`/`password` validation, `getRole` normalizes empty mode to `token`, password-mode realm gate).
   - **Files/scope**: `path_config.go`, `path_roles.go`, privilege documentation and
@@ -1948,24 +1926,6 @@ release gate depends on password support.
     `docs/ARCHITECTURE.md` and `AGENTS.md` as appropriate.
   - **Acceptance**: security review is recorded; operator docs match the shipped
     behavior and probe evidence; no token-only production gate is weakened.
-
----
-
-## Open Assumptions
-
-Minor details for the implementer to confirm or decide:
-
-1. **`hashicorp/vault/sdk` version**: Do NOT hand-write a version into `go.mod` — run `go get -u github.com/hashicorp/vault/sdk github.com/hashicorp/go-hclog && go mod tidy` and take whatever is current. (The SDK signatures this plan depends on — `PutWAL`/`DeleteWAL`, `CalculateTTL`, `Secret.Response` — were verified against v0.9.1 and are long-stable, but re-check them against the resolved version before writing the issuance path.)
-2. **Plugin serve mode**: Use `plugin.ServeMultiplex` for multiplexed gRPC (recommended for newer Vault versions) or `plugin.Serve` for simpler single-protocol serve. With `ServeMultiplex`, do NOT set `TLSProviderFunc`. Confirm Vault version compatibility.
-3. **`golangci-lint` availability**: Use the pinned v2 version via `go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2 run` (the `/v2/` module path is required for v2). The Makefile `lint` target (via `GOLANGCI_LINT_VERSION`) and CI (`.github/workflows/ci.yml`, SHA-pinned `golangci-lint-action`) both pin `v2.12.2` so local and CI agree. **Pin floor reasoning — two paths, same constraint:** (a) *CI action path*: the action downloads a pre-built binary; that binary must have been built with Go >= this module's language version, so the pinned release must satisfy that floor. (b) *`go run`/Makefile path*: `go run` compiles golangci-lint at *golangci-lint's own* go.mod language version (NOT this module's); older releases (e.g. v2.1.6, v2.5.0) had pre-1.25 go directives and REFUSED this module even on Go 1.25.7. v2.12.2's go.mod requires `go >= 1.25.0`, so `go run` selects a >=1.25 toolchain and the resulting binary clears golangci-lint's build-version guard. The pin cannot be lowered below a golangci-lint release whose own go directive is >= this module's Go language version.
-4. **Crockford base32 alphabet**: Confirm charset `0123456789abcdefghjkmnpqrstvwxyz` (Crockford, lowercase, no padding) for random suffix. Implementation may use a library or manual mapping.
-5. **Acceptance test PVE cluster**: Operator must pre-create the test group (`PVE_TEST_GROUP`) and bind it to a test role (e.g., PVEVMAdmin at `/vms/test`) before running acceptance tests. Document this prerequisite in `acceptance_test.go` and `README.md`.
-6. **WALRollbackMinAge tuning**: 5 minutes is a safe default. May tune lower (e.g., 1 minute) if issuance latency is predictably low, or higher (e.g., 10 minutes) if cluster lock contention causes slower provisioning.
-7. **HTTP client timeout**: Choose a reasonable timeout for PVE API calls (e.g., 30 seconds). May make configurable in future.
-8. **`expire` grace**: 60 seconds past the lease end is the starting value for the clock-skew buffer between the Vault host and the PVE cluster. Tune if the two are known to be tightly NTP-synced (lower) or not synced at all (higher).
-9. **`vault delete ... force=true`**: confirm the installed Vault CLI forwards K=V pairs on DELETE as query parameters (≥ 1.11). Otherwise document the curl form as the supported path.
-
-These are low-risk decisions that don't alter the core design.
 
 ---
 

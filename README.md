@@ -1,10 +1,10 @@
 # Proxmox VE Secrets Engine for HashiCorp Vault
 
-A HashiCorp Vault custom secrets engine plugin that issues **dynamic, per-lease Proxmox VE API tokens** with scoped access control and automatic cleanup on revocation.
+A HashiCorp Vault custom secrets engine plugin that issues **dynamic, per-lease Proxmox VE credentials** — API tokens by default on the 9.2.10 target, or passwords only on the exact verified `pve-manager/9.2.14/a1480fa6b8d899cb` build — with scoped access control and automatic cleanup on revocation.
 
 ## Overview
 
-This secrets engine implements Vault's dynamic secrets pattern for Proxmox VE. Each credential lease creates a dedicated, throwaway Proxmox user, adds it to an operator-pre-created PVE group (which the operator has already bound to the desired ACL role(s)), and mints an API token bound to that user. On revocation, a single delete operation removes the user, which cascades to clean up the token, group memberships, and all ACL entries. Orphaned credentials created mid-provision (e.g., from Vault process death or failover) are eventually swept via Vault's Write-Ahead Log (WAL) rollback mechanism.
+This secrets engine implements Vault's dynamic secrets pattern for Proxmox VE. Each credential lease creates a dedicated, throwaway Proxmox user, adds it to an operator-pre-created PVE group (which the operator has already bound to the desired ACL role(s)), and then either mints an API token (token mode, the default) or sets an engine-generated password (password mode, restricted to the exact verified 9.2.14 build). On revocation, a single delete operation removes the user, which cascades to clean up the token, group memberships, and all ACL entries. Orphaned credentials created mid-provision (e.g., from Vault process death or failover) are eventually swept via Vault's Write-Ahead Log (WAL) rollback mechanism.
 
 **Target Platform**: Proxmox VE 9.2.10 for token mode. Password mode is
 supported only on the exact verified build
@@ -643,7 +643,9 @@ Operator notes:
 
 - **Password mode is gated to the exact `pve-manager/9.2.14/a1480fa6b8d899cb`
   build, the only verified build.** The project's token-mode target is 9.2.10,
-  whose probe evidence predates password mode and contains no password results.
+  which is explicitly token-mode only: raw-API password probes were run on
+  9.2.10, but password mode was not exercised end to end through the engine on
+  that build. This support decision is closed, not open.
   The engine enforces this rather than merely warning:
   OPTING IN to `mode=password` is REFUSED unless `GET /version` reports exactly
   `version=9.2.14` and `repoid=a1480fa6b8d899cb`, and `creds/:role` re-checks the

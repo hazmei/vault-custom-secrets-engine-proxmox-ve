@@ -260,7 +260,8 @@ func TestRoleWrite_ModeValidation(t *testing.T) {
 // TestRoleWrite_PasswordModeWarnsAboutVerifiedBuild verifies that opting into
 // password mode surfaces the narrower verification record at the point of
 // opt-in: it is verified end to end only on passwordVerifiedBuild, while the
-// project's declared target (9.2.10) has no password evidence.
+// project's declared target (9.2.10) has raw-API password evidence but no
+// end-to-end engine lifecycle verification and remains unsupported.
 func TestRoleWrite_PasswordModeWarnsAboutVerifiedBuild(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -283,7 +284,7 @@ func TestRoleWrite_PasswordModeWarnsAboutVerifiedBuild(t *testing.T) {
 		t.Errorf("warning must name the verified build %q; got %q", passwordVerifiedBuild, joined)
 	}
 	if !strings.Contains(joined, "9.2.10") {
-		t.Errorf("warning must name the unverified declared target; got %q", joined)
+		t.Errorf("warning must name the declared target that lacks engine-level password verification; got %q", joined)
 	}
 	// The warning is the only surface an operator reads at opt-in time, so it
 	// must list the same three ungated categories as the docs — editing the role
