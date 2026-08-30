@@ -22,7 +22,9 @@ const (
 	// longer write it, but status and recovery remain upgrade-compatible.
 	rotationPhaseConfigPersist = "config-persisted"
 	rotationPhaseDeletingOld   = "deleting-old"
-	rotationStaleAfter         = 5 * time.Minute
+	// Intentionally matches this plugin's explicit WALRollbackMinAge of five
+	// minutes. Changing either threshold requires reviewing the other.
+	rotationStaleAfter = 5 * time.Minute
 )
 
 type rotationState struct {

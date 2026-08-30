@@ -394,7 +394,8 @@ and is the operator's retention consideration, not a leak the engine can close.
 
 **Orphan windows** (live credential with no lease):
 - *Nonce-matched orphan* (crash between `CreateUser` and `DeleteWAL`): cleaned by
-  `walRollback` after `WALRollbackMinAge` (5 min by default); total cleanup
+  `walRollback` after `WALRollbackMinAge` (5 min, explicitly configured by this
+  plugin); total cleanup
   timing is governed by that minimum age plus any rollback retries.
 - *Nonce-mismatched or empty-nonce orphan*: `walRollback` intentionally DROPS the
   WAL entry without deleting the user, so cleanup falls to the PVE `expire`
@@ -621,8 +622,9 @@ that inheritance continuous across rotations.
 `GET <mount>/rotate-root` reports token-ID-only state. `in-progress` means the
 durable state is recent and the rotation may still be active;
 `recovery-required` means the config changed, cleanup/confirmation needs
-recovery, or the state is stale. State older than five minutes, and legacy
-state without a timestamp, is treated conservatively as recovery-required. It
+recovery, or the state is stale. State older than five minutes (the
+plugin-configured `WALRollbackMinAge`), and legacy state without a timestamp,
+is treated conservatively as recovery-required. It
 is diagnostic and never a force-clear operation. If automatic recovery cannot progress, the
 operator may submit `expected_token_id`, `confirm_exclusive=true`, and
 `recovery_token_id` on the same endpoint. The latter must exactly equal one of

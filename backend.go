@@ -85,8 +85,10 @@ func newBackend(ctx context.Context, conf *logical.BackendConfig) (*backend, err
 			[]*framework.Path{pathRotateRoot(b)},
 		),
 
-		Secrets:           []*framework.Secret{secretToken(b), secretPassword(b)},
-		WALRollback:       b.walRollback,
+		Secrets:     []*framework.Secret{secretToken(b), secretPassword(b)},
+		WALRollback: b.walRollback,
+		// Keep this aligned with rotationStaleAfter: both are intentionally five
+		// minutes for this plugin. Changing either requires reviewing the other.
 		WALRollbackMinAge: 5 * time.Minute,
 
 		Invalidate: b.invalidate,
