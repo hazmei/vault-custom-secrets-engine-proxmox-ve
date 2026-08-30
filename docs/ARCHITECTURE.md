@@ -394,7 +394,8 @@ and is the operator's retention consideration, not a leak the engine can close.
 
 **Orphan windows** (live credential with no lease):
 - *Nonce-matched orphan* (crash between `CreateUser` and `DeleteWAL`): cleaned by
-  `walRollback` after `WALRollbackMinAge` (5 min) plus retry time.
+  `walRollback` after `WALRollbackMinAge` (5 min by default); total cleanup
+  timing is governed by that minimum age plus any rollback retries.
 - *Nonce-mismatched or empty-nonce orphan*: `walRollback` intentionally DROPS the
   WAL entry without deleting the user, so cleanup falls to the PVE `expire`
   backstop or manual operator action. The fatal comment-mismatch policy above

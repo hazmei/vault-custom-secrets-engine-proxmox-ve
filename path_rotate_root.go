@@ -17,9 +17,12 @@ const (
 
 	rotationPhaseProvisioning   = "provisioning"
 	rotationPhaseValidationFail = "validation-failed"
-	rotationPhaseConfigPersist  = "config-persisted"
-	rotationPhaseDeletingOld    = "deleting-old"
-	rotationStaleAfter          = 5 * time.Minute
+	// rotationPhaseConfigPersist is retained for states written by versions
+	// that persisted this phase before entering deleting-old. New rotations no
+	// longer write it, but status and recovery remain upgrade-compatible.
+	rotationPhaseConfigPersist = "config-persisted"
+	rotationPhaseDeletingOld   = "deleting-old"
+	rotationStaleAfter         = 5 * time.Minute
 )
 
 type rotationState struct {
@@ -229,9 +232,20 @@ func putRotationState(ctx context.Context, storage logical.Storage, state rotati
 	return storage.Put(ctx, entry)
 }
 
-func validateReplacement(ctx context.Context, client pveapi.Client, storage logical.Storage, _ string) error {
+func validateReplacement(ctx context.Context, client pveapi.Client, storage logical.Storage, oldTokenID string) error {
 	if _, err := client.GetVersion(ctx); err != nil {
 		return err
+	}
+	oldUser, oldToken, err := splitTokenID(oldTokenID)
+	if err != nil {
+		return fmt.Errorf("validate current token for replacement: %w", err)
+	}
+	exists, err := client.TokenExists(ctx, oldUser, oldToken)
+	if err != nil {
+		return fmt.Errorf("validate replacement token-list capability: %w", err)
+	}
+	if !exists {
+		return fmt.Errorf("current configured token %q is absent during replacement validation", oldToken)
 	}
 	tree, err := client.GetPermissions(ctx)
 	if err != nil {

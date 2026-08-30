@@ -35,7 +35,7 @@ func TestRotateRootPersistsReplacementBeforeDeletingOldToken(t *testing.T) {
 		mc.TokenExistsFn = func(_ context.Context, _, _ string) (bool, error) {
 			calls = append(calls, "confirm")
 			existsCalls++
-			return existsCalls == 1, nil
+			return existsCalls == 1 || existsCalls == 2, nil
 		}
 	})
 	if _, err := writeConfig(context.Background(), b, storage, validConfigData()); err != nil {
@@ -48,8 +48,8 @@ func TestRotateRootPersistsReplacementBeforeDeletingOldToken(t *testing.T) {
 	if err != nil || resp == nil || resp.IsError() {
 		t.Fatalf("rotation failed: response=%v err=%v", resp, err)
 	}
-	if len(calls) != 3 || calls[0] != "confirm" || calls[1] != "delete" || calls[2] != "confirm" {
-		t.Fatalf("deletion calls=%v, want confirm, delete, confirm", calls)
+	if len(calls) != 4 || calls[0] != "confirm" || calls[1] != "confirm" || calls[2] != "delete" || calls[3] != "confirm" {
+		t.Fatalf("deletion calls=%v, want confirm, confirm, delete, confirm", calls)
 	}
 	cfg, err := getConfig(context.Background(), storage)
 	if err != nil || cfg.TokenID == "vault-admin@pve!mytoken" || cfg.TokenSecret != "mock-token-secret" {
@@ -67,7 +67,10 @@ func TestRotateRootAcceptsIdempotentDeleteWhenReadConfirmsAbsence(t *testing.T) 
 	existsCalls := 0
 	b, storage := newTestBackend(t, func(mc *pveapi.MockClient) {
 		mc.DeleteTokenFn = func(context.Context, string, string) error { return pveapi.ErrTokenNotFound }
-		mc.TokenExistsFn = func(context.Context, string, string) (bool, error) { existsCalls++; return existsCalls == 1, nil }
+		mc.TokenExistsFn = func(context.Context, string, string) (bool, error) {
+			existsCalls++
+			return existsCalls == 1 || existsCalls == 2, nil
+		}
 	})
 	if _, err := writeConfig(context.Background(), b, storage, validConfigData()); err != nil {
 		t.Fatal(err)
@@ -446,7 +449,7 @@ func TestRotateRootRetainsStateWhenAbsenceConfirmationFails(t *testing.T) {
 		calls := 0
 		mc.TokenExistsFn = func(context.Context, string, string) (bool, error) {
 			calls++
-			return calls == 1 || calls == 2, nil
+			return calls <= 4, nil
 		}
 	})
 	if _, err := writeConfig(context.Background(), b, storage, validConfigData()); err != nil {
@@ -553,12 +556,72 @@ func TestRotateRootTokenListErrorRetainsRecoveryState(t *testing.T) {
 	}
 }
 
+func TestRotateRootReplacementTokenListFailurePreservesOldConfigAndToken(t *testing.T) {
+	ctx := context.Background()
+	oldClient := &pveapi.MockClient{
+		GetPermissionsResult: pveapi.PermissionTree{"/access/groups": {"User.Modify": 1, "Sys.Audit": 1}},
+		CreateTokenResult:    "replacement-secret",
+		TokenExistsFn: func(context.Context, string, string) (bool, error) {
+			return true, nil
+		},
+	}
+	deleteCalls := 0
+	oldClient.DeleteTokenFn = func(context.Context, string, string) error {
+		deleteCalls++
+		return nil
+	}
+	replacementClient := &pveapi.MockClient{
+		GetPermissionsResult: pveapi.PermissionTree{"/access/groups": {"User.Modify": 1, "Sys.Audit": 1}},
+		TokenExistsFn: func(context.Context, string, string) (bool, error) {
+			return false, errors.New("replacement token-list permission denied")
+		},
+	}
+	b, storage := newTestBackend(t, nil)
+	b.newClient = func(cfg *proxmoxConfig) (pveapi.Client, error) {
+		if cfg.TokenSecret == "replacement-secret" {
+			return replacementClient, nil
+		}
+		return oldClient, nil
+	}
+	if _, err := writeConfig(ctx, b, storage, validConfigData()); err != nil {
+		t.Fatal(err)
+	}
+	_, err := b.HandleRequest(ctx, &logical.Request{Operation: logical.UpdateOperation, Path: "rotate-root", Storage: storage, Data: map[string]interface{}{
+		"expected_token_id": "vault-admin@pve!mytoken", "confirm_exclusive": true,
+	}})
+	if err == nil || !strings.Contains(err.Error(), "replacement validation failed") {
+		t.Fatalf("replacement token-list failure should abort validation: %v", err)
+	}
+	cfg, cfgErr := getConfig(ctx, storage)
+	if cfgErr != nil || cfg == nil || cfg.TokenID != "vault-admin@pve!mytoken" || cfg.TokenSecret != "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee" {
+		t.Fatalf("old config changed after replacement validation failure: cfg=%+v err=%v", cfg, cfgErr)
+	}
+	if deleteCalls != 0 {
+		t.Fatalf("old token was deleted before replacement validation completed: %d calls", deleteCalls)
+	}
+	stateEntry, stateErr := storage.Get(ctx, rotationStorageKey)
+	if stateErr != nil || stateEntry == nil {
+		t.Fatalf("rotation state was not retained: entry=%v err=%v", stateEntry, stateErr)
+	}
+	var state rotationState
+	if decodeErr := stateEntry.DecodeJSON(&state); decodeErr != nil {
+		t.Fatal(decodeErr)
+	}
+	if state.WALID == "" {
+		t.Fatal("rotation state must retain its WAL ID")
+	}
+	walEntry, walErr := framework.GetWAL(ctx, storage, state.WALID)
+	if walErr != nil || walEntry == nil {
+		t.Fatalf("rotation WAL was not retained: entry=%v err=%v", walEntry, walErr)
+	}
+}
+
 func TestRotateRootPostDeleteUserNotFoundConfirmsAbsence(t *testing.T) {
 	checks := 0
 	b, storage := newTestBackend(t, func(mc *pveapi.MockClient) {
 		mc.TokenExistsFn = func(context.Context, string, string) (bool, error) {
 			checks++
-			if checks == 1 {
+			if checks <= 2 {
 				return true, nil
 			}
 			return false, pveapi.ErrUserNotFound

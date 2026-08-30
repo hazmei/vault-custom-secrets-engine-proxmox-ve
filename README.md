@@ -372,8 +372,9 @@ If `rotate-root` reports another rotation, GET distinguishes `in-progress`
 `recovery-required` (config changed, cleanup/confirmation needs recovery, or
 the state is stale). Legacy state without a timestamp is treated
 conservatively as recovery-required. Allow the automatic WAL rollback manager
-to retry before using the guarded operation. Do not retry with a different
-expected token or edit Vault storage.
+to retry before using the guarded operation. The retry timing is governed by
+`WALRollbackMinAge` (5 minutes by default) plus rollback retries. Do not retry
+with a different expected token or edit Vault storage.
 Rotation requires the same propagating `/access/groups`
 `User.Modify`, `/access/groups` `Sys.Audit`, and each stored role realm's
 `Realm.AllocateUser` privileges as issuance, plus usable token-management
