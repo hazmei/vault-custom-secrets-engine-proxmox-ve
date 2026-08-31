@@ -1537,18 +1537,23 @@ not run by CI.
 
 ### Phase 6 — Build/Register/Smoke + CI + Docs
 
-**Status**: ⚠️ PARTIALLY COMPLETE — implementation and the recorded single-node
-checks are complete; the remaining unchecked items are production-adoption
-verification gates, not implementation defects. `make build`, `make test`, and
-`make lint` passed, and the full real Vault-server lifecycle smoke test passed
-against the disposable `pve-manager/9.2.10/43df2e01f27a1a19` target.
-Development-mode registration through `-dev-plugin-dir=./vault/plugins` and
-enablement were verified. Production-style plugin catalog registration with
-`vault plugin register -sha256=<hash>`, artifact distribution, and per-node
-artifact verification require operator-recorded evidence; no such evidence is
-recorded in this repository. Standby-to-active forwarding, controlled failover,
-single-node restart recovery, and cross-node restart recovery remain unverified.
-See the trackable deferred gates below.
+**Status**: ⚠️ PARTIALLY COMPLETE — implementation and the recorded
+disposable-target checks are complete; the remaining unchecked items are
+production-adoption verification gates, not implementation defects. Recorded
+evidence through
+2026-08-20 confirms that `make build`, `make test`, and `make lint` passed, and
+that the full real Vault-server lifecycle smoke test passed against the
+disposable `pve-manager/9.2.10/43df2e01f27a1a19` target. Development-mode
+registration through `-dev-plugin-dir=./vault/plugins` and enablement were
+verified.
+
+The prior undated single-node catalog-registration record is withdrawn: it was
+unsubstantiated and inadequately recorded. It must be rerun with the required
+operator evidence. Production artifact distribution, per-node verification,
+and catalog registration remain operator-recorded requirements; no production
+evidence is currently recorded in this repository. Standby-to-active
+forwarding, controlled failover, single-node restart recovery, and cross-node
+restart recovery remain unverified. See the trackable deferred gates below.
 Therefore Phase 6 is not complete.
 
 The operator-facing production verification procedure is maintained in
@@ -1608,10 +1613,8 @@ changes were made outside the disposable target.
 **Acceptance Criteria**:
 - Clean build (`make build` succeeds)
 - Plugin auto-registers and enables through `-dev-plugin-dir` (verified)
-- [ ] Operator records production catalog registration, artifact distribution,
-  and per-node verification evidence: node count and identities, artifact
-  identity/commit, SHA-256 digest, target cluster, exact command or change
-  ticket, ownership, mode, absolute path, and evidence timezone.
+- Operator records production catalog registration, artifact distribution, and
+  per-node verification evidence as specified by the deferred gates below.
 - Full issue→use→renew→revoke smoke test passes through a real `vault server`
   plus registered plugin binary with required live PVE configuration
 - Stored config can be force-deleted and the cached PVE client is invalidated
@@ -1651,14 +1654,13 @@ engine therefore continues to send explicit `append=1` with `expire` +
   count and identities, artifact identity/commit, SHA-256 digest, target cluster,
   exact command or change ticket, ownership, mode, absolute path, and evidence
   timezone.
-- [ ] Register the plugin in the production catalog with the verified digest;
-  verify catalog and mount persistence across a single-node restart. Record the
-  cluster, node count, digest, exact command or change ticket, and timestamp with
-  timezone.
+- [ ] Register the plugin in the production catalog with the verified digest.
+  Record the cluster, node count, digest, exact command or change ticket, and
+  timestamp with timezone.
 - [ ] Verify standby-to-active forwarding before any PVE mutation, controlled
   failover, and issue/renew/revoke through the cluster address after failover.
-- [ ] Verify single-node restart recovery for leases, WAL cleanup, PVE users/
-  tokens, catalog state, mount state, and audit evidence.
+- [ ] Verify single-node restart recovery for leases, WAL cleanup, PVE
+  users/tokens, catalog and mount state, and audit evidence.
 - [ ] Verify cross-node restart recovery for leases, WAL cleanup, PVE users/tokens,
   catalog state, mount state, and audit evidence across nodes.
 - [ ] On an approved disposable target, inject a failure between WAL creation

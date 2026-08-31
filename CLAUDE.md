@@ -37,12 +37,12 @@ Recorded validation (2026-08-20) against disposable PVE
 `server -dev` plugin auto-registration with
 `-dev-plugin-dir=./vault/plugins`, engine enablement, and the full real-Vault
 issue/use/renew/revoke lifecycle. The required positive authorization canary
-also passed. Production artifact distribution, per-node verification, and
-production-style catalog registration are operator-recorded requirements; no
-such production evidence is recorded in this repository. Standby-to-active
-forwarding, controlled failover, single-node restart recovery, and cross-node
-restart recovery remain unverified, so do not describe the project as
-production-ready. See `docs/IMPLEMENTATION_PLAN.md` for the canonical gates.
+also passed. Operator-recorded requirements are artifact distribution, per-node
+verification, and catalog registration; no production evidence is currently
+recorded in this repository. Standby-to-active forwarding,
+controlled failover, single-node restart recovery, and cross-node restart
+recovery remain unverified, so do not describe the project as production-ready.
+See `docs/IMPLEMENTATION_PLAN.md` for the canonical gates.
 Optional insufficient-privilege, direct-ACL,
 and negative-authorization canaries may be skipped only when their documented prerequisites
 are unset. The opt-in `TestAccPasswordLifecycle` additionally skips when the target is not

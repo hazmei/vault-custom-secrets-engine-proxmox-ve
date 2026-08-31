@@ -29,16 +29,16 @@ The authoritative phase and deferred-review status is maintained in
 `docs/IMPLEMENTATION_PLAN.md`: Phases 0–5 are complete, while Phase 6 is
 **partially complete**. Development-mode registration via
 `-dev-plugin-dir` and the real Vault lifecycle smoke test are verified.
-Production artifact distribution, per-node verification, and catalog registration
-are operator-recorded requirements; no production evidence is recorded in this
-repository. Phase 6 remains partially complete because standby-to-active
-forwarding, controlled failover, single-node restart recovery, and cross-node
-restart recovery are still unverified. DR-1 through DR-6
+Operator-recorded requirements are artifact distribution, per-node verification,
+and catalog registration; no production evidence is currently recorded in this
+repository. Phase 6 remains partially complete because
+standby-to-active forwarding, controlled failover, single-node restart recovery,
+and cross-node restart recovery are still unverified. DR-1 through DR-6
 are complete, and no deferred review items remain. The required positive
 authorization canary passed, while the optional insufficient-privilege,
 direct-ACL, and negative-authorization canaries were explicitly skipped on
-2026-08-20 because their optional prerequisites were unset. These skips do
-not constitute completed tests.
+2026-08-20 because their optional prerequisites were unset. These skips do not
+constitute completed tests.
 
 **Production operations reference:** The focused
 [Production Vault Verification Procedure](PRODUCTION_VERIFICATION.md) is the
@@ -49,8 +49,9 @@ paths, mandatory propagation, one-time token secret handling, manual token
 rotation, and stranded-lease warnings. Both are distinct from the disposable
 acceptance setup. The documented production-style Vault installation commands
 must not be treated as evidence of artifact distribution, catalog registration,
-restart recovery, HA forwarding, or failover behavior. This document remains authoritative for design and security
-behavior; the implementation plan remains authoritative for current status.
+restart recovery, HA forwarding, or failover behavior. This document remains
+authoritative for design and security behavior; the implementation plan remains
+authoritative for current status.
 
 ## Configuration
 

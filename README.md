@@ -48,13 +48,13 @@ prerequisite and ran because the target was the verified
 operator choice. Neither kind of skip is completed coverage. Evidence:
 `docs/PVE_PROBES.md`.
 
-Production artifact distribution, per-node verification, and production-style
-catalog registration are operator-recorded requirements; no such production
-evidence is recorded in this repository. Standby-to-active forwarding, controlled
-failover, single-node restart recovery, and cross-node restart recovery remain
-unverified, so this project must not be treated as production-ready based on the
-validation above. See the [implementation plan](docs/IMPLEMENTATION_PLAN.md) for
-the canonical gates. Optional insufficient-privilege, direct-ACL, and
+Operator-recorded requirements are artifact distribution, per-node verification,
+and catalog registration; no production evidence is currently recorded in this
+repository. Standby-to-active forwarding, controlled failover,
+single-node restart recovery, and cross-node restart recovery remain unverified,
+so this project must not be treated as production-ready based on the validation
+above. See the [implementation plan](docs/IMPLEMENTATION_PLAN.md) for the
+canonical gates. Optional insufficient-privilege, direct-ACL, and
 negative-authorization canaries were skipped where their separately
 documented prerequisites were unset; those skips are not completed coverage. The
 standalone password lifecycle test is governed by the separate verified-build condition
@@ -462,8 +462,9 @@ unavailable; releases include darwin binaries, so operators verifying on macOS
 need it.
 
 Releases do not change the project's validation status: artifact distribution,
-per-node verification, production-style catalog registration, restart recovery,
-and HA gates remain operator-recorded requirements. Releases are marked as
+per-node verification, and catalog registration remain operator-recorded
+requirements. Forwarding, failover, single-node restart recovery, and
+cross-node restart recovery remain unverified. Releases are marked as
 pre-releases by default.
 
 For local development, start Vault with the plugin directory. Vault
@@ -547,11 +548,10 @@ fi
 For this production-style path, provide `VAULT_ADDR` and an authenticated
 `VAULT_TOKEN` for the target Vault server before running the CLI commands.
 
-The commands above are an operator procedure, not recorded evidence. Record the
-artifact, digest, node, cluster, command or change ticket, ownership, mode, path,
-and timestamp with timezone in the approved change record. Standby-to-active
-forwarding, controlled failover, single-node restart recovery, and cross-node
-restart recovery remain unverified; see the [implementation plan](docs/IMPLEMENTATION_PLAN.md).
+The commands above are an operator procedure, not recorded evidence. Use the
+[production verification procedure](docs/PRODUCTION_VERIFICATION.md) and the
+[implementation plan](docs/IMPLEMENTATION_PLAN.md) for the authoritative
+evidence requirements and remaining gates.
 
 ## Configuration Example
 

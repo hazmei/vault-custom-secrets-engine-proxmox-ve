@@ -37,11 +37,11 @@ full command output containing them.
 This is a verification procedure, not a production-readiness claim. The
 repository's prior local `vault server -dev` test does **not** prove production
 catalog registration, persistence, HA forwarding, controlled failover, or
-filesystem distribution and permissions. Production artifact distribution,
-per-node verification, catalog registration, restart recovery, and HA checks
-remain operator-recorded requirements; no production evidence is recorded in
-this repository. PVE lifecycle checks still require a safe disposable or
-explicitly approved target.
+filesystem distribution and permissions. Operator-recorded requirements are
+artifact distribution, per-node verification, and catalog registration.
+Forwarding, failover, single-node restart recovery, and cross-node restart
+recovery remain unverified. PVE lifecycle checks still require a safe
+disposable or explicitly approved target.
 
 ## Prerequisites
 
@@ -542,9 +542,6 @@ the change ticket.
 
 Run these checks with the cluster owners and an approved failure plan:
 
-This section remains a required operator check; run and record its evidence for
-the target cluster.
-
 1. Identify the active and standby nodes. Confirm the enabled mount and plugin
    catalog entry are visible through the cluster API, and that every node has
    the same binary digest.
@@ -597,15 +594,15 @@ the plugin is missing on a node, the digest differs, or cleanup is incomplete.
 ## Limitations and non-goals
 
 - This document does not certify production readiness, a particular Vault
-  version, or a PVE cluster configuration. Artifact distribution, per-node
-  verification, production catalog registration, restart recovery, and HA
-  checks remain operator-recorded requirements; no production evidence is
-  recorded in this repository.
+  version, or a PVE cluster configuration. Operator-recorded requirements are
+  artifact distribution, per-node verification, and catalog registration.
+  Forwarding, failover, single-node restart recovery, and cross-node restart
+  recovery remain unverified; no production evidence is recorded in this
+  repository.
 - A local `vault server -dev` run with `-dev-plugin-dir` auto-registers plugins
   and does not prove production catalog registration, persistent storage,
-  filesystem distribution/permissions, multi-node HA forwarding, failover,
-  or restart recovery generally, including single-node restart recovery and
-  cross-node restart recovery.
+  filesystem distribution/permissions, multi-node HA forwarding, failover, or
+  restart recovery.
 - PVE lifecycle operations are destructive external mutations. Unit tests and
   local Vault tests do not prove production PVE behavior; use a safe disposable
   or explicitly approved target for issue/use/renew/revoke checks.
