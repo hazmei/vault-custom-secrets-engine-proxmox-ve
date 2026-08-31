@@ -1537,7 +1537,7 @@ not run by CI.
 
 ### Phase 6 — Build/Register/Smoke + CI + Docs
 
-**Status**: ⚠️ PARTIALLY COMPLETE — implementation and the recorded
+**Status (2026-08-20)**: ⚠️ PARTIALLY COMPLETE — implementation and the recorded
 disposable-target checks are complete; the remaining unchecked items are
 production-adoption verification gates, not implementation defects. Recorded
 evidence through
