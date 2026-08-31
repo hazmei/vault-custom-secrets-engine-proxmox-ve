@@ -48,13 +48,13 @@ prerequisite and ran because the target was the verified
 operator choice. Neither kind of skip is completed coverage. Evidence:
 `docs/PVE_PROBES.md`.
 
-Operator-recorded requirements are artifact distribution, per-node verification,
-and catalog registration; no production evidence is currently recorded in this
-repository. Standby-to-active forwarding, controlled failover,
-single-node restart recovery, and cross-node restart recovery remain unverified,
-so this project must not be treated as production-ready based on the validation
-above. See the [implementation plan](docs/IMPLEMENTATION_PLAN.md) for the
-canonical gates. Optional insufficient-privilege, direct-ACL, and
+Production artifact distribution, per-node verification, catalog registration,
+standby-to-active forwarding, controlled failover, single-node restart recovery,
+and cross-node restart recovery remain operator-run verification requirements;
+no production evidence is currently recorded in this repository. This project
+must not be treated as production-ready based on the validation above. See the
+[implementation plan](docs/IMPLEMENTATION_PLAN.md) for the canonical gates.
+Optional insufficient-privilege, direct-ACL, and
 negative-authorization canaries were skipped where their separately
 documented prerequisites were unset; those skips are not completed coverage. The
 standalone password lifecycle test is governed by the separate verified-build condition
@@ -461,10 +461,8 @@ the same one `scripts/verify-plugin-artifact.sh` names when `sha256sum` is
 unavailable; releases include darwin binaries, so operators verifying on macOS
 need it.
 
-Releases do not change the project's validation status: artifact distribution,
-per-node verification, and catalog registration remain operator-recorded
-requirements. Forwarding, failover, single-node restart recovery, and
-cross-node restart recovery remain unverified. Releases are marked as
+Releases do not change the project's validation status; see the [implementation
+plan](docs/IMPLEMENTATION_PLAN.md) for the current gates. Releases are marked as
 pre-releases by default.
 
 For local development, start Vault with the plugin directory. Vault

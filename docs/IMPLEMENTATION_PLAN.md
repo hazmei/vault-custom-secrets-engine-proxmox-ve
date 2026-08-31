@@ -1539,21 +1539,20 @@ not run by CI.
 
 **Status (2026-08-20)**: ⚠️ PARTIALLY COMPLETE — implementation and the recorded
 disposable-target checks are complete; the remaining unchecked items are
-production-adoption verification gates, not implementation defects. Recorded
-evidence through
-2026-08-20 confirms that `make build`, `make test`, and `make lint` passed, and
-that the full real Vault-server lifecycle smoke test passed against the
-disposable `pve-manager/9.2.10/43df2e01f27a1a19` target. Development-mode
-registration through `-dev-plugin-dir=./vault/plugins` and enablement were
-verified.
+production-adoption verification gates, not implementation defects. `make build`,
+`make test`, and `make lint` passed, and the full real Vault-server lifecycle
+smoke test passed against the disposable
+`pve-manager/9.2.10/43df2e01f27a1a19` target. Development-mode registration
+through `-dev-plugin-dir=./vault/plugins` and enablement were verified.
 
 The prior undated single-node catalog-registration record is withdrawn: it was
-unsubstantiated and inadequately recorded. It must be rerun with the required
-operator evidence. Production artifact distribution, per-node verification,
-and catalog registration remain operator-recorded requirements; no production
-evidence is currently recorded in this repository. Standby-to-active
-forwarding, controlled failover, single-node restart recovery, and cross-node
-restart recovery remain unverified. See the trackable deferred gates below.
+unsubstantiated and inadequately recorded. Production catalog registration must
+be rerun and recorded with the operator evidence required by the deferred gates
+below. Production artifact distribution, per-node verification, catalog
+registration, standby-to-active forwarding, controlled failover, single-node
+restart recovery, and cross-node restart recovery remain operator-run
+verification requirements; no production evidence is currently recorded in this
+repository. See the trackable deferred gates below.
 Therefore Phase 6 is not complete.
 
 The operator-facing production verification procedure is maintained in
@@ -1651,18 +1650,20 @@ engine therefore continues to send explicit `append=1` with `expire` +
 
 - [ ] Build one approved artifact, distribute it to every Vault node, and verify
   identical digest, executable permissions, ownership, and path. Record the node
-  count and identities, artifact identity/commit, SHA-256 digest, target cluster,
-  exact command or change ticket, ownership, mode, absolute path, and evidence
-  timezone.
+  count and identities, artifact identity/commit, SHA-256 digest, target
+  cluster, exact command or change ticket, ownership, mode, absolute path, and
+  evidence timezone.
 - [ ] Register the plugin in the production catalog with the verified digest.
-  Record the cluster, node count, digest, exact command or change ticket, and
-  timestamp with timezone.
+  An earlier undated single-node record was withdrawn as unsubstantiated (see
+  the Phase 6 status); this must be rerun, not restored. Record the cluster,
+  node count, digest, exact command or change ticket, and timestamp with
+  timezone.
 - [ ] Verify standby-to-active forwarding before any PVE mutation, controlled
   failover, and issue/renew/revoke through the cluster address after failover.
 - [ ] Verify single-node restart recovery for leases, WAL cleanup, PVE
-  users/tokens, catalog and mount state, and audit evidence.
-- [ ] Verify cross-node restart recovery for leases, WAL cleanup, PVE users/tokens,
-  catalog state, mount state, and audit evidence across nodes.
+  users/tokens, catalog state, mount state, and audit evidence.
+- [ ] Verify cross-node restart recovery across nodes for leases, WAL cleanup,
+  PVE users/tokens, catalog state, mount state, and audit evidence.
 - [ ] On an approved disposable target, inject a failure between WAL creation
   and cleanup, then record rollback-manager evidence that the nonce-matched
   orphan `vault-*` PVE user was deleted. Do not make production adoption

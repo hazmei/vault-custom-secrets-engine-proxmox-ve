@@ -29,11 +29,13 @@ The authoritative phase and deferred-review status is maintained in
 `docs/IMPLEMENTATION_PLAN.md`: Phases 0–5 are complete, while Phase 6 is
 **partially complete**. Development-mode registration via
 `-dev-plugin-dir` and the real Vault lifecycle smoke test are verified.
-Operator-recorded requirements are artifact distribution, per-node verification,
-and catalog registration; no production evidence is currently recorded in this
-repository. Phase 6 remains partially complete because
+Production artifact distribution, per-node verification, catalog registration,
 standby-to-active forwarding, controlled failover, single-node restart recovery,
-and cross-node restart recovery are still unverified. DR-1 through DR-6
+and cross-node restart recovery remain operator-run verification requirements;
+no production evidence is currently recorded in this repository. Phase 6
+remains partially complete because standby-to-active forwarding, controlled
+failover, single-node restart recovery, and cross-node restart recovery are
+still unverified. DR-1 through DR-6
 are complete, and no deferred review items remain. The required positive
 authorization canary passed, while the optional insufficient-privilege,
 direct-ACL, and negative-authorization canaries were explicitly skipped on

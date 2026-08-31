@@ -34,14 +34,15 @@ full command output containing them.
   mount state. Stop if the target is not disposable for the PVE lifecycle
   portion or if cleanup cannot be guaranteed.
 
-This is a verification procedure, not a production-readiness claim. The
-repository's prior local `vault server -dev` test does **not** prove production
-catalog registration, persistence, HA forwarding, controlled failover, or
-filesystem distribution and permissions. Operator-recorded requirements are
-artifact distribution, per-node verification, and catalog registration.
-Forwarding, failover, single-node restart recovery, and cross-node restart
-recovery remain unverified. PVE lifecycle checks still require a safe
-disposable or explicitly approved target.
+This is a verification procedure, not a production-readiness claim. No
+production evidence is currently recorded in this repository. The prior local
+`vault server -dev` test does **not** prove production catalog registration,
+persistent storage, filesystem distribution/permissions, multi-node HA
+forwarding, controlled failover, or restart recovery. Production artifact
+distribution, per-node verification, catalog registration, standby-to-active
+forwarding, controlled failover, single-node restart recovery, and cross-node
+restart recovery remain operator-run verification requirements. PVE lifecycle
+checks still require a safe disposable or explicitly approved target.
 
 ## Prerequisites
 
@@ -594,15 +595,15 @@ the plugin is missing on a node, the digest differs, or cleanup is incomplete.
 ## Limitations and non-goals
 
 - This document does not certify production readiness, a particular Vault
-  version, or a PVE cluster configuration. Operator-recorded requirements are
-  artifact distribution, per-node verification, and catalog registration.
-  Forwarding, failover, single-node restart recovery, and cross-node restart
-  recovery remain unverified; no production evidence is recorded in this
-  repository.
-- A local `vault server -dev` run with `-dev-plugin-dir` auto-registers plugins
-  and does not prove production catalog registration, persistent storage,
-  filesystem distribution/permissions, multi-node HA forwarding, failover, or
-  restart recovery.
+  version, or a PVE cluster configuration. Production artifact distribution,
+  per-node verification, catalog registration, standby-to-active forwarding,
+  controlled failover, single-node restart recovery, and cross-node restart
+  recovery remain operator-run verification requirements; no production
+  evidence is currently recorded in this repository.
+- The local `vault server -dev` check described above auto-registers plugins
+  with `-dev-plugin-dir`; it does not prove production catalog registration,
+  persistent storage, filesystem distribution/permissions, multi-node HA
+  forwarding, failover, or restart recovery.
 - PVE lifecycle operations are destructive external mutations. Unit tests and
   local Vault tests do not prove production PVE behavior; use a safe disposable
   or explicitly approved target for issue/use/renew/revoke checks.
