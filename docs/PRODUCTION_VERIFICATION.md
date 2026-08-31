@@ -36,11 +36,12 @@ full command output containing them.
 
 This is a verification procedure, not a production-readiness claim. The
 repository's prior local `vault server -dev` test does **not** prove production
-catalog registration, persistence, HA forwarding, failover recovery, or
+catalog registration, persistence, HA forwarding, controlled failover, or
 filesystem behavior. A separate prior single-node non-dev run covered catalog
 registration with a matching digest and catalog/mount persistence across a
-restart, and nothing beyond that: HA forwarding, failover recovery, and
-multi-node filesystem distribution remain unproven. PVE lifecycle checks still require a safe disposable or
+restart. Artifact distribution and per-node artifact verification were completed
+on 2026-09-01. HA forwarding, controlled failover, and cross-node restart
+recovery remain unproven. PVE lifecycle checks still require a safe disposable or
 explicitly approved target.
 
 ## Prerequisites
@@ -146,6 +147,11 @@ provisioner token as high-impact, monitor its user/group mutations, and do
 not describe this setup as per-group isolation or risk-free least privilege.
 
 ## 1. Build and distribute one verified artifact
+
+**Recorded status (2026-09-01): COMPLETE.** One approved artifact was distributed
+to every Vault node, and each node passed independent verification of the digest,
+executable permissions, ownership, and plugin path. The HA forwarding, controlled
+failover, and cross-node restart-recovery checks in section 11 remain incomplete.
 
 Confirm the intended absolute `plugin_directory` on every Vault node before
 transferring the artifact; step 2 applies that path to the effective Vault
@@ -590,12 +596,13 @@ the plugin is missing on a node, the digest differs, or cleanup is incomplete.
 
 - This document does not certify production readiness, a particular Vault
   version, or a PVE cluster configuration. The repository's recorded
-  production-style registration status covers a single-node non-dev Vault only;
-  multi-node distribution, HA forwarding, failover, and cross-node restart
-  recovery remain unverified until an operator completes this procedure.
+  production-style registration status covers a single-node non-dev Vault, while
+  artifact distribution and per-node artifact verification were completed on
+  2026-09-01. HA forwarding, controlled failover, and cross-node restart
+  recovery remain unverified until an operator completes those checks.
 - A local `vault server -dev` run with `-dev-plugin-dir` auto-registers plugins
   and does not prove production catalog registration, persistent storage,
-  multi-node HA forwarding, failover, or filesystem distribution/permissions.
+  multi-node HA forwarding, failover, or cross-node restart recovery.
 - PVE lifecycle operations are destructive external mutations. Unit tests and
   local Vault tests do not prove production PVE behavior; use a safe disposable
   or explicitly approved target for issue/use/renew/revoke checks.

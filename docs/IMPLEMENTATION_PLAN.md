@@ -1537,7 +1537,7 @@ not run by CI.
 
 ### Phase 6 — Build/Register/Smoke + CI + Docs
 
-**Status**: ⚠️ PARTIALLY COMPLETE (2026-08-20) — implementation and the recorded
+**Status**: ⚠️ PARTIALLY COMPLETE (2026-09-01) — implementation and the recorded
 single-node checks are complete; the remaining unchecked items are production-adoption
 verification gates, not implementation defects. `make build`, `make test`,
 and `make lint` passed, and the full real Vault-server lifecycle smoke test
@@ -1547,9 +1547,10 @@ enablement were verified. Production-style plugin catalog registration with
 `vault plugin register -sha256=<hash>` was separately verified (previously,
 undated) on a single-node non-dev Vault: the catalog entry's digest matched the
 recorded artifact digest, and the catalog entry and mount persisted across a
-Vault restart. That run covered a single node only; multi-node artifact
-distribution, standby-to-active forwarding, failover, and cross-node restart
-recovery remain unverified. See the trackable deferred gates below.
+Vault restart. Artifact distribution and per-node artifact verification were
+completed on 2026-09-01. Standby-to-active forwarding, controlled failover, and
+cross-node restart recovery remain unverified. See the trackable deferred gates
+below.
 Therefore Phase 6 is not complete.
 
 The operator-facing production verification procedure is maintained in
@@ -1611,8 +1612,10 @@ changes were made outside the disposable target.
 - Plugin auto-registers and enables through `-dev-plugin-dir` (verified)
 - Production catalog registration with a verified `-sha256` digest, and
   catalog/mount persistence across restart, are verified on a single-node
-  non-dev Vault (previously, undated); the remaining multi-node, HA-forwarding,
-  failover, and cross-node restart-recovery gates below stay unchecked
+  non-dev Vault (previously, undated); artifact distribution and per-node
+  artifact verification were completed on 2026-09-01, while the remaining
+  HA-forwarding, controlled failover, and cross-node restart-recovery gates below
+  stay unchecked
 - Full issue→use→renew→revoke smoke test passes through a real `vault server`
   plus registered plugin binary with required live PVE configuration
 - Stored config can be force-deleted and the cached PVE client is invalidated
@@ -1647,8 +1650,9 @@ engine therefore continues to send explicit `append=1` with `expire` +
 
 ### Production-adoption verification gates (operator-run)
 
-- [ ] Build one approved artifact, distribute it to every Vault node, and
-  verify identical digest, executable permissions, ownership, and path.
+- [x] Build one approved artifact, distribute it to every Vault node, and
+  verify identical digest, executable permissions, ownership, and path — completed
+  on 2026-09-01. Per-node verification passed for the distributed artifact.
 - [x] Register the plugin in the production catalog with the verified digest;
   verify catalog and mount persistence across restart. — Verified previously
   (undated) on a single-node non-dev Vault: catalog digest matched the recorded
@@ -1657,7 +1661,7 @@ engine therefore continues to send explicit `append=1` with `expire` +
   part of the gates above and below.
 - [ ] Verify standby-to-active forwarding before any PVE mutation, controlled
   failover, and issue/renew/revoke through the cluster address after failover.
-- [ ] Verify restart recovery for leases, WAL cleanup, PVE users/tokens,
+- [ ] Verify cross-node restart recovery for leases, WAL cleanup, PVE users/tokens,
   catalog state, mount state, and audit evidence across nodes.
 - [ ] On an approved disposable target, inject a failure between WAL creation
   and cleanup, then record rollback-manager evidence that the nonce-matched
