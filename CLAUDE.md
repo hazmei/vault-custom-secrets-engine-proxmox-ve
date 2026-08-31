@@ -37,13 +37,13 @@ Recorded validation (2026-08-20) against disposable PVE
 `server -dev` plugin auto-registration with
 `-dev-plugin-dir=./vault/plugins`, engine enablement, and the full real-Vault
 issue/use/renew/revoke lifecycle. The required positive authorization canary
-also passed. Production-style catalog registration with
-`vault plugin register -sha256=<hash>` was verified previously (undated) on a
-single-node non-dev Vault — the catalog digest matched the recorded artifact
-digest and the catalog entry and mount persisted across a Vault restart. That
-run covers one node only; multi-node artifact distribution, standby-to-active
-forwarding, failover, and cross-node restart recovery remain unverified, so do
-not describe the project as production-ready. Optional insufficient-privilege, direct-ACL,
+also passed. Production artifact distribution, per-node verification, catalog
+registration, standby-to-active forwarding, controlled failover, single-node
+restart recovery, and cross-node restart recovery remain operator-run
+verification requirements; no production evidence is currently recorded in this
+repository. Do not describe the project as production-ready.
+See `docs/IMPLEMENTATION_PLAN.md` for the canonical gates.
+Optional insufficient-privilege, direct-ACL,
 and negative-authorization canaries may be skipped only when their documented prerequisites
 are unset. The opt-in `TestAccPasswordLifecycle` additionally skips when the target is not
 the verified `pve-manager/9.2.14/a1480fa6b8d899cb` build — a property of the cluster, not an

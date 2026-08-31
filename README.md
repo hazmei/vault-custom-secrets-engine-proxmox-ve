@@ -48,13 +48,13 @@ prerequisite and ran because the target was the verified
 operator choice. Neither kind of skip is completed coverage. Evidence:
 `docs/PVE_PROBES.md`.
 
-Production-style catalog registration with
-`vault plugin register -sha256=<hash>` was verified previously (undated) on a
-single-node non-dev Vault, including a matching catalog digest and catalog/mount
-persistence across a Vault restart. Multi-node artifact distribution,
-standby-to-active forwarding, failover, and cross-node restart recovery remain
-unverified, so this project must not be treated as production-ready based on the
-validation above. Optional insufficient-privilege, direct-ACL, and
+Production artifact distribution, per-node verification, catalog registration,
+standby-to-active forwarding, controlled failover, single-node restart recovery,
+and cross-node restart recovery remain operator-run verification requirements;
+no production evidence is currently recorded in this repository. This project
+must not be treated as production-ready based on the validation above. See the
+[implementation plan](docs/IMPLEMENTATION_PLAN.md) for the canonical gates.
+Optional insufficient-privilege, direct-ACL, and
 negative-authorization canaries were skipped where their separately
 documented prerequisites were unset; those skips are not completed coverage. The
 standalone password lifecycle test is governed by the separate verified-build condition
@@ -461,10 +461,9 @@ the same one `scripts/verify-plugin-artifact.sh` names when `sha256sum` is
 unavailable; releases include darwin binaries, so operators verifying on macOS
 need it.
 
-Releases do not change the project's validation status: production-style
-catalog registration with `vault plugin register -sha256=<hash>` is verified for
-a single-node non-dev Vault only, the multi-node and HA gates remain unverified,
-and releases are marked as pre-releases by default.
+Releases do not change the project's validation status; see the [implementation
+plan](docs/IMPLEMENTATION_PLAN.md) for the current gates. Releases are marked as
+pre-releases by default.
 
 For local development, start Vault with the plugin directory. Vault
 auto-registers binaries found there, so no manual registration command is
@@ -547,12 +546,10 @@ fi
 For this production-style path, provide `VAULT_ADDR` and an authenticated
 `VAULT_TOKEN` for the target Vault server before running the CLI commands.
 
-The production catalog registration path was live-verified previously (undated)
-on a single-node non-dev Vault: the catalog entry's digest matched the recorded
-artifact digest, and the catalog entry and mount persisted across a Vault
-restart. The commands above are not evidence of multi-node artifact
-distribution, standby-to-active forwarding, failover, or cross-node restart
-recovery, which remain unverified.
+The commands above are an operator procedure, not recorded evidence. Use the
+[production verification procedure](docs/PRODUCTION_VERIFICATION.md) and the
+[implementation plan](docs/IMPLEMENTATION_PLAN.md) for the authoritative
+evidence requirements and remaining gates.
 
 ## Configuration Example
 

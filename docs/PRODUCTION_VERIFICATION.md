@@ -3,7 +3,7 @@
 This procedure is an operator-run verification of the Proxmox VE secrets engine
 on a production Vault cluster. It supplements the [README installation
 overview](../README.md#build-and-install); it does not replace the
-[architecture specification](ARCHITECTURE.md) or the recorded status in the
+[architecture specification](ARCHITECTURE.md) or the status and gates in the
 [implementation plan](IMPLEMENTATION_PLAN.md).
 
 The procedure is intentionally written as a checklist. Record results in the
@@ -34,14 +34,15 @@ full command output containing them.
   mount state. Stop if the target is not disposable for the PVE lifecycle
   portion or if cleanup cannot be guaranteed.
 
-This is a verification procedure, not a production-readiness claim. The
-repository's prior local `vault server -dev` test does **not** prove production
-catalog registration, persistence, HA forwarding, failover recovery, or
-filesystem behavior. A separate prior single-node non-dev run covered catalog
-registration with a matching digest and catalog/mount persistence across a
-restart, and nothing beyond that: HA forwarding, failover recovery, and
-multi-node filesystem distribution remain unproven. PVE lifecycle checks still require a safe disposable or
-explicitly approved target.
+This is a verification procedure, not a production-readiness claim. No
+production evidence is currently recorded in this repository. The prior local
+`vault server -dev` test does **not** prove production catalog registration,
+persistent storage, filesystem distribution/permissions, multi-node HA
+forwarding, controlled failover, or restart recovery. Production artifact
+distribution, per-node verification, catalog registration, standby-to-active
+forwarding, controlled failover, single-node restart recovery, and cross-node
+restart recovery remain operator-run verification requirements. PVE lifecycle
+checks still require a safe disposable or explicitly approved target.
 
 ## Prerequisites
 
@@ -146,6 +147,11 @@ provisioner token as high-impact, monitor its user/group mutations, and do
 not describe this setup as per-group isolation or risk-free least privilege.
 
 ## 1. Build and distribute one verified artifact
+
+Complete this section against the operator's own cluster. Record the node count
+and identities, artifact identity/commit, SHA-256 digest, target cluster, exact
+command or change ticket, ownership, mode, absolute plugin path, and evidence
+timezone. Do not mark this section complete from repository contents alone.
 
 Confirm the intended absolute `plugin_directory` on every Vault node before
 transferring the artifact; step 2 applies that path to the effective Vault
@@ -589,13 +595,15 @@ the plugin is missing on a node, the digest differs, or cleanup is incomplete.
 ## Limitations and non-goals
 
 - This document does not certify production readiness, a particular Vault
-  version, or a PVE cluster configuration. The repository's recorded
-  production-style registration status covers a single-node non-dev Vault only;
-  multi-node distribution, HA forwarding, failover, and cross-node restart
-  recovery remain unverified until an operator completes this procedure.
-- A local `vault server -dev` run with `-dev-plugin-dir` auto-registers plugins
-  and does not prove production catalog registration, persistent storage,
-  multi-node HA forwarding, failover, or filesystem distribution/permissions.
+  version, or a PVE cluster configuration. Production artifact distribution,
+  per-node verification, catalog registration, standby-to-active forwarding,
+  controlled failover, single-node restart recovery, and cross-node restart
+  recovery remain operator-run verification requirements; no production
+  evidence is currently recorded in this repository.
+- The local `vault server -dev` check described above auto-registers plugins
+  with `-dev-plugin-dir`; it does not prove production catalog registration,
+  persistent storage, filesystem distribution/permissions, multi-node HA
+  forwarding, failover, or restart recovery.
 - PVE lifecycle operations are destructive external mutations. Unit tests and
   local Vault tests do not prove production PVE behavior; use a safe disposable
   or explicitly approved target for issue/use/renew/revoke checks.
