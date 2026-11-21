@@ -48,15 +48,12 @@ prerequisite and ran because the target was the verified
 operator choice. Neither kind of skip is completed coverage. Evidence:
 `docs/PVE_PROBES.md`.
 
-Production artifact distribution, per-node verification, catalog registration,
-standby-to-active forwarding, controlled failover, single-node restart recovery,
-and cross-node restart recovery remain operator-run verification requirements;
-no production evidence is currently recorded in this repository. This project
-must not be treated as production-ready based on the validation above. See the
-[implementation plan](docs/IMPLEMENTATION_PLAN.md) for the canonical gates.
-Optional insufficient-privilege, direct-ACL, and
-negative-authorization canaries were skipped where their separately
-documented prerequisites were unset; those skips are not completed coverage. The
+No production evidence is currently recorded in this repository; the
+production-adoption gates in the [implementation plan](docs/IMPLEMENTATION_PLAN.md)
+all remain open. This project must not be treated as production-ready based on
+the validation above. Optional insufficient-privilege, direct-ACL, and
+negative-authorization canaries were skipped where their separately documented
+prerequisites were unset; those skips are not completed coverage. The
 standalone password lifecycle test is governed by the separate verified-build condition
 above.
 

@@ -1541,19 +1541,16 @@ not run by CI.
 disposable-target checks are complete; the remaining unchecked items are
 production-adoption verification gates, not implementation defects. `make build`,
 `make test`, and `make lint` passed, and the full real Vault-server lifecycle
-smoke test passed against the disposable
-`pve-manager/9.2.10/43df2e01f27a1a19` target. Development-mode registration
-through `-dev-plugin-dir=./vault/plugins` and enablement were verified.
+smoke test passed against the disposable `pve-manager/9.2.10/43df2e01f27a1a19`
+target. Development-mode registration through `-dev-plugin-dir=./vault/plugins`
+and enablement were verified.
 
 The prior undated single-node catalog-registration record is withdrawn: it was
 unsubstantiated and inadequately recorded. Production catalog registration must
 be rerun and recorded with the operator evidence required by the deferred gates
-below. Production artifact distribution, per-node verification, catalog
-registration, standby-to-active forwarding, controlled failover, single-node
-restart recovery, and cross-node restart recovery remain operator-run
-verification requirements; no production evidence is currently recorded in this
-repository. See the trackable deferred gates below.
-Therefore Phase 6 is not complete.
+below. The remaining production-adoption gates are likewise unverified; no
+production evidence is currently recorded in this repository. See the trackable
+deferred gates below. Therefore Phase 6 is not complete.
 
 The operator-facing production verification procedure is maintained in
 [`docs/PRODUCTION_VERIFICATION.md`](PRODUCTION_VERIFICATION.md). This
