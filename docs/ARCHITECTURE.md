@@ -90,9 +90,28 @@ groups**, which the operator (typically a cluster admin using
 # Create a custom VaultProvisioner role with User.Modify, Realm.AllocateUser, Sys.Audit
 pveum acl modify /access/groups --user vault-admin@pve --role VaultProvisioner --propagate 1
 pveum acl modify /access/realm/pve --user vault-admin@pve --role VaultProvisioner
+# libpve-access-control >= 9.2.1 (e.g. PVE 9.2.34): privsep=0 token creation for another user
+pveum role add VaultPermModify --privs Permissions.Modify
+pveum acl modify / --user vault-admin@pve --role VaultPermModify --propagate 0
 ```
 
 **IMPORTANT**: The `/access/groups` grant MUST be propagating (`--propagate 1`, which is PVE's default). The parent-path grant at `/access/groups` satisfies the renewal/revocation privilege check (which PVE checks at the parent) AND satisfies the creation per-group check at `/access/groups/<group>` ONLY via propagation. An operator who sets `--propagate 0` gets a broken partial config: user creation will 403 (per-group check unsatisfied) while renew/revoke still work — a confusing partial failure. Always use propagating grants for `/access/groups`.
+
+**Token creation on `libpve-access-control` >= 9.2.1** (observed on
+`pve-manager/9.2.34/05aac948d48572f4`, `docs/PVE_PROBES.md` Probe
+TOKEN-PERMS): `POST /access/users/{userid}/token/{tokenid}` with
+`privsep=0` for a user other than the caller now requires
+`Permissions.Modify` on `/` and `Realm.AllocateUser` on the user's realm;
+`User.Modify` on one of the user's groups is no longer sufficient, and an
+API token never counts as its owning user. Without the grant, token-mode
+issuance creates the user, passes the group read-back, then fails
+`CreateToken` with HTTP 403 and compensates by deleting the user. The check
+is on `/` itself, so a non-propagating grant is enough. `rotate-root`
+(`CreateToken` on the provisioner user, authenticated as a token) is
+inferred to need the same grant. Password mode mints no token and is not
+affected by this check, but remains gated to the verified 9.2.14 build.
+Config- and role-write validation do not check `Permissions.Modify`, so a
+missing grant surfaces only at first issuance.
 
 **Per-operation privilege-path asymmetry** (discovered in live testing):
 - User creation (`POST /access/users` with `groups=<group>`) checks `User.Modify` at the PER-GROUP path `/access/groups/<group>` AND `Realm.AllocateUser` at `/access/realm/<realm>`. A token scoped ONLY to `/access/groups/<group>` + `/access/realm/<realm>` (with NO grant at `/access` or `/access/groups` parent) successfully creates users already in the group.
@@ -956,6 +975,8 @@ Both routes reach the same privilege ceiling (any role bound to any group under 
 **Honest comparison to full-admin**: The engine token scoped to user/group administration (as described above) **cannot directly edit ACLs** (`Permissions.Modify` is not granted) and **cannot directly touch VMs, storage, or nodes** — but it IS cluster-wide user administration, one API call away from any role bound to any group. This is NOT "least privilege" in the compromise case; it is "scoped to user/group administration" with the blast radius bounded by what roles operators bind to groups. A full-admin token (`root@pam` or `PVEAdmin`-equivalent at `/`) additionally holds direct ACL and resource management permissions, a broader initial surface. The scoped-user-admin model avoids granting `Permissions.Modify` and direct resource roles, narrowing the blast radius in the non-compromise case. The group model is preferred over full-admin when operators can pre-create groups and want to avoid granting direct ACL/resource management permissions, but it does not achieve true least-privilege in the compromise case.
 
 **Partial containment recommendation**: Operators should keep `/access/groups` free of any group bound to admin-level roles at `/` (or other broad paths). The reachable privilege ceiling for a compromised engine token is bounded by exactly what operators bind to groups under `/access/groups`. This does not prevent the compromise, but limits the escalation target to the specific roles operators have explicitly bound to engine-managed groups, rather than cluster-wide admin. Naming the quieter escalation path (new user in privileged group) makes this containment recommendation land harder: the ONLY real bound on the compromise case is what operators bind to reachable groups, since the engine can freely place users into any of them using its normal workflow.
+
+**`libpve-access-control` >= 9.2.1 changes this model** (Probe TOKEN-PERMS). PVE closed the new-user route above at the token step: minting a `privsep=0` token for another user now requires `Permissions.Modify` on `/`. Token mode therefore only works if the engine token holds `Permissions.Modify` on `/`, and with it the token can edit any ACL on the cluster — including granting itself or any user `Administrator` directly, without going through a group. On these builds the "cannot directly edit ACLs" statement above no longer holds: treat the engine token as **equivalent to full cluster admin** for compromise purposes. The group containment recommendation still bounds the NON-compromise case, but no longer bounds the compromise case. Password mode avoids the token grant but is gated to the verified 9.2.14 build and has not been evaluated on 9.2.34.
 
 **Mitigation**: The admin token secret is the highest-value secret in the system; restrict the Vault policy on `<mount>/config` write/read to a small admin set. Monitor PVE audit logs for user creation in unexpected groups or modifications to the engine's own admin user.
 
