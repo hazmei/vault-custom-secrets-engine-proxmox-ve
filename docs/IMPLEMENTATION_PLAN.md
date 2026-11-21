@@ -1670,6 +1670,28 @@ These unchecked items are production-adoption verification gates, not
 implementation defects. The destructive failure-injection gate is operator-run
 evidence and should not make production adoption depend on a destructive test.
 
+### PVE 9.2.34 token-creation privilege change (22 November 2026)
+
+`libpve-access-control` 9.2.1 (seen on `pve-manager/9.2.34/05aac948d48572f4`)
+requires `Permissions.Modify` on `/` to create a `privsep=0` token for another
+user. Token-mode issuance failed with HTTP 403 at `CreateToken` until that
+grant was added; with it, issuance was observed working on an operator
+cluster. Evidence and the applied grant: `docs/PVE_PROBES.md` Probe
+TOKEN-PERMS. The security consequence (engine token ≈ full cluster admin) is
+recorded in `docs/ARCHITECTURE.md` Security Considerations. Follow-ups:
+
+- [ ] Run `make testacc` (including `TestAccRotateRoot`) against a disposable
+  9.2.34 target with the grant, to cover renewal, revocation, WAL rollback,
+  and the inferred `rotate-root` requirement.
+- [ ] Keep PVE's 403 message in `classifyPVEError` (wrap `ErrForbidden`
+  rather than discarding the body) so the missing path/privilege appears in
+  the Vault error.
+- [ ] Decide whether config-time validation should check `Permissions.Modify`
+  on `/` on builds that need it, so the failure surfaces at config write
+  instead of first issuance.
+- [ ] Evaluate whether password mode (no token, no `Permissions.Modify`)
+  should be verified on 9.2.34 as the lower-privilege alternative.
+
 ### Password Credential Support (IMPLEMENTED under a reduced scope)
 
 **Status (2026-08-29): IMPLEMENTED and complete within the shipped supported

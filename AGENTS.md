@@ -19,6 +19,8 @@ Instructions for AI coding agents working on this Vault secrets engine plugin.
 
 - **`privsep=0` on token creation is MANDATORY.** Proxmox defaults to `privsep=1`, which gives the token its own empty ACL = zero effective permissions (credential silently does nothing). With `privsep=0` the token inherits the synthetic user's ACL. Always send `privsep=0` explicitly on `POST /access/users/{userid}/token/{tokenid}`.
 
+- **From `libpve-access-control` 9.2.1 (observed on `pve-manager/9.2.34/05aac948d48572f4`), creating a `privsep=0` token for ANOTHER user requires `Permissions.Modify` on `/` plus `Realm.AllocateUser` on that user's realm.** `User.Modify` on the user's group is no longer enough, and an API token never counts as its owning user. Without the grant, user creation and the group read-back succeed and `CreateToken` returns HTTP 403 (`pveapi: forbidden`; the body is discarded by `classifyPVEError`). Fix: a dedicated `Permissions.Modify` role on `/` with `--propagate 0` (see Admin Token Privileges). This makes the engine token effectively cluster admin (it can rewrite any ACL) — see `docs/ARCHITECTURE.md` Security Considerations. `rotate-root` also mints a `privsep=0` token on the provisioner user and is inferred to need the same grant (not yet verified on 9.2.34). Evidence: `docs/PVE_PROBES.md` Probe TOKEN-PERMS.
+
 - **Config validation must call `GET /access/permissions`, not just `GET /version`.** `/version` only proves reachability/TLS; it does NOT prove the admin token has the required privileges. Parse the permissions tree at config-time to confirm `User.Modify` at `/access/groups` (parent path) and `Sys.Audit` on `/access/groups`, walking ancestor paths (a grant at `/access` with propagate=1 satisfies requirements for `/access/groups`). The realm-specific `Realm.AllocateUser` at `/access/realm/<realm>` is validated per-role at role-write time (since realm is a per-role field). Surface a 403 clearly.
 
 - **`creds/:role` is a Vault ReadOperation that MUTATES state** (provisions a new PVE user+token per call). Standard dynamic-secrets convention; don't "fix" it to a write.
@@ -92,7 +94,7 @@ Single `DELETE /access/users/{userid}` — cascades to token(s) + group membersh
 
 ## Admin (Root) Token Privileges
 
-Recommended least-privilege PVE role: `User.Modify`, `Realm.AllocateUser`, `Sys.Audit`, plus token management.
+Recommended least-privilege PVE role: `User.Modify`, `Realm.AllocateUser`, `Sys.Audit`, plus token management. On `libpve-access-control` >= 9.2.1 token mode additionally needs `Permissions.Modify` on `/` (see Critical Gotchas).
 
 **Required privilege scoping** (confirmed on PVE 9.2.10):
 - `User.Modify` on `/access/groups` (PARENT PATH) — required for user creation, renewal (PUT expire), and revocation
@@ -104,6 +106,9 @@ Recommended least-privilege PVE role: `User.Modify`, `Realm.AllocateUser`, `Sys.
 # Create a custom VaultProvisioner role with User.Modify, Realm.AllocateUser, Sys.Audit
 pveum acl modify /access/groups --user vault-admin@pve --role VaultProvisioner --propagate 1
 pveum acl modify /access/realm/pve --user vault-admin@pve --role VaultProvisioner
+# libpve-access-control >= 9.2.1 (e.g. PVE 9.2.34): privsep=0 token creation for another user
+pveum role add VaultPermModify --privs Permissions.Modify
+pveum acl modify / --user vault-admin@pve --role VaultPermModify --propagate 0
 ```
 
 **IMPORTANT**: The `/access/groups` grant MUST be propagating (`--propagate 1`, PVE default). The parent-path grant satisfies renewal/revocation (parent check) AND creation's per-group check at `/access/groups/<group>` ONLY via propagation. An operator who sets `--propagate 0` gets a broken partial config: creation 403s (per-group check unsatisfied) while renew/revoke still work. Always use propagating grants.

@@ -368,6 +368,12 @@ pveum acl modify /access/groups \
   --user <PROVISIONER>@<REALM> --role VaultProvisioner --propagate 1
 pveum acl modify /access/realm/<REALM> \
   --user <PROVISIONER>@<REALM> --role VaultProvisioner --propagate 0
+# libpve-access-control >= 9.2.1 only (e.g. PVE 9.2.34): privsep=0 token
+# creation for another user needs Permissions.Modify on /. Effectively
+# cluster admin; see ARCHITECTURE.md Security Considerations.
+pveum role add VaultPermModify --privs Permissions.Modify
+pveum acl modify / \
+  --user <PROVISIONER>@<REALM> --role VaultPermModify --propagate 0
 # vault-production-readers must already exist and have only the approved
 # PVEAuditor role/path binding documented in section 5.1.
 pveum user token add <PROVISIONER>@<REALM> vault \

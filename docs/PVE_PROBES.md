@@ -1342,6 +1342,7 @@ engine depends on, its confirmation status, and the code area affected.
 | GROUPADD | Correct group-membership API + read-back assertion | groups= is single-CSV pve-groupid-list, user-side only, silently drops unresolvable w/ HTTP 200; verify via read-back | Y — CONFIRMED (single-call works; read-back via users.groups or groups.members) | pveapi CreateUser + GetUser; creds read-back; renewal re-send | Renewal re-sends expire+groups+enable+append=1; store group in InternalData; read-back assert on issue |
 | RENEWAL-PRESERVE | Renewal PUT re-sending groups preserves membership | `groups` field unchanged (present) after PUT expire+groups+enable+append=1 on a confirmed-member user | Y — CONFIRMED (renewal re-sending groups preserves membership; Probe RENEWAL-PRESERVE) | secret_token.go renew / read-back assert | Wording promoted to confirmed across AGENTS/README/ARCHITECTURE |
 | COMMENT | `comment` round-trips byte-for-byte through POST/GET (P2) AND the engine's renewal PUT (append=1, comment omitted) leaves comment intact (P1) | (a) GET returns comment byte-for-byte; (b) renewal PUT (expire+groups+enable+append=1, comment omitted) does NOT clear comment | Y — BOTH CONFIRMED on PVE 9.2.10 (Probe COMMENT, 19 Aug 2026). Renewal PUT (append=1, comment omitted) preserves comment — CONFIRMED; general full-replace semantics for comment NOT tested (no append=0 run) and not relied upon. The `vault-wal:` marker is durable for the full account lifetime under the engine's actual call shape. | pveapi walRollbackUser (ownership check); operator note in ARCHITECTURE.md | Validates WAL nonce-ownership scheme end-to-end. No code change needed. UpdateUser correctly omits comment and always sends append=1. |
+| TOKEN-PERMS | `POST /access/users/{userid}/token/{tokenid}` with `privsep=0` for ANOTHER user | `User.Modify` on one of the user's groups is enough (true on 9.2.10 and 9.2.14) | N on `pve-manager/9.2.34/05aac948d48572f4` (libpve-access-control ≥ 9.2.1) — HTTP 403 until the engine token also held `Permissions.Modify` on `/` (Probe TOKEN-PERMS, 22 Nov 2026) | `pveapi` `CreateToken`; `path_rotate_root` (inferred) | Grant `Permissions.Modify` on `/` (non-propagating); threat model updated in ARCHITECTURE.md |
 
 ## Spike Conclusion
 
@@ -1477,3 +1478,58 @@ This dated scope decision does not rewrite the historical run statuses above:
 `BLOCKED/FAILED`, `BLOCKED/INCOMPLETE`, and other recorded outcomes remain as
 reported. The narrower supported `pve` surface is a later decision, not evidence
 that the broader PAM or password-rotation proposal was completed.
+
+## Probe TOKEN-PERMS — `privsep=0` token creation needs `Permissions.Modify` on `/` (22 November 2026)
+
+**Target**: operator PVE cluster after an in-place upgrade to
+`pve-manager/9.2.34/05aac948d48572f4` (`libpve-access-control 9.2.3`,
+`libpve-common-perl 9.2.13`), single node. This is operator-observed
+evidence from a live cluster, not a disposable-target acceptance run and not
+production-adoption evidence.
+
+**Symptom**: token-mode `creds/:role` failed with HTTP 500 from Vault:
+
+```text
+proxmox: creds/<role>: CreateToken for "<prefix>-<role>-<random>@pve": pveapi: CreateToken userid="<prefix>-<role>-<random>@pve" tokenid="lease": pveapi: forbidden
+```
+
+`POST /access/users`, the group read-back, and the comment check all
+succeeded; only `POST /access/users/{userid}/token/lease` (`privsep=0`)
+returned HTTP 403. The engine's compensation deleted the synthetic user (no
+`vault-<role>-*` user remained). The 403 body was not captured because
+`classifyPVEError` maps HTTP 403 to `ErrForbidden` and discards the body.
+
+**Engine token state at failure** (read via `GET /access/acl` and
+`GET /access/permissions?userid=<token>&path=...`): `VaultProvisioner`
+(`User.Modify Realm.AllocateUser Sys.Audit`) on `/access/groups`
+(propagate 1) and `/access/realm/pve` (propagate 0); token `privsep=0`; no
+privileges on `/`. This matches the documented 9.2.10/9.2.14 setup. No
+datacenter token policy was set in `GET /cluster/options`, so the 9.2.2
+token-policy change (fix #7805) does not apply.
+
+**Cause** (node changelog, `GET /nodes/<node>/apt/changelog?name=libpve-access-control`,
+entry 9.2.1): creating an API token without privilege separation for
+another user, regenerating another user's token secret, or any update that
+leaves another user's token without privilege separation now requires
+`Realm.AllocateUser` on that user's realm AND `Permissions.Modify` on `/`.
+Previously `User.Modify` on one of the user's groups was enough. API tokens
+never count as their owning user for this check.
+
+**Fix applied and observed working**:
+
+```bash
+pveum role add VaultPermModify --privs Permissions.Modify
+pveum acl modify / --users vault-provisioner@pve --roles VaultPermModify --propagate 0
+```
+
+After the grant, token-mode issuance succeeded: a new
+`vault-<role>-<random>@pve` user in the role's group with a `lease`
+token (`privsep=0`) was observed.
+
+**Not verified on 9.2.34**: renewal, revocation, WAL rollback, the
+authorization canaries, `TestAccRotateRoot` (`rotate-root` mints a
+`privsep=0` token on the provisioner user while authenticated as a token,
+which by the changelog wording counts as "another user", so it is
+inferred to need the same grant), and password mode (still gated to
+`9.2.14/a1480fa6b8d899cb`; the engine refuses it on this build).
+

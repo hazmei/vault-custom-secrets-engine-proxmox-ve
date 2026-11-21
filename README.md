@@ -124,6 +124,9 @@ The engine requires a Proxmox API token with privileges to manage users, tokens,
   # Create a custom VaultProvisioner role with User.Modify, Realm.AllocateUser, Sys.Audit
   pveum acl modify /access/groups --user vault-admin@pve --role VaultProvisioner --propagate 1
   pveum acl modify /access/realm/pve --user vault-admin@pve --role VaultProvisioner
+  # libpve-access-control >= 9.2.1 (e.g. PVE 9.2.34): privsep=0 token creation for another user
+  pveum role add VaultPermModify --privs Permissions.Modify
+  pveum acl modify / --user vault-admin@pve --role VaultPermModify --propagate 0
   ```
   **IMPORTANT**: The `/access/groups` grant MUST be propagating (`--propagate 1`, which is PVE's default). The parent-path grant at `/access/groups` satisfies the renewal/revocation privilege check (which PVE checks at the parent) AND satisfies the creation per-group check at `/access/groups/<group>` ONLY via propagation. An operator who sets `--propagate 0` gets a broken partial config: user creation will 403 (per-group check unsatisfied) while renew/revoke still work — a confusing partial failure. Always use propagating grants for `/access/groups`.
 
@@ -200,7 +203,24 @@ pveum acl modify /access/realm/pve \
   --user vault-provisioner@pve \
   --role VaultProvisioner \
   --propagate 1
+
+# libpve-access-control >= 9.2.1 (e.g. PVE 9.2.34) only: creating a
+# privsep=0 token for another user requires Permissions.Modify on /.
+# This makes the provisioner effectively cluster admin; see the warning below.
+pveum role add VaultPermModify --privs Permissions.Modify
+pveum acl modify / \
+  --user vault-provisioner@pve \
+  --role VaultPermModify \
+  --propagate 0
 ```
+
+> **PVE 9.2.34 / `libpve-access-control` >= 9.2.1:** without the
+> `Permissions.Modify` grant on `/`, token-mode `creds/:role` fails with
+> `CreateToken ... pveapi: forbidden` after the user is created (the engine
+> deletes the user again). With the grant, the provisioner token can rewrite
+> any ACL, so its compromise is equivalent to full cluster admin. See
+> `docs/ARCHITECTURE.md` Security Considerations and `docs/PVE_PROBES.md`
+> Probe TOKEN-PERMS.
 
 The required privilege paths are exact:
 
@@ -210,6 +230,9 @@ The required privilege paths are exact:
   partial setup: renewal and revocation may work while issuance fails with 403.
 - `Sys.Audit` on `/access/groups` for role-write group-existence validation.
 - `Realm.AllocateUser` on `/access/realm/<realm>`, validated for each Vault role.
+- `Permissions.Modify` on `/` (non-propagating is enough) on
+  `libpve-access-control` >= 9.2.1, required for `privsep=0` token creation.
+  Not validated at config or role write; a missing grant fails at issuance.
 
 #### 2. Pre-create groups and bind their roles
 

@@ -61,6 +61,13 @@ The exact 9.2.14 `GET /version` response body remains an evidence gap, although
 the runtime exact-build gate is enforced.
 See `docs/PVE_PROBES.md`.
 
+Operator-observed (2026-11-22) on `pve-manager/9.2.34/05aac948d48572f4`:
+`libpve-access-control` >= 9.2.1 requires `Permissions.Modify` on `/` for
+`privsep=0` token creation, so token-mode issuance 403s at `CreateToken`
+without that grant; with it, issuance works. This makes the engine token
+effectively cluster admin. Only issuance was observed; `make testacc` has not
+been run on 9.2.34. See `docs/PVE_PROBES.md` Probe TOKEN-PERMS.
+
 The Phase 2 deferred review backlog (DR-1 … DR-6) is fully resolved; no deferred
 review items remain. This does NOT change the production-readiness position
 above — the remaining multi-node/HA production adoption gates and the optional
