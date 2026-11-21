@@ -147,7 +147,7 @@ not describe this setup as per-group isolation or risk-free least privilege.
 Complete this section against the operator's own cluster. Record the node count
 and identities, artifact identity/commit, SHA-256 digest, target cluster, exact
 command or change ticket, ownership, mode, absolute plugin path, and evidence
-timezone.
+timezone. Repository contents and build output are not evidence.
 
 Confirm the intended absolute `plugin_directory` on every Vault node before
 transferring the artifact; step 2 applies that path to the effective Vault
