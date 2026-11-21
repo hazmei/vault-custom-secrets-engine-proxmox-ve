@@ -38,7 +38,7 @@ Recorded validation (2026-08-20) against disposable PVE
 `-dev-plugin-dir=./vault/plugins`, engine enablement, and the full real-Vault
 issue/use/renew/revoke lifecycle. The required positive authorization canary
 also passed. No production evidence is currently recorded in this repository;
-the production-adoption gates in `docs/IMPLEMENTATION_PLAN.md` all remain open.
+the production-adoption gates are tracked in `docs/IMPLEMENTATION_PLAN.md`.
 Do not describe the project as production-ready. Optional insufficient-privilege,
 direct-ACL, and negative-authorization canaries may be skipped only when their
 documented prerequisites are unset. The opt-in `TestAccPasswordLifecycle` additionally skips when the target is not

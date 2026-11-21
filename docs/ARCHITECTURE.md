@@ -47,9 +47,8 @@ paths, mandatory propagation, one-time token secret handling, manual token
 rotation, and stranded-lease warnings. Both are distinct from the disposable
 acceptance setup. The documented production-style Vault installation commands
 must not be treated as evidence for any production-adoption gate. This document
-remains
-authoritative for design and security behavior; the implementation plan remains
-authoritative for current status.
+remains authoritative for design and security behavior; the implementation plan
+remains authoritative for current status.
 
 ## Configuration
 

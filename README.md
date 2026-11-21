@@ -49,9 +49,9 @@ operator choice. Neither kind of skip is completed coverage. Evidence:
 `docs/PVE_PROBES.md`.
 
 No production evidence is currently recorded in this repository; the
-production-adoption gates in the [implementation plan](docs/IMPLEMENTATION_PLAN.md)
-all remain open. This project must not be treated as production-ready based on
-the validation above. Optional insufficient-privilege, direct-ACL, and
+production-adoption gates are tracked in the
+[implementation plan](docs/IMPLEMENTATION_PLAN.md). This project must not be
+treated as production-ready based on the validation above. Optional insufficient-privilege, direct-ACL, and
 negative-authorization canaries were skipped where their separately documented
 prerequisites were unset; those skips are not completed coverage. The
 standalone password lifecycle test is governed by the separate verified-build condition

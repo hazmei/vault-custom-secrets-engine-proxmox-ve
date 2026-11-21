@@ -147,7 +147,7 @@ not describe this setup as per-group isolation or risk-free least privilege.
 Complete this section against the operator's own cluster. Record the node count
 and identities, artifact identity/commit, SHA-256 digest, target cluster, exact
 command or change ticket, ownership, mode, absolute plugin path, and evidence
-timezone. Do not mark this section complete from repository contents alone.
+timezone.
 
 Confirm the intended absolute `plugin_directory` on every Vault node before
 transferring the artifact; step 2 applies that path to the effective Vault
@@ -592,8 +592,8 @@ the plugin is missing on a node, the digest differs, or cleanup is incomplete.
 
 - This document does not certify production readiness, a particular Vault
   version, or a PVE cluster configuration. No production evidence is currently
-  recorded in this repository; the production-adoption gates in the
-  [implementation plan](IMPLEMENTATION_PLAN.md) remain open.
+  recorded in this repository; the production-adoption gates are tracked in
+  the [implementation plan](IMPLEMENTATION_PLAN.md).
 - A local `vault server -dev` run with `-dev-plugin-dir` auto-registers plugins
   and does not prove production catalog registration, persistent storage,
   filesystem distribution/permissions, multi-node HA forwarding, failover, or
